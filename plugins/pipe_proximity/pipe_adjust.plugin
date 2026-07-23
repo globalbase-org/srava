@@ -1,0 +1,8 @@
+# pipe_adjust: 距離調整コントローラ(pipe::adjust)。pipe_proximity と同一 bin の 2 つ目の op。
+# 自己接近する設計を一様クリアランス gap >= dMin を満たすよう制御点を動かす(端点固定可)。
+# $PIG_PLUGIN_PATH か ~/.config/srava/plugins/ に置くと pipe_adjust() が使える。
+# bin は実際のインストール先に書き換える(テストは CMake が絶対パスで生成)。
+op   = pipe_adjust
+bin  = /usr/local/libexec/srava/plugins/pipe_proximity_agent
+out  = value
+args = 1..6

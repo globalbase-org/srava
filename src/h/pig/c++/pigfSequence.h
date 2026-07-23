@@ -1,0 +1,7 @@
+
+#ifndef ___pigfSequence_cpp_H___
+#define ___pigfSequence_cpp_H___
+
+#include	"_ts2/c++/pigfSequence_pb.h"
+
+#endif

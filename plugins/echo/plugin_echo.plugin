@@ -1,0 +1,7 @@
+# echo プラグイン: 疎通確認用。引数をそのまま返す。
+# このファイルを $PIG_PLUGIN_PATH か ~/.config/srava/plugins/ に置くと plugin_echo() が使える。
+# bin は実際のインストール先に書き換える(テストは CMake が absolute path で生成)。
+op   = plugin_echo
+bin  = /usr/local/libexec/srava/plugins/echo_agent
+out  = value
+args = 1..

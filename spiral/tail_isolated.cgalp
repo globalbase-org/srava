@@ -1,0 +1,48 @@
+include "std/math.cgalp";
+
+var pitch = 1;
+var N = 2;
+var ctr = 8;
+var a = 100.0;
+var r = 25;
+var d = 8;
+var m = 0.2/1000;
+var ctr_r = (a+r+d)/cos(PI/ctr);
+var sp = linspace(PI/ctr,2*PI*N+PI/ctr,N*ctr);
+var x = cos(sp)*ctr_r;
+var y = sin(sp)*ctr_r;
+var z = linspace(-r/ctr,-2*r*N-r/ctr,N*ctr);
+var NN = 10;
+var tail = [linspace(a+r+d,a+r+d,NN), linspace(a,10*a,NN), linspace(-2*r*N,-2*r*N-100,NN)];
+var pp = concat([[a+r+d,0,0]],transpose([x,y,z]),transpose(tail));
+var center = [[0,0,100],[0,0,0],[0,0,-100]];
+var params = { fixEnds: 1, dMin : d, maxIter : 1500 };
+
+// full converged shape (with mountain)
+var b1 = [ {ctrl: pp, radius: [r,m], movable: 1}, {ctrl: center, radius: a, movable: 0} ];
+var adj1 = pipe_scene_adjust(b1,0,params);
+var b2 = [ {ctrl: adj1.ctrl, radius: [r,m], movable: 1}, {ctrl: center, radius: a, movable: 0} ];
+var adj2 = pipe_scene_adjust(b2,0,params);
+var cc = adj2.ctrl;
+
+var zlist = \(arr){ map(arr, \(p){ p[2]; }); };
+
+// extract tail control points idx 16..26 (11 pts)
+var tctrl = map(range2(16,27), \(ii){ cc[ii]; });
+print("TAIL_IN_Z", zlist(tctrl));
+
+// is the isolated tail self-contacting? (gap <= d)
+var th = pipe_proximity(tctrl, [r,m], d);
+print("TAIL_SELF_HITS", length(th));
+
+// pure-geometric relax of the tail alone (no spiral, no center), fixed ends
+var tparams = { fixEnds: 1, dMin: d, maxIter: 1500 };
+var tadj = pipe_adjust(tctrl, [r,m], tparams);
+print("TAIL_OUT_Z", zlist(tadj.ctrl));
+print("TAIL_iters", tadj.iters, "energy", tadj.energy);
+
+// also try with negligible dMin (strictly wLen+wBend, no clearance penalty)
+var tparams2 = { fixEnds: 1, dMin: 0.01, maxIter: 1500 };
+var tadj2 = pipe_adjust(tctrl, [r,m], tparams2);
+print("TAIL_OUT2_Z", zlist(tadj2.ctrl));
+print("TAIL2_iters", tadj2.iters, "energy", tadj2.energy);

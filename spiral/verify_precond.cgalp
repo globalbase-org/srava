@@ -1,0 +1,29 @@
+include "std/math.cgalp";
+
+var pitch = 1; var N = 2; var ctr = 8; var a = 100.0; var r = 25; var d = 8; var m = 0.2/1000;
+var ctr_r = (a+r+d)/cos(PI/ctr);
+var sp = linspace(PI/ctr,2*PI*N+PI/ctr,N*ctr);
+var x = cos(sp)*ctr_r; var y = sin(sp)*ctr_r; var z = linspace(-r/ctr,-2*r*N-r/ctr,N*ctr);
+var NN = 10;
+var tail = [linspace(a+r+d,a+r+d,NN), linspace(a,10*a,NN), linspace(-2*r*N,-2*r*N-100,NN)];
+var pp = concat([[a+r+d,0,0]],transpose([x,y,z]),transpose(tail));
+var center = [[0,0,100],[0,0,0],[0,0,-100]];
+var zlist = \(arr){ map(arr, \(p){ p[2]; }); };
+var bodies = \(cc){ [ {ctrl: cc, radius: [r,m], movable: 1}, {ctrl: center, radius: a, movable: 0} ]; };
+
+// baseline: no polish, no precond  (should show the terminal arch)
+var p0 = { fixEnds: 1, dMin : d, maxIter : 1500, polish: 0, precond: 0 };
+var a1 = pipe_scene_adjust(bodies(pp), 0, p0);
+var a2 = pipe_scene_adjust(bodies(a1.ctrl), 0, p0);
+print("BASE_Z   ", zlist(a2.ctrl));
+print("BASE clearViol", a2.clearViolation);
+
+// precond on, polish off  (does the tail track better, less/no arch?)
+var p1 = { fixEnds: 1, dMin : d, maxIter : 1500, polish: 0, precond: 1 };
+var b1 = pipe_scene_adjust(bodies(pp), 0, p1);
+var b2 = pipe_scene_adjust(bodies(b1.ctrl), 0, p1);
+print("PRECOND_Z", zlist(b2.ctrl));
+print("PRECOND clearViol", b2.clearViolation);
+print("PRECOND start c1.z", b2.ctrl[1][2]);
+var nh = pipe_scene_proximity(bodies(b2.ctrl), d);
+print("PRECOND scene viol-hits", length(nh));

@@ -1,0 +1,14 @@
+build*/
+*.o
+*.a
+core
+__pycache__/
+*.pyc
+docs/_site/
+
+# 生成エクスポート(CM4writer 等の export 出力。コミットしない)
+*.stl
+*.off
+*.ply
+*.obj
+*.svg

@@ -1,0 +1,7 @@
+# pipe_scene_proximity: N 体近接検出(findSceneProximities)。pipe_proximity と同一 bin の op。
+# bodies=[{ctrl,radius,movable},...] を渡し、可動 body の自己接近 + 異 body 間交差を返す。
+# bin は実際のインストール先に書き換える(テストは CMake が絶対パスで生成)。
+op   = pipe_scene_proximity
+bin  = /usr/local/libexec/srava/plugins/pipe_proximity_agent
+out  = value
+args = 1..2

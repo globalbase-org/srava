@@ -1,0 +1,28 @@
+include "std/math.cgalp";
+
+var pitch = 1; var N = 2; var ctr = 8; var a = 100.0; var r = 25; var d = 8; var m = 0.2/1000;
+var ctr_r = (a+r+d)/cos(PI/ctr);
+var sp = linspace(PI/ctr,2*PI*N+PI/ctr,N*ctr);
+var x = cos(sp)*ctr_r; var y = sin(sp)*ctr_r; var z = linspace(-r/ctr,-2*r*N-r/ctr,N*ctr);
+var NN = 10;
+// deep pull: tail end z = -600, center bottom -500 (user's case)
+var tail = [linspace(a+r+d,a+r+d,NN), linspace(a,10*a,NN), linspace(-2*r*N,-2*r*N-500,NN)];
+var pp = concat([[a+r+d,0,0]],transpose([x,y,z]),transpose(tail));
+var center = [[0,0,100],[0,0,0],[0,0,-500]];
+
+var run = \(prm){
+    var bodies = [ {ctrl: pp, radius: [r,m], movable: 1}, {ctrl: center, radius: a, movable: 0} ];
+    pipe_scene_adjust(bodies, 0, prm);
+};
+var rep = \(label, res){
+    var cc = res.ctrl;
+    print(label, " c1.z=", cc[1][2], " coilBot idx16.z=", cc[16][2],
+          " clearViol=", res.clearViolation);
+};
+
+// polish off to see pure energy response of the coil
+rep("wLen=1   wPen=1e3 (default)", run({fixEnds:1,dMin:d,maxIter:1500,polish:0}));
+rep("wLen=20  wPen=1e3         ", run({fixEnds:1,dMin:d,maxIter:1500,polish:0, wLen:20}));
+rep("wLen=100 wPen=1e3         ", run({fixEnds:1,dMin:d,maxIter:1500,polish:0, wLen:100}));
+rep("wLen=1   wPen=50          ", run({fixEnds:1,dMin:d,maxIter:1500,polish:0, wPenalty:50}));
+rep("wLen=100 wPen=50          ", run({fixEnds:1,dMin:d,maxIter:1500,polish:0, wLen:100, wPenalty:50}));

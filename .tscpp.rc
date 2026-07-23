@@ -1,0 +1,4 @@
+{
+	base => 'src/h',
+	generated => '_ts2/c++'
+}

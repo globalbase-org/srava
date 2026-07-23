@@ -1,0 +1,34 @@
+include "std/math.cgalp";
+
+var pitch = 1; var N = 2; var ctr = 8; var a = 100.0; var r = 25; var d = 8; var m = 0.2/1000;
+var ctr_r = (a+r+d)/cos(PI/ctr);
+var sp = linspace(PI/ctr,2*PI*N+PI/ctr,N*ctr);
+var x = cos(sp)*ctr_r; var y = sin(sp)*ctr_r; var z = linspace(-r/ctr,-2*r*N-r/ctr,N*ctr);
+var NN = 10;
+var tail = [linspace(a+r+d,a+r+d,NN), linspace(a,10*a,NN), linspace(-2*r*N,-2*r*N-500,NN)];
+var pp = concat([[a+r+d,0,0]],transpose([x,y,z]),transpose(tail));
+var center = [[0,0,100],[0,0,0],[0,0,-500]];
+var bodies = [ {ctrl: pp, radius: [r,m], movable: 1}, {ctrl: center, radius: a, movable: 0} ];
+var params = { fixEnds: 1, dMin : d, maxIter : 1500, polish: 1 };
+var pp_adj = pipe_scene_adjust(bodies, 0, params);
+var cc = pp_adj.ctrl;
+
+print("npts", length(cc), " idx16(coil bottom)=", cc[16], " idx17/18(tail root)=", cc[17], cc[18]);
+
+// self contacts near coil bottom (gap <= 2d). show those whose either point is z < -110 (coil bottom / tail)
+var hits = pipe_proximity(cc, [r,m], 2*d);
+print("self hits (gap<=2d):", length(hits));
+var i;
+for (i = 0; i < length(hits); i = i + 1) {
+    var pa = hits[i][1]; var pb = hits[i][2];
+    if (pa[2] < -110 || pb[2] < -110) {
+        print("  LOWHIT gap", hits[i][0], "pA", pa, "pB", pb);
+    }
+}
+// scene contacts (vs center) on the ADJUSTED geometry
+var sc = pipe_scene_proximity([ {ctrl: cc, radius:[r,m], movable:1}, {ctrl: center, radius:a, movable:0} ], 2*d);
+print("scene hits(gap<=2d):", length(sc));
+for (i = 0; i < length(sc); i = i + 1) {
+    var qa = sc[i][1]; var qb = sc[i][2];
+    if (qa[2] < -110 || qb[2] < -110) { print("  SCN_LOW gap", sc[i][0], "pA", qa, "pB", qb); }
+}

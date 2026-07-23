@@ -1,0 +1,7 @@
+# pipe_scene_adjust: N 体距離調整(adjustScene)。pipe_proximity と同一 bin の op。
+# bodies, movableIdx, params(ハッシュ) を渡し、可動 body を固定 body 群を避けて gap>=dMin へ。
+# bin は実際のインストール先に書き換える(テストは CMake が絶対パスで生成)。
+op   = pipe_scene_adjust
+bin  = /usr/local/libexec/srava/plugins/pipe_proximity_agent
+out  = value
+args = 2..3

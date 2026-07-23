@@ -1,0 +1,27 @@
+include "std/math.cgalp";
+
+// cd ソルバの前方 / 後方スイープ比較（同一初期形状・同一パラメータ）。
+var pitch = 1; var N = 2; var ctr = 8; var a = 100.0; var r = 25; var d = 8; var m = 0.2/1000;
+var ctr_r = (a+r+d)/cos(PI/ctr);
+var sp = linspace(PI/ctr,2*PI*N+PI/ctr,N*ctr);
+var x = cos(sp)*ctr_r; var y = sin(sp)*ctr_r; var z = linspace(-r/ctr,-2*r*N-r/ctr,N*ctr);
+var NN = 10;
+
+var run = \(rev){
+    var tail = [linspace(a+r+d,a+r+d,NN), linspace(a,10*a,NN), linspace(-2*r*N,-2*r*N-500,NN)];
+    var pp = concat([[a+r+d,0,0]],transpose([x,y,z]),transpose(tail));
+    var center = [[0,0,100],[0,0,0],[0,0,-500.0]];
+    var bodies = [ {ctrl: pp, radius: [r,m], movable: 1}, {ctrl: center, radius: a, movable: 0} ];
+    var params = { fixEnds: 1, dMin : d, maxIter : 6, solver: "cd", sweep: rev };
+    pipe_scene_adjust(bodies, 0, params);
+};
+
+var report = \(label, res){
+    var cc = res.ctrl;
+    print(label, " iters=", res.iters, " energy=", res.energy,
+          " clearViol=", res.clearViolation,
+          " c1.z=", cc[1][2], " idx16.z=", cc[16][2]);
+};
+
+report("forward (根 c0 から)", run("forward"));
+report("reverse (尾側から) ", run("reverse"));
