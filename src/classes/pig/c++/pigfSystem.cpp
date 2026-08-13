@@ -7,6 +7,7 @@
  * 文として置けば pigfSequence の評価順で export 等より先に走る → 出力ディレクトリ作成(mkdir -p)等に。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"ts2/c++/ts2System.h"
 #include	"ts2/c++/stdEvent.h"
@@ -105,6 +106,16 @@ TS_STATE(ACT_pigfSystem_WAIT)
 		front->set_result(thNEW(pigDataInteger,((INTEGER64)ev->msg_int)));
 		return rDO|FIN_START;
 	}
+	/* ★ destroy の作法 (ひさ指示 2026-08-06): 子へ destroy() を送り、TSE_RETURN が
+	 * 戻るのを **待ち続ける**。即 FIN しない。destroy された側が自分の終了処理をするので、
+	 * こちらは戻ってくる内容に関知しない。 */
+	if ( is_destroyed() ) {
+		/* sys を destroy して子プロセスの終了 (TSE_RETURN) を待つ。ここで即 FIN すると
+		 * 子プロセスが孤児になる。 */
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] system: 子プロセスへ destroy\n");
+		if ( sys.is_notNull() ) { sys->destroy(); return 0; }
+		return rDO|FIN_START;
+	}
 	return 0;
 }
 
@@ -115,7 +126,6 @@ TS_STATE(FIN_START)
 
 TS_STATE(FIN_pigfSystem_START)
 {
-	if ( sys.is_notNull() )
-		sys->destroy();
+	if ( sys.is_notNull() ) { sys->destroy(); sys = thNULL; }   /* §9: fd を持つ子を確実に手放す */
 	return rDO|FIN_pigfFunction_START;
 }

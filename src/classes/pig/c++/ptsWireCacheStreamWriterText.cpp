@@ -6,6 +6,7 @@
  * 基底が streamhdr / TSE_ASSERT / W_END 番兵 / TSE_RETURN を担う。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"_ts2/c++/ptsWireCacheStreamWriterText_.h"
 
 CLASS_TINYSTATE(pig/c++/ptsWireCacheStreamWriterText,pig/c++/ptsWireCacheStreamWriter)

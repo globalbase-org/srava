@@ -16,6 +16,7 @@
  *          親の W_END で pipe FIN(TSE_RETURN)→ FIN。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigwire.h"
 #include	"pig/c++/ptsWirePipe.h"
 #include	"pig/c++/ptsWirePacket.h"

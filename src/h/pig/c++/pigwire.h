@@ -22,11 +22,15 @@ enum {
   C_OP         = 1,   /* 演算子選択 + arg_count(u32) */
   C_ARG_PATH   = 2,   /* [arg_index(u32)][入力キャッシュのパス] */
   C_ARG_INLINE = 3,   /* [arg_index(u32)][スカラ/パラメタ srava 文法テキスト] */
-  C_ARG_END    = 4,   /* 全引数送信完了 */
-  A_SAVE_BEGIN = 5,   /* 保存開始(+パス)。pipeline トリガ。データ本文相乗り可 */
+  C_ARG_END    = 4,   /* 全引数送信完了 + 目標キャッシュパス(planner が必ず指定。欠落は agent 側 A_ERROR) */
+  A_SAVE_BEGIN = 5,   /* 保存開始。pipeline トリガ。★payload は「値なら serialize テキスト /
+                       *   ストリーム系(mesh 等)なら空」= **パスは載らない**。よって planner は
+                       *   空を見たら自分が pl_write_end で渡した outCache を返す(照合はできない) */
   A_SAVE_DONE  = 6,   /* 保存完了(ファイルに W_END を書いた) */
   A_ERROR      = 7,   /* エラー(payload=メッセージ) */
   A_BYE        = 8,   /* 正常終了通知(END_NORMAL の検知点) */
+  C_ARG_DATA   = 9,   /* ★ Internal 専用(ワイヤに乗らない): 引数 pigData 直渡し(#3406 4.3。
+                       *   PATH/INLINE の弁別が消えた形。ptsMediatorPacket の type にのみ現れる) */
 
   /* データプレーン (pigCacheStream: キャッシュファイル本体) */
   D_META       = 64,  /* メタ(repr_type で分岐) */
@@ -34,6 +38,13 @@ enum {
   D_TEXT       = 66,  /* データキャッシュ本文(srava 文法テキスト) */
   D_REF        = 67   /* 参照レコード(入力/出力) */
 };
+
+/* 値キャッシュの D_META 形式タグ = "TEXT" (WriterText が書き ReaderText の METADATA gate が検証する対)。
+ * 値か型付きかの file 判別はこの 4CC で行う — 型レジストリ/codec 表は per-binary に偏るので
+ * 判別には使えない (agent process は他 module の型を登録しないが file は読めることがある)。 */
+static inline int wire_tag_is_text(const unsigned char t[4]) {
+  return t[0]=='T' && t[1]=='E' && t[2]=='X' && t[3]=='T';
+}
 
 /* マジック: バイト列で 'P','W','I','G'。LE u32 で 0x47495750 */
 static const uint32_t WIRE_MAGIC   = 0x47495750u;

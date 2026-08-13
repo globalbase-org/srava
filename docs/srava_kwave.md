@@ -93,7 +93,8 @@ kspaceFirstOrder-CUDA -i input.h5 -o output.h5      # GPU 版
 
 ## ツールの所在と依存
 
-- srava: `export_vox`（ビルドに HDF5 が必要 = `find_package(HDF5)`）。
+- srava: `export_vox` は **`cgal.so` モジュールが提供**（`-DSRAVA_MODULE_CGAL=ON`・既定 ON）。
+  加えてビルドに **HDF5 が必要**（`find_package(HDF5)`）。→ [モジュールリファレンス §cgal.so](srava_module_reference.html#cgal)
 - Python: `srava2kwave/{mesh2vox.py, vox2input.py, pngio.py}`。依存は **numpy + h5py のみ**
   （voxelize も PNG も自前 = trimesh/scipy/matplotlib 不要）。リポジトリの `srava2kwave/` に同梱、
   `cmake --install` で `$PREFIX/share/srava/srava2kwave/` へコピーされる（**サンプル**であり、手元の

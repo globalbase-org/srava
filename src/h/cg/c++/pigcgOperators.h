@@ -13,7 +13,7 @@
 #include	"pig/c++/pigData.h"   /* 基底 pigDataOperator / pigInfo / sPtr / copy_to */
 
 /* export(x) — ルート観測点。継続("delayed".promise)を実値まで解決して result へ(get_int 等が
- * agent 計算の完了を待てるようにする)。書き出し agent op 自体は pigDataFunction<pigfSravaAgent>。 */
+ * agent 計算の完了を待てるようにする)。書き出し agent op 自体は pigDataFunction<pigfModuleAgent>。 */
 class pigcgOperatorExport : public pigDataOperator {
 public:
   pigcgOperatorExport(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}

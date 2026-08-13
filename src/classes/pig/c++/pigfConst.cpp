@@ -4,6 +4,7 @@
  * compact すると、caller は preprocess で yield → pigfConst 終了(TSE_DESTROY)で再開 → 42 を得る。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfConst_.h"
 

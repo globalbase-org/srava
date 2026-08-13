@@ -6,7 +6,7 @@
  *   1.2.1 起動時スイープ : CACHE_DIR を舐め「W_END 番兵なし かつ writer_pid not live」の
  *                          死体キャッシュを削除(前回のハードクラッシュ残骸の保険掃除)。
  *   1.2.2 パージング     : 【スタブ】手組みツリー union(box(2,2,2), box(1,1,3)) を
- *                          pigDataFunction<pigfSravaAgent> で構築(実 lemonc++ は 2.3)。
+ *                          pigDataFunction<pigfModuleAgent> で構築(実 lemonc++ は 2.3)。
  *   1.2.3 最適化(可変ソート): 後回し(正しさには不要)。
  *   1.2.4 評価           : tree->compact()。継続 ("delayed" . promise) を解決し最終値を得る。
  *                          is_error → stderr + exit 1 / それ以外(mesh は cache ハンドル)→ exit 0。
@@ -14,15 +14,15 @@
  *                          used 追跡は ptsApplication の dedup list 実装後 = 将来)。
  *   1.2.6 exit_code      : ctor で渡された int* へ書込み(main のローカル)。
  *
- * env: get_env() で CACHE_DIR 入りの pigEnvironment を返す。compact の helper(pigfSravaAgent)は
+ * env: get_env() で CACHE_DIR 入りの pigEnvironment を返す。compact の helper(pigfModuleAgent)は
  *   caller=本プランナーを実態親に取り、この env から CACHE_DIR を引く。
- * agent パス: pigfSravaAgent が getenv("SRAVA_AGENT") で実エージェント srava_agent を起動。
+ * agent パス: pigfModuleAgent が getenv("SRAVA_AGENT") で実エージェント srava_agent を起動。
  */
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"   /* 基底(プランナープロセスの実態元祖) */
 #include	"ts2/c++/tsApplication.h"    /* ctor の parent 型 sPtr<tsApplication> */
 #include	"pig/c++/pigData.h"
-#include	"pig/c++/pigPluginRegistry.h"   /* プラグイン op レジストリ(起動時 load) */
+#include	"pig/c++/pigModuleRegistry.h"   /* 既定カーネル = priority 最大 (K6・Phase2-5) */
 #include	"cg/c++/pigcgOperators.h"   /* export/export_async/flush 演算子(srava I/O シンク・pigcg 命名) */
 #include	"pig/c++/pigfFunction.h"    /* pigDataFunction<pigfPrintAsync>(print_async チェーン) */
 #include	"pig/c++/pigfAsync.h"       /* async 文の統一 helper(body 直列 + sync 発行順チェーン) */
@@ -214,7 +214,7 @@ TS_END_INTERFACE
 
 
 cgptsPlanner_::cgptsPlanner_(TS_ARGS0)
-        : ptsApplication_(parent),
+        : ptsApplication_(parent, PIG_MODLOAD_SEARCH),   /* ★ #3427 ③: モジュールは基底 INI が探索路ロード */
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
@@ -279,7 +279,7 @@ void pigcgOperatorExport::_start() {
   if (args.length() == 0) { result = thNEW(pigDataNull, ()); return; }
   sPtr<pigData> a = args[0];
   if (a->is_error()) { result = a; return; }
-  if (a->car()->get_str()->cmp("delayed") == 0)
+  if (pig_is_delayed(a))
     result = a->cdr()->cdr();   /* 継続の実値(結果。"begin" 段を飛ばす) */
   else
     result = a;
@@ -360,9 +360,10 @@ void pigcgOperatorFlush::_start() {
 
 TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の後にここで初期化 */
 {
-	/* プラグイン op レジストリをマニフェストから読む(parse より前・冪等)。parser が登録 op 名を
-	 * 受理し、pigfPluginAgent が起動バイナリを引けるようにする。 */
-	pigplugin_registry_load();
+	/* ★ #3427 ③: srava 言語の VALUE パーサを app 所有レジストリへ登録 (旧: cgptsLemonParser.cpp の
+	 *   静的初期化がグローバルスロットへ自己登録)。この planner を持つ実行体 = 言語パーサを持つ実行体。 */
+	if ( module_registry != thNULL )
+		module_registry->vparser.register_parser("srava", &cg_mk_value_parser);
 
 	/* CACHE_DIR を決定(env SRAVA_CACHE_DIR、未定義なら既定 $PWD/tmp = カレントディレクトリ配下)。
 	 * pigfAgent はこの env=CACHE_DIR を引いてキャッシュパスを作る。 */
@@ -382,6 +383,15 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 	 * 未設定なら空文字 = 即削除(従来既定)。解釈は終了時 parse_cache_retain。 */
 	const char *cr = ::getenv("SRAVA_CACHE_RETAIN");
 	env->def_var(thNEW(stdString,("CACHE_RETAIN")), thNEW(pigDataString,((cr != 0) ? cr : "")));
+	/* ★ EXIT_CODE: プロセスの終了コードを **明示指定** する予約変数 (2026-08-11 ひさ設計)。
+	 * `EXIT_CODE = 3;` と代入すると終了コードが 3 になる。CACHE_DIR/CACHE_RETAIN と同じ
+	 * 「事前定義 + 代入で上書き」の idiom で、副作用が終了コードだけに閉じる (評価は最後まで走る)。
+	 * 即時終了したい場合は組込 exit(n) を使う。既定 0 = 成功 (POSIX 慣行)。
+	 * 反映は CLEANUP。**エラー終了時はエラーコード (1 / 128+signum) が優先** する。 */
+	env->def_var(thNEW(stdString,("EXIT_CODE")), thNEW(pigDataInteger,((INTEGER64)0)));
+	/* ★ .so 化 Phase 4c: 言語変数 DEFAULT_OUTPUT と env SRAVA_DEFAULT_OUTPUT を撤去した。
+	 *   既定カーネルは registry の priority 最大 (default_module_name・既定 cgal)。
+	 *   切替は `module("manifold.so", {priority: N})` / 個別指定は `cast("manifold", …)` (docs §2.4)。 */
 	/* ARGV: 起動時コマンドライン引数(スクリプト後の argv[2..])の文字列配列。事前定義の読み取り変数。
 	 * 例: `srava model.sra a b c` → ARGV = ["a","b","c"]。未指定なら空配列 []。 */
 	{
@@ -442,7 +452,16 @@ TS_STATE(ACT_cgptsPlanner_PARSE)
 		 * 純静的パス(評価=dispatch を起こさない)。a|||b と b|||a が同一キャッシュキーに。 */
 		if ( tree != thNULL )
 			tree->normalize();
+		if ( is_destroyed() )
+			return rDO|FIN_START;   /* 撤収中: 評価には進まない */
 		return rDO|ACT_cgptsPlanner_EVAL;
+	}
+	/* ★ destroy の作法 (ひさ指示 2026-08-06): 子へ destroy() を送り、TSE_RETURN が
+	 * 戻るのを **待ち続ける**。即 FIN しない。destroy された側が自分の終了処理をするので、
+	 * こちらは戻ってくる内容に関知しない。 */
+	if ( is_destroyed() ) {
+		if ( parser.is_notNull() ) { parser->destroy(); return 0; }
+		return rDO|FIN_START;
 	}
 	return 0;
 }
@@ -457,6 +476,13 @@ TS_STATE(ACT_cgptsPlanner_VALUE)
 		                     * Windows/Cygwin はパイプ時 stdout フルバッファなので、ここで
 		                     * flush しないと value= が終了時に失われる(srava_value_roundtrip)。 */
 		(*exitCodeOut) = v->is_error() ? 1 : 0;
+		return rDO|FIN_START;
+	}
+	/* ★ destroy の作法 (ひさ指示 2026-08-06): 子へ destroy() を送り、TSE_RETURN が
+	 * 戻るのを **待ち続ける**。即 FIN しない。destroy された側が自分の終了処理をするので、
+	 * こちらは戻ってくる内容に関知しない。 */
+	if ( is_destroyed() ) {
+		if ( parser.is_notNull() ) { parser->destroy(); return 0; }
 		return rDO|FIN_START;
 	}
 	return 0;
@@ -477,7 +503,16 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 			sPtr<pigDataNull> isNull = sPtr<pigDataNull>::d_cast(mv);
 			if ( ! isNull.is_notNull() )           /* メッセージあり(null でない) */
 				::fprintf(stderr, "[srava] exit: %s\n", mv->get_str()->get_str());
+			/* ★ 終了コードは 0 固定でなく **予約変数 EXIT_CODE** を見る (2026-08-11)。
+			 * `EXIT_CODE = 2; exit "中断";` で 2 を返せる。未設定なら既定 0 のまま = 従来どおり。
+			 * 実際の反映は CLEANUP の EXIT_CODE 処理が行う (ここは 0 を置くだけ)。 */
 			(*exitCodeOut) = 0;
+			/* ★ 全体を終了させるのは planner の役目 (ひさ設計 2026-08-11)。pigDataControl を
+			 * 受け取ったら `tree->destroy()` で「もう要らない」を式木の上流へ知らせる
+			 * (pigData::destroy = 遅延ノードが helper を destroy し委譲先へ再帰)。
+			 * pigfAgent は別途 SHOULD_ABORT/WAITAGENTS 経路でも畳まれるので重複するが、
+			 * agent 以外の helper (pigfSystem 等) はこの経路でしか止まらない。 */
+			tree->destroy();
 			return rDO|ACT_cgptsPlanner_WAITAGENTS;
 		}
 		show_error(tree->get_str()->get_str());
@@ -490,7 +525,12 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 		if ( pe.is_notNull() && pe->is_fatal() && get_agentError() == thNULL )
 			set_agentError(thNEW(pigDataError,("aborted: fatal error")));
 	} else {
-		(*exitCodeOut) = (int)tree->get_int();   /* mesh 結果は cache ハンドル → 0 */
+		/* ★ 2026-08-11 修正: ここで **スクリプトの結果値を終了コードにしていた** のは不具合。
+		 * 数値結果は値がそのまま漏れ (300 → exit 44 / 256 → exit 0)、文字列など非数値では
+		 * get_int() が不定値を返し **同一入力で毎回変わる** (実測: print("DONE") だけの
+		 * スクリプトで 160/32/32/224/96/160)。旧 7/24 版は 0 を返していたので退行だった。
+		 * 成功 = 0 (POSIX 慣行) に戻す。明示指定は予約変数 EXIT_CODE (CLEANUP で反映)。 */
+		(*exitCodeOut) = 0;
 	}
 	return rDO|ACT_cgptsPlanner_WAITAGENTS;
 }
@@ -501,6 +541,7 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
  * 起こし役は最後の pigfAgent の FIN(agent_leave→wakeup)。 */
 TS_STATE(ACT_cgptsPlanner_WAITAGENTS)
 {
+	if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] planner WAITAGENTS count=%d\n", agent_count());
 	/* 待機中に終了系シグナル → まだ未集約なら set_agentError して in-flight agent を撤収させる。 */
 	if ( sig_abort_flag && get_agentError() == thNULL )
 		return rDO|ACT_cgptsPlanner_INTERRUPT;
@@ -587,6 +628,24 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 	int async_err = async_error_total();   /* flush()+drain の累積(async に統一) */
 
 	int had_error = ( ae != thNULL ) || eval_error || ( async_err > 0 );
+
+	/* ★ 予約変数 EXIT_CODE の反映 (2026-08-11)。プログラムが `EXIT_CODE = n;` で明示した値を
+	 * 終了コードにする。エラー終了時は下の分岐が 1 / INTERRUPT の 128+signum を立てるので、
+	 * **エラーコードが優先** (成功時の明示指定という位置づけ)。
+	 * 範囲外は **警告して 0-255 にクランプ** する。無言で切り詰めるのは、まさにこの修正で潰した
+	 * 「結果値が黙って exit に漏れる」不具合と同じ轍なので避ける。 */
+	if ( ! had_error && env.is_notNull() ) {
+		sPtr<pigData> ecv = env->get_var(thNEW(stdString,("EXIT_CODE")));
+		if ( ecv.is_notNull() && ! ecv->is_error() ) {
+			INTEGER64 ec = ecv->get_int();
+			if ( ec < 0 || ec > 255 ) {
+				::fprintf(stderr, "[srava] warning: EXIT_CODE=%lld は範囲外 (0-255) → %d に丸めました\n",
+				          (long long)ec, ( ec < 0 ) ? 0 : 255);
+				ec = ( ec < 0 ) ? 0 : 255;
+			}
+			(*exitCodeOut) = (int)ec;
+		}
+	}
 	if ( ae != thNULL ) {
 		/* eval_error 済み(EVAL で実エラーを表示済み)なら、ここで撤収トリガの内部マーカ
 		 * ("aborted: fatal error")を二重表示しない。SIGINT 等(eval_error 無し)は表示する。 */
@@ -600,7 +659,9 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 			(*exitCodeOut) = 1;
 	} else {
 		/* デバッグ表示(単体実行テストの assert 点)。全 agent 完了済みなのでキャッシュは完成
-		 * (一発読みで足りる)。tree(=export)の解決値はキャッシュハンドル。 */
+		 * (一発読みで足りる)。tree(=最終文)の解決値はキャッシュハンドルとは限らない —
+		 * export/export_vox が out_cache=0 (#3406, 2026-07-30 メモ) になり成功/失敗の値を
+		 * 返すようになったため、非キャッシュ値も完走マーカーとして出す。 */
 		sPtr<pigData> v = tree->compact();
 		if ( v->is_cache() ) {
 			const char *path = v->get_str()->get_str();
@@ -609,6 +670,8 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 				::printf("[srava] result cache=%s nv=%u nf=%u\n", path, nv, nf);
 			else
 				::printf("[srava] result cache=%s (counts unavailable)\n", path);
+		} else if ( ! v->is_error() ) {
+			::printf("[srava] result value=%s\n", v->serialize()->get_str());
 		}
 	}
 	/* usedCaches(ptsApplication 登録簿)に載らない完了キャッシュ + 死体を削除。
@@ -676,11 +739,15 @@ TS_STATE(FIN_START)
 
 	/* tsSignal は tsSignalCore の fwIO をイベントループに登録したまま生かす。明示的に destroy しないと
 	 * 全状態が終わってもループが終了せずプロセスが残り続ける。3 ハンドラとも閉じる。 */
-	if ( sig_int.is_notNull() )
-		sig_int->destroy();
-	if ( sig_term.is_notNull() )
-		sig_term->destroy();
-	if ( sig_hup.is_notNull() )
-		sig_hup->destroy();
+	if ( sig_int.is_notNull() )  { sig_int->destroy();  sig_int  = thNULL; }
+	if ( sig_term.is_notNull() ) { sig_term->destroy(); sig_term = thNULL; }
+	if ( sig_hup.is_notNull() )  { sig_hup->destroy();  sig_hup  = thNULL; }
+	/* ★ §9: 終了時点で手放す (tree = プログラム木全体・env = 束縛環境が大物)。 */
+	parser   = thNULL;
+	tree     = thNULL;
+	env      = thNULL;
+	syncTail = thNULL;
+	cacheDir = thNULL;
+	srcName  = thNULL;
 	return rDO|FIN_ptsApplication_START;
 }

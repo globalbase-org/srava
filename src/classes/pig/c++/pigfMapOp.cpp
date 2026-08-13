@@ -14,8 +14,9 @@
  * reduce しない(形を保つ)。まとめたいなら union(配列)。各要素は遅延=並列。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
-#include	"cg/c++/pigfSravaAgent.h"
+#include	"pig/c++/pigfModuleAgent.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/pigfMapOp_.h"
 
@@ -55,11 +56,11 @@ pigfMapOp_::pigfMapOp_(TS_ARGS0)
     TS_CPARGS0
 }
 
-/* 単一 op ノード(従来形)を作る: pigDataFunction<pigfSravaAgent>(op_name, args)。 */
+/* 単一 op ノード(従来形)を作る: pigDataFunction<pigfModuleAgent>(op_name, args)。 */
 static sPtr<pigData>
 mk_single(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& a, int n)
 {
-	sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+	sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 	for ( int i = 0 ; i < n ; ++i )
 		f->pushArg(a[i]);
 	f->set_op_name(op);
@@ -87,7 +88,7 @@ TS_STATE(ACT_START)
 	for ( int i = 0 ; i < n && i < 8 ; ++i ) {
 		sPtr<pigData> v = args[i]->compact();
 		if ( v->is_error() ) { front->set_result(v); return rDO|FIN_START; }
-		sPtr<pigDataArray> arr = sPtr<pigDataArray>::d_cast(v);
+		sPtr<pigDataArray> arr = v->obt_array();
 		int isCont = 0;
 		if ( arr.is_notNull() ) {
 			if ( i == 0 ) {
@@ -95,7 +96,7 @@ TS_STATE(ACT_START)
 			} else if ( arr->length() > 0 ) {
 				/* param 役: 要素[0]が配列なら zip コンテナ(ネスト)、数値なら leaf(=ベクトル) */
 				sPtr<pigData> e0 = arr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->compact();
-				if ( sPtr<pigDataArray>::d_cast(e0).is_notNull() )
+				if ( e0->obt_array().is_notNull() )
 					isCont = 1;
 			}
 		}
@@ -125,7 +126,14 @@ TS_STATE(ACT_START)
 			else
 				per[i] = args[i];
 		}
-		out->push(mk_single(op, info, per, n));
+		/* ★ push はエラー検査版。要素は transform 系 mesh op = 継続 pair を同期で返す値ノードなので
+		 * ここで compact ゲートに引っ掛かって yield することはない(pigfMap と違い worker 不要)。
+		 * 上流由来のエラーが来たときだけ、配列に埋もれさせず map-op 全体のエラーにする。 */
+		sPtr<pigData> e = out->push(mk_single(op, info, per, n));
+		if ( e.is_notNull() ) {
+			front->set_result(e);
+			return rDO|FIN_START;
+		}
 	}
 	front->set_result(out);
 	return rDO|FIN_START;

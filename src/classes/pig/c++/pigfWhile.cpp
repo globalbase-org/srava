@@ -12,6 +12,7 @@
  * 返り値: 最後の周回の body 値(0 周なら null)。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfWhile_.h"
 
@@ -38,6 +39,7 @@ protected:
 	sPtr<pigData>	curCond;    /* この周回の clone 済み cond(thNULL=未 clone) */
 	sPtr<pigData>	curBody;    /* この周回の clone 済み body(thNULL=未 clone) */
 	sPtr<pigData>	last;       /* 最後の周回の body 値 */
+	int		loopDestroyed;   /* clone した cond/body へ destroy を転送済み(1 回だけ) */
 	int		iterCount;
 	TS_DEFARGS
 };
@@ -60,6 +62,7 @@ pigfWhile_::pigfWhile_(TS_ARGS0)
 {
     TS_CPARGS0
     iterCount = 0;
+    loopDestroyed = 0;
 }
 
 
@@ -79,6 +82,15 @@ TS_STATE(INI_pigfFunction_START)
 /* 条件評価。真なら BODY、偽なら DONE。 */
 TS_STATE(ACT_START)
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。curCond/curBody は **自分が clone した持ち物** なので
+	 * 呼び元の AST からは辿れない = ここで明示的に送る。無条件巡回はしない (args は front の持ち物)。
+	 * 1 度だけ送り通常経路へ落とす (destroy された子は front をエラー解決するので compact が拾う)。 */
+	if ( is_destroyed() && ! loopDestroyed ) {
+		loopDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] while: destroy 転送\n");
+		if ( curCond.is_notNull() ) curCond->destroy();
+		if ( curBody.is_notNull() ) curBody->destroy();
+	}
 	if ( args.length() < 2 ) {                 /* 文法上ありえないが安全に */
 		front->set_result(thNEW(pigDataNull,()));
 		return rDO|FIN_START;
@@ -98,6 +110,15 @@ TS_STATE(ACT_START)
 /* body 評価 → 次周へ。 */
 TS_STATE(ACT_pigfWhile_BODY)
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。curCond/curBody は **自分が clone した持ち物** なので
+	 * 呼び元の AST からは辿れない = ここで明示的に送る。無条件巡回はしない (args は front の持ち物)。
+	 * 1 度だけ送り通常経路へ落とす (destroy された子は front をエラー解決するので compact が拾う)。 */
+	if ( is_destroyed() && ! loopDestroyed ) {
+		loopDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] while: destroy 転送\n");
+		if ( curCond.is_notNull() ) curCond->destroy();
+		if ( curBody.is_notNull() ) curBody->destroy();
+	}
 	if ( curBody == thNULL ) {
 		if ( ++iterCount > PIGF_WHILE_MAX_ITER ) {
 			front->set_result(thNEW(pigDataError,("while: iteration limit exceeded",thNULL)));

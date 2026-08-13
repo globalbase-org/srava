@@ -13,6 +13,7 @@
  * compact は async で yield しうる(sException で本状態が再走)。prepared フラグで①〜④を一度だけ。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfApply_.h"
 
@@ -35,6 +36,8 @@ private:
 protected:
 	sPtr<pigData>		bodyClone;    /* clone した body(新鮮ノード) */
 	sPtr<pigEnvironment>	applyEnv;     /* params 束縛 + parent=captured env */
+	int			bodyDestroyed;   /* bodyClone へ destroy を転送済み(1 回だけ) */
+	int			argsDestroyed;   /* 実引数 args[1..] へ destroy を転送済み(1 回だけ) */
 	TS_DEFARGS
 };
 
@@ -56,6 +59,8 @@ pigfApply_::pigfApply_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
+    bodyDestroyed = 0;
+    argsDestroyed = 0;
 }
 
 
@@ -73,6 +78,16 @@ TS_STATE(INI_pigfFunction_START)
  * ne/clone は callee 解決後にしか作られないので一度きり(prepared フラグ不要)。 */
 TS_STATE(ACT_START)
 {
+	/* ★ destroy の転送 (ひさ指摘 2026-08-11)。実引数 args[1..] は **この状態の is_error()/compact が
+	 * 評価を開始させている** (call-by-value・呼び出し側 env で eager 評価) = 駆動しているのは自分。
+	 * よって撤収要求が来たらここから畳む (未起動なら no-op)。args[0] は callee で lambda 値に
+	 * 解決されるだけなので触らない。1 度だけ送り通常経路へ落とす。 */
+	if ( is_destroyed() && ! argsDestroyed ) {
+		argsDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] apply args: destroy 転送\n");
+		for ( int di = 1 ; di < args.length() ; ++di )
+			if ( args[di].is_notNull() ) args[di]->destroy();
+	}
 	if ( args.length() < 1 ) {                 /* 文法上ありえないが安全に */
 		front->set_result(thNEW(pigDataError,("apply: no callee",thNULL,1)));
 		return rDO|FIN_START;
@@ -118,6 +133,18 @@ TS_STATE(ACT_START)
  * env/bodyClone はメンバなので保たれ、compact はメモ化で前進する(prepared 不要)。 */
 TS_STATE(ACT_pigfApply_DO)
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。`bodyClone` は **自分だけが持つ複製** なので、
+	 * 呼び元の AST (planner の tree) からは辿れない = ここで明示的に送るしかない。
+	 * 無条件巡回はしない (destroy の順序は所有者が知っている): args は front の持ち物なので触らず、
+	 * clone した body だけを畳む。★**1 度だけ**送って通常経路へ落とす — destroy された子は
+	 * FIN_pigfFunction_START が front をエラー解決するので、下の compact がそれを拾って
+	 * この apply も畳まれる (毎回送って return 0 にすると永久に先へ進めない)。 */
+	if ( is_destroyed() && ! bodyDestroyed ) {
+		bodyDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] apply: destroy 転送\n");
+		if ( bodyClone.is_notNull() )
+			bodyClone->destroy();
+	}
 	env = applyEnv;
 	sPtr<pigData> r = bodyClone->compact();
 	int ck = r->control_kind();

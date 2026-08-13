@@ -8,7 +8,9 @@
  * トークン定数は生成ヘッダ ns_sravaParser.h(VAR/IDENT/INT/.../OR3/AND3/SUB3 等)。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigValueParser.h"   /* 値パーサレジストリへの自己登録(#3406, 2026-07-31 メモ 3.2) */
 #include	"ts2/c++/stdEvent.h"
 #include	"ns_sravaParser.h"          /* トークン #define(生成物。build/gen を include path に) */
 #include	"_ts2/c++/cgptsLemonParser_.h"
@@ -495,5 +497,32 @@ TS_STATE(FIN_START)
 		result = thNEW(pigDataError,(thNEW(stdString,("empty parse result"))));
 	/* 親へ結果ツリー(または pigDataError)を返す。 */
 	parent->eventHandler(thNEW(stdEvent,(TSE_RETURN, ifThis, result)));
+	/* ★ §9: result は直上でイベント (msg_obj) に載せた = 受け手が参照を持つので手放せる
+	 * (push 型。ptsCalcBody の get_result() = pull 型とは違い、FIN 後に読まれるメンバは無い)。 */
+	result  = thNULL;
+	input   = thNULL;
+	dd      = thNULL;
+	srcName = thNULL;
+	cur_buf = thNULL;
+	{ for ( int i = 0 ; i < 16 ; i++ )  { incName[i] = thNULL; incBuf[i] = thNULL; } }
+	{ for ( int i = 0 ; i < 128 ; i++ ) incDone[i] = thNULL; }
 	return rDO|FIN_ptsObject_START;
+}
+
+
+/*******************************************
+	値パーサレジストリへの自己登録
+	(#3406, 2026-07-31 メモ 3.2 = 案 B)
+********************************************/
+
+/* pig 層 (ptsDataCache 等) が「テキスト → pigData」を言語非依存に起動するための入口。
+ * VALUE モード(mode=1)固定。srcName=thNULL は "<source>" 表示になる(キャッシュ本文なので
+ * ソース位置は無い)。この TU がリンクされている実行体 = srava 言語パーサを持つ実行体、
+ * という対応は変わらないが、★ #3427 ③ で登録は「静的初期化でグローバルスロットへ」から
+ * **app の INI が自分のレジストリへ** (cgptsPlanner INI / テスト fixture) に変わった。
+ * この関数はそのための公開生成子 (cgptsLemonParser.h で extern 宣言)。 */
+sPtr<tinyState>
+cg_mk_value_parser(sPtr<ptsObject> parent, sPtr<stdString> text)
+{
+	return sPtr<tinyState>::d_cast(thNEW(cgptsLemonParser,(parent, text, 1, thNULL)));
 }

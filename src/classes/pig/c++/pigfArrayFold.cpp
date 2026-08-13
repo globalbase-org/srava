@@ -7,15 +7,16 @@
  * パース時は配列長が動的で木を組めないが、**評価時**なら配列が具体値になっており木を作れる。
  *
  * 振る舞い(front->get_op_name() = union/intersection/combine):
- *   - 引数が配列(n 要素): 均衡二分木 pigDataFunction<pigfSravaAgent>(op) を作り front を木の根に解決。
+ *   - 引数が配列(n 要素): 均衡二分木 pigDataFunction<pigfModuleAgent>(op) を作り front を木の根に解決。
  *     根を compact すると葉(独立な二項 op)が並列に走る(mesh-DAG 継続のパイプライン)。
  *   - 引数が単一 mesh: union(m)=m。そのまま返す。
  *   - 空コレクション []: {}(fold 単位元)を返す。
  * 木の葉/中間は通常の mesh op なので、dedup・キャッシュ・[] 単位元短絡も従来どおり効く。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
-#include	"cg/c++/pigfSravaAgent.h"   /* 木の節点 = pigDataFunction<pigfSravaAgent> */
+#include	"pig/c++/pigfModuleAgent.h"   /* 木の節点 = pigDataFunction<pigfModuleAgent> */
 #include	"ts2/c++/stdString.h"
 #include	"ts2/c++/sArray.h"
 #include	"_ts2/c++/pigfArrayFold_.h"
@@ -65,7 +66,7 @@ build_tree(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, in
 	if ( hi - lo == 1 )
 		return e[lo];
 	int mid = (lo + hi) / 2;
-	sPtr<pigDataFunction<pigfSravaAgent> > n = thNEW(pigDataFunction<pigfSravaAgent>,());
+	sPtr<pigDataFunction<pigfModuleAgent> > n = thNEW(pigDataFunction<pigfModuleAgent>,());
 	n->pushArg(build_tree(op, info, e, lo, mid));
 	n->pushArg(build_tree(op, info, e, mid, hi));
 	n->set_op_name(op);
@@ -95,7 +96,7 @@ TS_STATE(ACT_START)
 	sPtr<pigData> av = args[0]->compact();
 	if ( av->is_error() ) { front->set_result(av); return rDO|FIN_START; }
 
-	sPtr<pigDataArray> arr = sPtr<pigDataArray>::d_cast(av);
+	sPtr<pigDataArray> arr = av->obt_array();
 	if ( ! arr.is_notNull() ) {        /* 配列でない = 単一 mesh: union(m)=m */
 		front->set_result(args[0]);
 		return rDO|FIN_START;

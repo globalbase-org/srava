@@ -21,6 +21,7 @@
  *   TSREPRO_CMD    (既定 /bin/true) : 起動する子コマンド
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"ts2/c++/ts2System.h"
 #include	"ts2/c++/ts2IO.h"
 #include	"ts2/c++/stdInterval.h"

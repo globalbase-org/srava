@@ -11,6 +11,7 @@
  * プロセス分離テストは pigfAgent 実装後。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigwire.h"
 #include	"pig/c++/ptsWirePipe.h"
 #include	"pig/c++/ptsWirePacket.h"

@@ -9,6 +9,7 @@
  * 前の文の def_var を後の文の変数参照が見られる。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfSequence_.h"
 
@@ -30,6 +31,7 @@ public:
 private:
 protected:
 	int		seqIdx;
+	int		seqDestroyed;   /* 評価中の文へ destroy を転送済み(1 回だけ) */
 	sPtr<pigData>	seqLast;
 	TS_DEFARGS
 };
@@ -52,6 +54,7 @@ pigfSequence_::pigfSequence_(TS_ARGS0)
 {
     TS_CPARGS0
     seqIdx = 0;
+    seqDestroyed = 0;
 }
 
 
@@ -72,6 +75,16 @@ TS_STATE(INI_pigfFunction_START)
 
 TS_STATE(ACT_START)   /* 文を 1 つずつ順に評価(async 文は yield → 本状態が再走。seqIdx で再開) */
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。無条件巡回はせず、**いま評価中の文だけ**を畳む
+	 * (未着手の文は走っていないので触る必要がない = 順序は所有者が知っている)。1 度だけ送り、
+	 * あとは通常経路へ落とす — destroy された子は FIN_pigfFunction_START が front をエラー解決
+	 * するので、下の is_error() がそれを拾ってこの sequence も打ち切られる。 */
+	if ( is_destroyed() && ! seqDestroyed ) {
+		seqDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] sequence: destroy 転送\n");
+		if ( seqIdx < args.length() && args[seqIdx].is_notNull() )
+			args[seqIdx]->destroy();
+	}
 	if ( seqIdx >= args.length() )
 		return rDO|ACT_pigfSequence_DONE;
 	/* is_error() が compact を兼ねる(遅延ノードは is_error()=compact()->is_error())。yield しうるが

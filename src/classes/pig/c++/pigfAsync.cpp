@@ -22,6 +22,7 @@
  *   ACT_DONE  : front->set_result(err があれば err / 無ければ null)→ 次 async の prev 待ちを解放。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfAsync_.h"
 
@@ -44,6 +45,7 @@ protected:
 	int		bodyEnd;    /* body の終端 index(hasSync なら args.length()-1、無ければ args.length()) */
 	int		hasSync;    /* front->get_mode():末尾文が sync 文か */
 	sPtr<pigData>	errVal;     /* body/sync で捕捉したエラー(continue-and-collect) */
+	int		asyDestroyed;   /* 評価中の body 文へ destroy を転送済み(1 回だけ) */
 	TS_DEFARGS
 };
 
@@ -66,6 +68,7 @@ pigfAsync_::pigfAsync_(TS_ARGS0)
 {
     TS_CPARGS0
     seqIdx  = 1;
+    asyDestroyed = 0;
     bodyEnd = 1;
     hasSync = 0;
 }
@@ -90,6 +93,13 @@ TS_STATE(INI_pigfFunction_START)
 
 TS_STATE(ACT_START)   /* body 文を 1 つずつ順に評価(重い文は yield → 本状態が再走。seqIdx で再開) */
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。pigfSequence と同型: **いま評価中の文だけ**を畳む。
+	 * ACT_WAITPREV が待つ args[0] は「直前 async の完了」= 自分の持ち物ではないので触らない。 */
+	if ( is_destroyed() && ! asyDestroyed ) {
+		asyDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] async: destroy 転送\n");
+		if ( seqIdx < args.length() && args[seqIdx].is_notNull() ) args[seqIdx]->destroy();
+	}
 	if ( seqIdx >= bodyEnd )
 		return rDO|ACT_WAITPREV;
 	sPtr<pigData> s = args[seqIdx];

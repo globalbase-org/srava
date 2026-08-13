@@ -3,7 +3,14 @@
  * pig フレームワーク全体で参照するグローバル機能(将来: pigDataCache の同一チェックリスト等)を
  * public に置く。実態親は tsApplication。自分自身を ptsApp に立てる。
  *
- * 派生(プロセスごとの実態元祖 cgatsAgent / cgptsPlanner)用に gate を提供する:
+ * 基底は **ptsObject** (2026-08-02 メモ §1)。かつては ptsMediator を挟んでいたが、
+ * ptsAgent の parent が ptsMediator である必然性が §5/§6 で消え (実行体は parent の a_write を
+ * 呼ばず TSE_RETURN で結果を返すようになった)、この系統から Mediator 界面を取り除けた。
+ * ptsApplication は ptsMediator の何一つ override していなかった = 純粋な名残りだった。
+ * agent process の通信部材 (rio/wio/pipe/実行体) とワイヤ↔pigData 変換は派生の
+ * **ptsAgentApplication** が自前で持つ (planner の親クラスと同居させない・2026-07-30 メモ L410)。
+ *
+ * 派生(プロセスごとの実態元祖 ptsAgentApplication / cgptsPlanner)用に gate を提供する:
  *   INI: INI_ptsObject_START(ptsApp=自分)→ INI_ptsApplication_START(派生 init)→ ACT_START
  *   FIN: 派生は FIN_START → FIN_ptsApplication_START → FIN_ptsObject_START と畳む
  *
@@ -17,13 +24,22 @@
  */
 #include	"ts2/c++/tsApplication.h"
 #include	"ts2/c++/stdLimitSemaphore.h"   /* ワーカーゲートの入場制御セマフォ(gateSem) */
+#include	"ts2/c++/sCallSection.h"        /* pig_current_registry(): TLS 経由で caller を引く */
 #include	"pig/c++/pigData.h"      /* agentError の pigData(完全型) */
+#include	"pig/c++/ptsObject.h"    /* 基底 (§1: Mediator を外した) */
+#include	"pig/c++/pigModuleRegistry.h"   /* ★ #3427 ③: app 所有レジストリ (INI で thNEW) */
+#include	"ts2/c++/stdEvent.h"
 #include	"_ts2/c++/ptsApplication_.h"
 
 #include	<unistd.h>
 #include	<thread>            /* std::thread::hardware_concurrency() — CPU 数(portable/MinGW 対応) */
 #include	<stdio.h>           /* /proc/meminfo 読み(空きメモリ watermark) */
 #include	<stdlib.h>          /* getenv/atoi */
+#include	<string>            /* INI のモジュールロード (エラー文字列) */
+
+/* ptsDataCache.cpp: pigDataCache の I/O helper 生成子 (旧: 静的初期化で pigData の
+ * グローバルフックへ登録していたものを、app INI からレジストリへ明示登録する形へ・#3427 ③)。 */
+extern pigDataCacheHelperFn ptsDataCache_helper();
 
 CLASS_TINYSTATE(pig/c++/ptsApplication,pig/c++/ptsObject)
 
@@ -35,10 +51,24 @@ TS_BEGIN_IMPLEMENT
 
 class TS_THISCLASS : public TS_BASECLASS {
 public:
+	/* ★ #3427 ③: モジュールロード指示を ctor で受け、INI_ptsObject_START が実行する。
+	 *   _moduleMode: PIG_MODLOAD_NONE(既定・テスト/smoke) / _SEARCH(planner=探索路) /
+	 *                _FILE(agent・probe=単一 .so を RTLD_NOW)。
+	 *   _moduleFile: _FILE のときの .so パス。 */
 	ptsApplication_(
-		sPtr<tsApplication> parent);
+		sPtr<tsApplication> parent,
+		int _moduleMode = 0 /*PIG_MODLOAD_NONE*/,
+		const char *_moduleFile = 0);
 
 	sRptr<tsApplication,tinyState>		parent;
+
+	/* ★ #3427 ③: レジストリ (モジュール/型/agent/codec/backend/値パーサのハブ) は app が所有する。
+	 * INI_ptsObject_START で thNEW し、プロセス全体の可変 static を全廃 (リエントラント化)。
+	 * pts 系は `ptsApp->module_registry->…`、素の pigData 層は pig_current_registry() で引く。 */
+	sPtr<pigModuleRegistry>	module_registry;
+	/* INI でのモジュールロード失敗 (PIG_MODLOAD_FILE のみ)。派生 (ptsAgentApplication) が
+	 * INI gate で見て即 FIN し、main が終了コードに写す。 */
+	int			module_load_failed();
 
 	/* pigfAgent ライフサイクル集約(public: pigfAgent が ptsApp 経由で叩く)。 */
 	void			agent_enter(sPtr<tinyState> who);   /* INI: 生存数 ++ + 登録 */
@@ -104,6 +134,10 @@ protected:
 	int			gateCap;       /* soft 上限(ユーザ設定・サマリ/プログレッシブ閾値 T=cap/2)。AIMD 回復のターゲット。 */
 	int			memMarginMB;   /* 空きメモリの下限(これを切ったら入場拒否)。0=メモリゲート無効 */
 	sPtr<stdLimitSemaphore>	gateSem;   /* 入場制御。count=今 fork して生きてる数, limit()=実効cap(EAGAIN で可変)。 */
+	/* ★ #3427 ③: INI で実行するモジュールロードの指示 (ctor 引数・PIG_MODLOAD_*)。 */
+	int			moduleMode;
+	sPtr<stdString>		moduleFile;        /* PIG_MODLOAD_FILE の .so パス */
+	int			moduleLoadFailed;  /* INI の load_file 失敗 (agent は起こさず終了コード 1) */
 	TS_DEFARGS
 };
 
@@ -117,7 +151,9 @@ TS_BEGIN_INTERFACE
 class tsApplication;
 class tinyState;
 class pigData;
+class stdString;
 class stdLimitSemaphore;
+class pigModuleRegistry;   /* ★ #3427 ③: module_registry(sPtr メンバ)。消費側が完全型を include する */
 TS_END_INTERFACE
 
 #endif
@@ -128,6 +164,9 @@ ptsApplication_::ptsApplication_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
+    moduleMode = _moduleMode;
+    moduleFile = ( _moduleFile != 0 ) ? thNEW(stdString,(_moduleFile)) : sPtr<stdString>(thNULL);
+    moduleLoadFailed = 0;
     countAgent = 0;
     countHit   = 0;
     countMiss  = 0;
@@ -312,6 +351,38 @@ ptsApplication_::inflight_claim(pHashKeyType h, sPtr<pigData> p)
 }
 
 
+int
+ptsApplication_::module_load_failed()
+{
+	return moduleLoadFailed;
+}
+
+/* ★ #3427 ③: 「今の caller が属す app のレジストリ」を TLS (sCallSection) 経由で引く。
+ * 素の pigData 層 (pigDataCache / pigDataOperatorModule / パーサ helper 等) は ptsApp を
+ * 持たないが、それらは必ず TS_STATE の実行中 (大域 mtx 下) に呼ばれるので、sCallSection の
+ * caller() → ptsObject::ptsApp → module_registry で app 所有のレジストリへ届く。
+ * TLS なのでリエントラント安全 (tinyState 側の公認非静的機構・pigData.h:1022 と同パターン)。
+ * caller が pts 系でない / app 未設定 / registry 未生成なら thNULL (呼び側は未登録フォールバック)。 */
+sPtr<pigModuleRegistry>
+pig_current_registry()
+{
+	/* ★ caller が ptsObject とは限らない: pigfAgent は _fn を ts2Parallel worker で回すため、
+	 * worker 文脈の caller() は ts2Parallel (素の tinyState 派生)。tinyState::parent を遡れば
+	 * 生成主 (pigfAgent 等 = ptsObject) に届くので、最初に見つかった ptsObject の ptsApp を使う。
+	 * parent/ptsApp は worker 起動前に確定し変化しない (worker から読むのは安全)。 */
+	sPtr<tinyState> c = sCallSection::key->caller();
+	for ( int depth = 0 ; c != thNULL && depth < 64 ; ++depth ) {
+		sPtr<ptsObject> po = sPtr<ptsObject>::d_cast(c);
+		if ( po != thNULL ) {
+			if ( po->ptsApp == thNULL )
+				return sPtr<pigModuleRegistry>(thNULL);
+			return po->ptsApp->module_registry;
+		}
+		c = c->parent;
+	}
+	return sPtr<pigModuleRegistry>(thNULL);
+}
+
 /*******************************************
 	STATE MACHINE
 ********************************************/
@@ -319,10 +390,36 @@ ptsApplication_::inflight_claim(pHashKeyType h, sPtr<pigData> p)
 TS_STATE(INI_ptsObject_START)   // ptsObject の gate を上書き: 自分が pig 実態元祖
 {
 	ptsApp = ifThis;            // ifThis = sPtr<ptsApplication>
+
+	/* ★ #3427 ③: レジストリ (モジュール/型/agent/codec/backend/値パーサのハブ) は app が
+	 *   ここで生成し所有する。プロセス全体の可変 static を全廃 = 同一プロセス複数 app でも
+	 *   レジストリが混ざらない (リエントラント)。 */
+	module_registry = thNEW(pigModuleRegistry,());
+	module_registry->set_pdc_helper(ptsDataCache_helper());
+
+	/* ★ #3427 ②改: モジュールのロードも app の INI で行う (旧: main の bootstrap ラムダ)。
+	 *   何をロードするかは ctor 引数 (planner=探索路 / agent・probe=単一 .so / テスト=なし)。 */
+	if ( moduleMode == PIG_MODLOAD_SEARCH ) {
+		std::string mlerr;
+		int nmod = module_registry->load_search_path(&mlerr);
+		if ( ::getenv("PIG_FD_VERBOSE") != 0 )
+			::fprintf(stderr, "[pig] loaded %d module(s)%s%s\n", nmod,
+			          mlerr.empty() ? "" : " last-error: ", mlerr.c_str());
+	} else if ( moduleMode == PIG_MODLOAD_FILE ) {
+		/* カーネル .so を dlopen → 記述子から make_agent/型/codec/ソルトを登録 (RTLD_NOW で
+		 * 全シンボル解決)。失敗したら実行体を起こせない = 明示エラー (docs §7 検証)。 */
+		std::string mlerr;
+		const char *mf = ( moduleFile != thNULL ) ? moduleFile->get_str() : 0;
+		if ( module_registry->load_file(mf, &mlerr, /*lazy=*/false) == 0 ) {
+			::fprintf(stderr, "[pig] cannot load module '%s': %s\n",
+			          mf ? mf : "(null)", mlerr.c_str());
+			moduleLoadFailed = 1;   /* 派生 (ptsAgentApplication) が INI gate で見て即 FIN */
+		}
+	}
 	return rDO|INI_ptsApplication_START;
 }
 
-TS_STATE(INI_ptsApplication_START)   // 派生(cgatsAgent 等)がここを上書きして初期化を挿入する
+TS_STATE(INI_ptsApplication_START)   // 派生(ptsAgentApplication / cgptsPlanner)がここを上書きする
 {
 	return rDO|ACT_START;
 }
@@ -336,7 +433,14 @@ TS_STATE(ACT_START)             // smoke(単体 ptsApplication 用): ptsApp 自�
 	return rDO|FIN_START;
 }
 
+TS_STATE(FIN_START)             // 自分が root(agent process 役 / 単体 smoke)のときの入口。
+{                               // 派生は自前の FIN_START から FIN_ptsApplication_START へ畳む
+	return rDO|FIN_ptsApplication_START;
+}
+
 TS_STATE(FIN_ptsApplication_START)   // 派生用 FIN gate(派生は FIN_START からここへ畳む)
 {
+	/* ★ #3427 ③: レジストリを手放す (app と同寿命)。ここに来る時点で全 agent は撤収済み。 */
+	module_registry = thNULL;
 	return rDO|FIN_ptsObject_START;
 }

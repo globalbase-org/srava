@@ -4,7 +4,7 @@
 language for building solid geometry, backed by a content-addressed streaming runtime.
 
 > Sanskrit **स्रव** *srava* (√*sru*, “to flow”). Data flows in; results are produced and
-> reused. The geometry kernel is just one plugin in the flow — today CGAL, tomorrow
+> reused. The geometry kernel is just one module in the flow — today CGAL, tomorrow
 > anything.
 
 > **Status:** first public release in preparation. The source tree is being renamed from
@@ -33,7 +33,7 @@ The distinguishing idea is a **kernel-agnostic orchestration layer**: the geomet
 *agent* process. The language, planner, cache and scheduler know nothing about CGAL, so the
 kernel is swappable — the same program can, in principle, run over a different geometry
 backend, or over an entirely different domain (image/volume/video pipelines) exposed as a
-plugin agent.
+module.
 
 ## Quick example
 
@@ -68,17 +68,17 @@ Requirements:
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build
-sudo cmake --install build          # installs srava, agents, stdlib, plugins
+sudo cmake --install build          # installs srava, srava_agent, stdlib, modules
 ```
 
-The standard library and plugins are installed under `share/srava/`, so `include "std/…"`
-resolves with no environment variables.
+The standard library is installed under `share/srava/` and modules (`.so`) under
+`lib/srava/modules/`, so `include "std/…"` and bundled ops resolve with no environment variables.
 
 ## Documentation
 
 - `docs/srava_language_reference.md` — language reference
 - `docs/srava_function_reference.md` — built-in / stdlib functions
-- `docs/srava_plugin_reference.md` — writing external plugin agents
+- `docs/srava_module_reference.md` — writing external modules (`.so`)
 - `docs/srava_async_design.md` — the async/sync concurrency model
 - `docs/srava_kwave.md` — geometry → voxels → k-Wave acoustic simulation
 
@@ -91,7 +91,7 @@ distributed under the GPLv3.
 
 **Licensing roadmap.** The srava *core* (language, planner, cache, scheduler) is already
 independent of CGAL — the kernel lives only in a separate agent process. As the geometry
-kernel is fully externalized as a swappable plugin, we intend to relicense the core under a
+kernel is fully externalized as a swappable module, we intend to relicense the core under a
 permissive license (MIT / Apache-2.0), keeping only the CGAL-linked agent under the GPL.
 See [THIRD_PARTY.md](THIRD_PARTY.md) for component licenses.
 

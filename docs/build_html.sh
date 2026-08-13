@@ -20,8 +20,11 @@ build() {   # 入力md  HTMLタイトル  出力ファイル名
 
 echo "building srava docs → $OUT"
 build "$HERE/web/index.md"                "srava ドキュメント"          index.html
+build "$HERE/srava_install_guide.md"      "srava インストールガイド"    srava_install_guide.html
+build "$HERE/cygwin_build.md"             "srava Cygwin ビルド手順"     cygwin_build.html
 build "$HERE/srava_language_reference.md" "srava 言語リファレンス"      srava_language_reference.html
 build "$HERE/srava_function_reference.md" "srava 関数リファレンス"      srava_function_reference.html
-build "$HERE/srava_plugin_reference.md"   "srava プラグインリファレンス" srava_plugin_reference.html
+build "$HERE/srava_module_reference.md"   "srava モジュールリファレンス" srava_module_reference.html
+build "$HERE/srava_module_design.md"      "srava モジュール設計"        srava_module_design.html
 build "$HERE/srava_kwave.md"              "srava → k-Wave 音響シミュレーション" srava_kwave.html
 echo "done."

@@ -8,6 +8,46 @@
  */
 #include <stdint.h>
 
+/* ─────────────────────────────────────────────────────────────────────
+ * 動的ロード (モジュール .so/.dll) の OS 差 — 2026-08-12。
+ *   POSIX(Linux/macOS/Cygwin): dlopen/dlsym/dlclose/dlerror。
+ *   Windows native(MinGW):     LoadLibraryEx/GetProcAddress/FreeLibrary/FormatMessage。
+ *     MinGW には dlfcn.h が無いのでコンパイルすら通らない → ここで吸収する。
+ * ★ モジュールの拡張子も OS で違う。CMake の MODULE ライブラリは
+ *     Linux/macOS = .so / MinGW = .dll / Cygwin = .dll
+ *   なので、Cygwin は dlopen が使える (POSIX 実装) が拡張子は .dll という組み合わせになる。
+ * ───────────────────────────────────────────────────────────────────── */
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define OSGLUE_MODULE_SUFFIX  ".dll"
+#else
+#define OSGLUE_MODULE_SUFFIX  ".so"
+#endif
+
+/* lazy: 関数解決を呼出時まで遅延 (POSIX の RTLD_LAZY)。Windows に相当概念は無く無視される。
+ * 失敗は 0 を返し、理由を errbuf (呼び手提供・errlen バイト) へ書く (不要なら errbuf=0 可)。
+ * ★ #3427 ③: 旧「static バッファ + osglue_dlerror()」API を廃止 (プロセス唯一の可変 static で
+ *   リエントラントでなかった)。失敗理由はその場で呼び手のバッファへ受け取る。
+ * ★ Windows は依存 DLL 欠けを ERROR_MOD_NOT_FOUND(126) としか言わない (どの DLL が欠けたかは
+ *   教えてくれない) ので、その場合は「依存 DLL が見つからない」旨のヒントを付けて返す。 */
+void *      osglue_dlopen(const char *path, int lazy, char *errbuf, unsigned long errlen);
+void *      osglue_dlsym(void *handle, const char *symbol, char *errbuf, unsigned long errlen);
+int         osglue_dlclose(void *handle);
+
+/* 実行中のバイナリ自身のパスを取得する。0=成功/-1=失敗。
+ * ★ これまで pigModuleLoader は /proc/self/exe を直接読んでいたが、これは **Linux 専用** で、
+ *   macOS (procfs 無し) と Windows では失敗する = 「実行体と同じ dir」の探索路が丸ごと効かない。
+ *   Linux=/proc/self/exe / macOS=_NSGetExecutablePath / Windows=GetModuleFileNameA。 */
+int  osglue_exe_path(char *buf, unsigned long bufsz);
+
+/* $SRAVA_MODULE_PATH 等の「パスリスト」の区切り文字。
+ * ★ Windows native は ';'。':' にすると "C:/..." のドライブレターで誤分割する
+ *   (PIG_PLUGIN_PATH で実際に踏んだ)。Cygwin は POSIX パスなので ':'。 */
+#ifdef _WIN32
+#define OSGLUE_PATHLIST_SEP  ';'
+#else
+#define OSGLUE_PATHLIST_SEP  ':'
+#endif
+
 uint32_t osglue_getpid();                 /* 現プロセスの pid */
 int      osglue_pid_exists(uint32_t pid); /* 1=alive, 0=dead/gone, -1=unknown(errno 等) */
 int      osglue_mkdir_p(const char *path, int mode); /* `mkdir -p` 相当(中間 dir も作る)。0=成功/-1=失敗 */

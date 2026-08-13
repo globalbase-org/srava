@@ -6,6 +6,7 @@
  * 注: if は一度だけ評価されるので memo 化と衝突しない。while/for(再評価)は 2.4。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfIf_.h"
 
@@ -24,6 +25,7 @@ public:
 		sPtr<pigDataOperator> _front);
 
 	sRptr<ptsObject,tinyState>		parent;
+	int		ifDestroyed;   /* 駆動中の枝へ destroy を転送済み(1 回だけ) */
 private:
 protected:
 	TS_DEFARGS
@@ -45,6 +47,7 @@ pigfIf_::pigfIf_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
+    ifDestroyed = 0;
 }
 
 
@@ -59,6 +62,15 @@ TS_STATE(INI_pigfFunction_START)
 
 TS_STATE(ACT_START)
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。cond / 取られた枝のどちらで待っているかは
+	 * ここでは分からないが、**未起動ノードへの destroy は no-op** (helper も result も無い)ため
+	 * 自分の args を一巡して送れば「走っている枝だけ」が畳まれる。1 度だけ。 */
+	if ( is_destroyed() && ! ifDestroyed ) {
+		ifDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] if: destroy 転送\n");
+		for ( int di = 0 ; di < args.length() ; ++di )
+			if ( args[di].is_notNull() ) args[di]->destroy();
+	}
 	if ( args.length() < 2 ) {           /* 文法上ありえないが安全に */
 		front->set_result(thNEW(pigDataNull,()));
 		return rDO|FIN_START;

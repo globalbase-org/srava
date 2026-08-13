@@ -6,6 +6,7 @@
  * 基底が open/streamhdr 検証/番兵検出/ポーリング/TSE_RETURN を担う。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigwire.h"
 #include	"_ts2/c++/ptsWireCacheStreamReaderText_.h"
 

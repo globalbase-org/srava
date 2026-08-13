@@ -23,15 +23,15 @@ ctest --test-dir build            # the test suite must stay green
 - **Agents**: heavy work runs in process-separated worker agents. The **geometry** agent is
   the *only* component that links CGAL — keep it that way. New kernels/domains should be
   added as agents, not wired into the core.
-- **Plugins**: third parties can add operations as external plugin agents without rebuilding
-  the core (see `docs/srava_plugin_reference.md`). `pipe_proximity` is the first example.
+- **Modules**: third parties can add operations as external modules (`.so`) without rebuilding
+  the core (see `docs/srava_module_reference.md`). `pipe_proximity` is the first example.
 
 Preserving the **core ↔ kernel boundary** is the most important review criterion: the core
 must not gain a compile-time dependency on any geometry kernel.
 
 ## Proposing changes
 
-1. Open an issue describing the change (bug, feature, or kernel/plugin addition).
+1. Open an issue describing the change (bug, feature, or kernel/module addition).
 2. Keep commits focused; include tests under `test/` for new language or runtime behavior.
 3. Ensure `ctest` passes and no new compiler warnings are introduced.
 4. By contributing, you agree your contributions are licensed under the project license

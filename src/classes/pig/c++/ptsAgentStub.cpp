@@ -21,6 +21,7 @@
  *   DONE         : plan の wend(pipe TSE_RETURN)→ FIN
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigwire.h"
 #include	"pig/c++/ptsWirePipe.h"
 #include	"pig/c++/ptsWirePacket.h"
@@ -167,6 +168,8 @@ TS_STATE(ACT_ptsAgentStub_WAIT)
 	}
 	if ( ev->type == TSE_RETURN )
 		return rDO|FIN_START;   /* plan が先に閉じた */
+	if ( is_destroyed() )
+		return rDO|FIN_START;   /* 計算開始前 = 待つ子は無い */
 	return 0;
 }
 
@@ -179,6 +182,7 @@ TS_STATE(ACT_ptsAgentStub_WRITING)
 	/* キャッシュ書込完了 → 結果一式の送信へ(write はしない) */
 	if ( ev->type == TSE_RETURN && ev->source == writer )
 		return rDO|ACT_ptsAgentStub_SAVEBEGIN;
+	/* ★ 書込中は **中断しない** (キャッシュを書き切る)。writer の TSE_RETURN を素直に待つ。 */
 	return 0;
 }
 
@@ -211,10 +215,24 @@ TS_STATE(ACT_ptsAgentStub_DONE)
 {
 	if ( ev->type == TSE_RETURN && ev->source == pipe )
 		return rDO|FIN_START;
+	/* ★ destroy の作法 (ひさ指示 2026-08-06): 子へ destroy() を送り TSE_RETURN を待ち続ける。 */
+	if ( is_destroyed() ) {
+		if ( pipe.is_notNull() ) { pipe->destroy(); return 0; }
+		return rDO|FIN_START;
+	}
 	return 0;
 }
 
 TS_STATE(FIN_START)
 {
+	/* ★ §9: fd を握る子 (pipe/rio/wio) を destroy して手放す。writer は正常系では WRITING で
+	 * 完了済み (=ZOM) だが、異常経路 (plan が先に閉じた等) では走行中があり得るので destroy。 */
+	if ( writer.is_notNull() ) { writer->destroy(); writer = thNULL; }
+	if ( pipe.is_notNull() )   { pipe->destroy();   pipe   = thNULL; }
+	if ( rio.is_notNull() )    { rio->destroy();    rio    = thNULL; }
+	if ( wio.is_notNull() )    { wio->destroy();    wio    = thNULL; }
+	argv.length(0);
+	cachePath  = thNULL;
+	resultBody = thNULL;
 	return rDO|FIN_ptsObject_START;
 }

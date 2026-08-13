@@ -7,6 +7,7 @@
  *     呼び元(pigfSequence 等)がエラー判定で compact してしまい遅延が縮退するため。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfAssign_.h"
 
@@ -25,6 +26,7 @@ public:
 		sPtr<pigDataOperator> _front);
 
 	sRptr<ptsObject,tinyState>		parent;
+	int		asgDestroyed;   /* rhs へ destroy を転送済み(1 回だけ) */
 private:
 protected:
 	TS_DEFARGS
@@ -46,6 +48,7 @@ pigfAssign_::pigfAssign_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
+    asgDestroyed = 0;
 }
 
 
@@ -59,6 +62,13 @@ TS_STATE(INI_pigfFunction_START)   // pigfFunction の INI gate を上書き(初
 }
 TS_STATE(ACT_START)
 {
+	/* ★ destroy の転送 (ひさ設計 2026-08-11)。rhs (args[1]) を compact しているのは自分なので、
+	 * 撤収要求が来たらそこへ送る (未起動なら no-op)。1 度だけ。 */
+	if ( is_destroyed() && ! asgDestroyed ) {
+		asgDestroyed = 1;
+		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] assign: destroy 転送\n");
+		if ( args.length() >= 2 && args[1].is_notNull() ) args[1]->destroy();
+	}
 	if ( args[0]->is_error() )         // 変数名の評価でエラー → 伝播
 		return rDO|FIN_START;
 	sPtr<pigData> val = ( args.length() >= 2 ) ? args[1]

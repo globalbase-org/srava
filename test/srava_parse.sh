@@ -61,7 +61,194 @@ prism)
 pyramid)
 	SRAVA_SOURCE='export(pyramid(4,2,1));' exec "$SRAVA" ;;
 sphere)
+	# sphere(r, seg): seg=円周分割数。既定 seg=32 相当 = 八面体 n=8 = 258v/512f(測地球)。
 	SRAVA_SOURCE='export(sphere(1));' exec "$SRAVA" ;;
+sphere_kernel_agree)
+	# ★sphere / icosphere が cgal と manifold で体積 bit 一致することの検証(2026-08-11)。
+	# geodesic.h(共通生成器)で頂点・面が一致するので volume も一致する。
+	CG=$(SRAVA_SOURCE='print("R", volume(sphere(5,32)), volume(icosphere(5,2)));' "$SRAVA" 2>/dev/null | grep '^R ')
+	MF=$(SRAVA_SOURCE='module("manifold.so",{priority:99}); print("R", volume(sphere(5,32)), volume(icosphere(5,2)));' "$SRAVA" 2>/dev/null | grep '^R ')
+	echo "cgal    : $CG"
+	echo "manifold: $MF"
+	if [ -n "$CG" ] && [ "$CG" = "$MF" ]; then echo "AGREE"; else echo "MISMATCH"; fi ;;
+tube_kernel_agree)
+	# ★tube(3D 掃引管 / 2D 帯)が cgal と manifold で一致することの検証(#3415・2026-08-12)。
+	# 掃引の幾何は共通ヘッダ src/h/common/tube.h が生成するので頂点・三角形の並びが一致する。
+	# ただし **bit 一致は要求しない**: cgal は体積を厳密有理数で積んで最後に 1 回丸めるのに対し
+	# manifold は double で積むので最下位 1 ulp 程度ずれる。2D はさらに合併エンジンが違う
+	# (Polygon_set_2 exact vs Clipper2 の epsilon スナップ) ので相対 1e-8 で見る。
+	# 曲がった 3D パス(可変半径)= RMF が効く経路 / 2D 帯 = stamp-and-union 経路。
+	# 3D は「曲がり + 可変半径 + r=0 の尖り端」を 1 式で踏む(尖り端はリングが 1 頂点へ潰れる別経路)。
+	S3='print("V3", volume(tube([[[0,0,0],0],[[2,0,0],0.5],[[2,3,1],0.4],[[0,4,2],0.2]], 16)));'
+	S2='print("A2", area(tube([[[0,0],3],[[20,5],2],[[35,-8],4]])));'
+	MOD='module("manifold.so",{priority:99}); '
+	CG3=$(SRAVA_SOURCE="$S3"      "$SRAVA" 2>/dev/null | sed -n 's/^V3 //p')
+	MF3=$(SRAVA_SOURCE="$MOD$S3"  "$SRAVA" 2>/dev/null | sed -n 's/^V3 //p')
+	CG2=$(SRAVA_SOURCE="$S2"      "$SRAVA" 2>/dev/null | sed -n 's/^A2 //p')
+	MF2=$(SRAVA_SOURCE="$MOD$S2"  "$SRAVA" 2>/dev/null | sed -n 's/^A2 //p')
+	echo "3D cgal=$CG3 manifold=$MF3"
+	echo "2D cgal=$CG2 manifold=$MF2"
+	if [ -z "$CG3" ] || [ -z "$MF3" ] || [ -z "$CG2" ] || [ -z "$MF2" ]; then
+		echo "MISMATCH: empty result"; exit 0
+	fi
+	ok=$(awk -v a="$CG3" -v b="$MF3" -v c="$CG2" -v d="$MF2" 'BEGIN{
+		e=a-b; if(e<0)e=-e; s=(a<0?-a:a); if(s<1)s=1;
+		f=c-d; if(f<0)f=-f; t=(c<0?-c:c); if(t<1)t=1;
+		print (e <= 1e-12*s && f <= 1e-8*t) ? 1 : 0 }')
+	if [ "$ok" = "1" ]; then echo "AGREE"; else echo "MISMATCH"; fi ;;
+pipeprox_pin_range)
+	# ★硬ピンの joint 範囲検査 (2026-08-13)。範囲外の joint は以前 **ヒープを壊していた**:
+	#   硬ピンは DOF j+1, j+2 に拘束行を張るので (controller.cpp buildConstraints)、
+	#   npts を越えると feasibilityProject の std::vector<Vec3> の外側に書き込み、
+	#   in-proc では corrupted double-linked list / process では agent が死んでいた。
+	#   今は ①ライブラリ側で弾き ②srava 側が明示エラーを返す。in-proc / process 両方で見る。
+	#   併せて **範囲内の硬ピンは従来どおり動く**ことも確認する (弾きすぎの検出)。
+	CTRL='[[0,0,0],[5,0,0],[10,0,0]]'
+	CTRL5='[[0,0,0],[3,0,0],[6,0,0],[9,0,0],[12,0,0]]'
+	bad() {
+		rm -rf "$D-pin$1"
+		SRAVA_CACHE_DIR="$D-pin$1" \
+		SRAVA_SOURCE="module(\"pipe_proximity.so\",{exec_default:\"$1\"}); var r = pipe_adjust($CTRL, 0.8, {dMin:0.5, maxIter:10, pins: [{joint:1, at:[5,1,0], hard:1}]}); print(\"R\", length(r));" \
+		  "$SRAVA" 2>&1 | grep -cE 'joint=1 が範囲外'
+	}
+	good() {
+		rm -rf "$D-pinok$1"
+		SRAVA_CACHE_DIR="$D-pinok$1" \
+		SRAVA_SOURCE="module(\"pipe_proximity.so\",{exec_default:\"$1\"}); var r = pipe_adjust($CTRL5, 0.8, {dMin:0.5, maxIter:10, pins: [{joint:1, at:[6,1,0], hard:1}]}); print(\"R\", length(r));" \
+		  "$SRAVA" 2>&1 | sed -n 's/^R //p'
+	}
+	BT=$(bad thread); BP=$(bad process); GT=$(good thread); GP=$(good process)
+	echo "out-of-range: in-proc=$BT process=$BP (1=明示エラー)"
+	echo "in-range    : in-proc=$GT process=$GP"
+	if [ "$BT" != "1" ] || [ "$BP" != "1" ]; then echo "FAIL: 範囲外 pin がエラーにならない (落ちた?)"; exit 0; fi
+	if [ -z "$GT" ] || [ "$GT" != "$GP" ]; then echo "FAIL: 範囲内 pin が動かない (in-proc=$GT process=$GP)"; exit 0; fi
+	echo "PINRANGE-OK" ;;
+mf_color_3mf)
+	# ★#3415 続き: manifold 側の color + 色つき 3MF/AMF export (2026-08-12)。
+	# 色の持ち方は cgal (per-face f:color) と違い **頂点プロパティ ch3..5** だが、
+	# 出力の 3MF は同じ共通ライタ (common/mesh3mf.h) なので palette/pid の形は同じ。
+	#
+	# 検証:
+	#  ① 3MF に 2 色 (赤+青) の colorgroup が出て、全三角形に pid が付く / 単位が unit 引数どおり
+	#  ② **色を付けても幾何が変わらない**: 色つき combine の volume が無色 combine と一致し valid=1
+	#  ③ **cache 往復で壊れない** (cold==warm かつ valid=1)
+	# ★② は「export した後に同じ式の volume を採る」形で見るのが要点。色が付くと成分の境界で
+	#   同一座標の頂点が色ごとに分裂するので、codec が merge ベクタを運ばないと decode 側が
+	#   非多様体になり volume=0/valid=0 になる (2026-08-12 の実バグ。この形でだけ再現する)。
+	O="$T/srava-mfcolor.3mf"
+	rm -f "$O"; rm -rf "$D-c" "$D-w"
+	MOD='module("manifold.so",{priority:99}); '
+	EXPR='color(box(2,2,2),"red") +++ color(box(1,1,3),"blue")'
+	PLAINEXPR='box(2,2,2) +++ box(1,1,3)'
+	# export → 同じ式の volume/valid (①②)
+	OUT=$(SRAVA_CACHE_DIR="$D-c" \
+	      SRAVA_SOURCE="${MOD}export(\"$O\", $EXPR, \"cm\"); print(\"GEO\", volume($EXPR), valid($EXPR)); print(\"PLAIN\", volume($PLAINEXPR));" \
+	      "$SRAVA" 2>&1)
+	GEO=$(echo "$OUT"   | sed -n 's/^GEO //p')
+	PLAIN=$(echo "$OUT" | sed -n 's/^PLAIN //p')
+	echo "colored=[$GEO] plain=[$PLAIN]"
+	if [ -z "$GEO" ] || [ -z "$PLAIN" ]; then echo "FAIL: no volume printed"; exit 0; fi
+	if [ "$GEO" != "$PLAIN 1" ]; then
+		echo "FAIL: color changed the geometry (colored=[$GEO] expected=[$PLAIN 1])"; exit 0
+	fi
+	if [ ! -f "$O" ]; then echo "FAIL: no 3mf written"; exit 0; fi
+	# cold / warm の一致 (③)
+	CV=$(SRAVA_CACHE_DIR="$D-w" SRAVA_SOURCE="${MOD}print(\"W\", volume($EXPR), valid($EXPR));" "$SRAVA" 2>/dev/null | sed -n 's/^W //p')
+	WV=$(SRAVA_CACHE_DIR="$D-w" SRAVA_SOURCE="${MOD}print(\"W\", volume($EXPR), valid($EXPR));" "$SRAVA" 2>/dev/null | sed -n 's/^W //p')
+	echo "cold=[$CV] warm=[$WV]"
+	if [ "$CV" != "$PLAIN 1" ] || [ "$WV" != "$PLAIN 1" ]; then
+		echo "FAIL: colored mesh broke on cache round-trip (cold=[$CV] warm=[$WV])"; exit 0
+	fi
+	python3 - "$O" <<'PY'
+import sys, zipfile, re
+d = zipfile.ZipFile(sys.argv[1]).read('3D/3dmodel.model').decode()
+pal = re.findall(r'<m:color color="(#[0-9A-Fa-f]{8})"/>', d)
+ntri = d.count('<triangle ')
+npid = len(re.findall(r'pid="2"', d))
+unit = re.search(r'unit="(\w+)"', d).group(1)
+print("palette", pal, "tri", ntri, "pid", npid, "unit", unit)
+if sorted(pal) != ['#0000FFFF', '#FF0000FF']: print("FAIL: palette", pal)
+elif ntri == 0 or npid != ntri:             print("FAIL: pid coverage", npid, "of", ntri)
+elif unit != 'centimeter':                  print("FAIL: unit", unit)
+else:                                       print("MFCOLOR-OK")
+PY
+	;;
+mf_pipe_scene_inproc)
+	# ★#3415 + color/3mf の到達点: **pipe_clearance.sra と同じ形**の連鎖が丸ごと in-proc に乗ること。
+	#   map で作ったパス → tube → color(灰) / sphere → color(赤) → combine → 色つき 3MF export。
+	#   (プラグイン pipe_proximity への依存だけ外した形。プラグイン自体も in-proc 可なので、
+	#    実物の pipe_clearance.sra も同じ条件で完走する)
+	#   証明は **存在しない SRAVA_AGENT**: agent プロセスが 1 つでも要るなら 3MF は生まれない。
+	O="$T/srava-mfpipe.3mf"
+	rm -f "$O"; rm -rf "$D-p"
+	PIPE='tube(map([[0,0,0],[6,0,0],[6,5,0],[0,5,0]], \(p){ [p, 0.8]; }), 16)'
+	# ★マーカは中心線でなく **管の表面** に置く (pipe_clearance が接近点=表面に置くのと同じ)。
+	#   中心線に置くと半径 0.4 の球が半径 0.8 の管に完全に含まれ、mf の combine では吸収されて消える
+	#   (mf の combine は包含・重なりを解消する = cg の「交差許容の単純合体」とは意味論が違う)。
+	MARK='combine(map([[6.8,2.5,0],[3,-0.8,0]], \(c){ sphere(0.4, 8) >>> c; }))'
+	SRAVA_AGENT=/nonexistent/srava_agent SRAVA_CACHE_DIR="$D-p" \
+	  SRAVA_SOURCE="module(\"manifold.so\",{priority:99,exec_default:\"thread\"}); export(\"$O\", color($PIPE, \"gray\") +++ color($MARK, \"red\"));" \
+	  "$SRAVA" >/dev/null 2>&1
+	if [ ! -f "$O" ]; then echo "FAIL: pipe scene needed an agent process (not fully in-proc)"; exit 0; fi
+	python3 - "$O" <<'PY'
+import sys, zipfile, re
+d = zipfile.ZipFile(sys.argv[1]).read('3D/3dmodel.model').decode()
+pal = sorted(re.findall(r'<m:color color="(#[0-9A-Fa-f]{8})"/>', d))
+ntri = d.count('<triangle ')
+print("palette", pal, "tri", ntri)
+if pal != ['#969696FF', '#FF0000FF']: print("FAIL: palette", pal)   # gray(150) + red
+elif ntri < 100:                      print("FAIL: too few triangles", ntri)
+else:                                 print("MFPIPE-INPROC-OK")
+PY
+	;;
+mf_inproc_nested_array)
+	# ★in-proc の落とし穴の回帰 (2026-08-12 に mfaTube で発覚): pigDataArray は **要素を eager 解決しない**
+	# 設計なので、map/lambda で作った配列の要素は遅延ノードのまま入っている。process 経路は値が
+	# テキスト化 → pig_value_parse で素の配列になるので気づかないが、in-proc 経路では遅延ノードが
+	# そのまま来て d_cast が null になり「each vertex must be [pos, r]」等の誤エラーになっていた。
+	# 対策 = 要素を compact() してから d_cast。ここでは in-proc と process の一致で見る
+	# (ネスト配列を取る op = tube(3D パス) と polygon(2D 点列) の 2 本)。
+	MAPT='tube(map([[0,0,0],[2,0,0]], \(p){ [p, 0.5]; }), 8)'
+	MAPP='polygon(map([0,1,2,3], \(i){ [i*1.0, i*i*1.0]; }))'
+	g() {  # $1=exec_default $2=式 $3=計測 op
+		SRAVA_CACHE_DIR="$D-$1-$3" SRAVA_SOURCE="module(\"manifold.so\",{priority:99,exec_default:\"$1\"}); print(\"R\", $3($2));" \
+		  "$SRAVA" 2>/dev/null | sed -n 's/^R //p'
+	}
+	rm -rf "$D-thread-volume" "$D-process-volume" "$D-thread-area" "$D-process-area"
+	TT=$(g thread  "$MAPT" volume); TP=$(g process "$MAPT" volume)
+	PT=$(g thread  "$MAPP" area);   PP=$(g process "$MAPP" area)
+	echo "tube    in-proc=$TT process=$TP"
+	echo "polygon in-proc=$PT process=$PP"
+	# pipe_proximity: bodies = map で作った **ハッシュの配列** (ネストが 1 段深い)。
+	# hash の値も配列の要素と同じく遅延ノードで来るので、同じゲートウェイが要る。
+	MKB='var mk = \(y){ var h = {ctrl: [[0,y,0],[5,y,0],[10,y,0]], radius: 0.8, movable: 1}; h; }; var b = map([0.0,2.0], mk);'
+	gb() {
+		rm -rf "$D-pp$1"
+		SRAVA_CACHE_DIR="$D-pp$1" \
+		SRAVA_SOURCE="module(\"pipe_proximity.so\",{exec_default:\"$1\"}); $MKB print(\"R\", length(pipe_scene_proximity(b, 8.0)));" \
+		  "$SRAVA" 2>/dev/null | sed -n 's/^R //p'
+	}
+	BT=$(gb thread); BP=$(gb process)
+	echo "bodies  in-proc=$BT process=$BP"
+	if [ -n "$TT" ] && [ "$TT" = "$TP" ] && [ -n "$PT" ] && [ "$PT" = "$PP" ] && [ -n "$BT" ] && [ "$BT" = "$BP" ]
+	then echo "NESTED-INPROC-OK"; else echo "FAIL: in-proc/process mismatch"; fi ;;
+mf_tube_inproc)
+	# ★#3415 の眼目: tube が manifold にも在ることで、tube 主体の連鎖が丸ごと in-proc に乗る。
+	# 証明は「**存在しない SRAVA_AGENT** を渡して完走するか」(2026-08-06 の検証手法)。
+	# agent プロセスが 1 つでも要る = cgal(process)に落ちた、なら export は生まれない。
+	# 対照として cgal を最優先にした同じ式が **失敗する**ことも見る(テストが空振りでない証拠)。
+	O="$T/srava-mftube-inproc.stl"; O2="$T/srava-mftube-ctl.stl"
+	rm -f "$O" "$O2"; rm -rf "$D-mf" "$D-cg"
+	EXPR='tube([[[0,0,0],0.5],[[2,0,0],0.5],[[2,3,1],0.4]], 16) ||| box(1,1,1)'
+	SRAVA_AGENT=/nonexistent/srava_agent SRAVA_CACHE_DIR="$D-mf" \
+	  SRAVA_SOURCE="module(\"manifold.so\",{priority:99,exec_default:\"thread\"}); export(\"$O\", $EXPR);" \
+	  "$SRAVA" >/dev/null 2>&1
+	SRAVA_AGENT=/nonexistent/srava_agent SRAVA_CACHE_DIR="$D-cg" \
+	  SRAVA_SOURCE="module(\"manifold.so\",{priority:99,exec_default:\"thread\"}); module(\"cgal.so\",{priority:100}); export(\"$O2\", $EXPR);" \
+	  "$SRAVA" >/dev/null 2>&1
+	if [ ! -f "$O" ]; then echo "FAIL: manifold tube chain needed an agent process"; exit 0; fi
+	if [ -f "$O2" ]; then echo "FAIL: cgal control unexpectedly ran without an agent"; exit 0; fi
+	echo "MFTUBE-INPROC-OK" ;;
 arrayidx)
 	# array リテラル + 添字参照: a[0] ||| a[1] = union(box,box) = 25v46f
 	SRAVA_SOURCE='var a = [box(2,2,2), box(1,1,3)]; export(a[0] ||| a[1]);' exec "$SRAVA" ;;
@@ -99,9 +286,15 @@ workergate_eagain)
 	# (黙ったデッドロック/ハングを避け、ユーザに cap を下げて再実行してもらう)。
 	SRAVA_SOURCE='export(union([box(1,1,1), box(1,1,1)>>>[2,0,0], box(1,1,1)>>>[4,0,0], box(1,1,1)>>>[0,2,0], box(1,1,1)>>>[2,2,0], box(1,1,1)>>>[4,2,0]]));' exec "$SRAVA" ;;
 fdleak)
-	# fd リーク回帰: ulimit -n を 64 に絞って ~160 agent を回す。FIN で rfd/pipe を閉じないと
+	# fd リーク回帰: ulimit -n を 64 に絞って ~240 agent を回す。FIN で rfd/pipe を閉じないと
 	# fd が枯渇し pipe()/fork が EMFILE で "failed to launch agent"(macOS 256 で顕在化した真因)。
 	# 修正後は fd が再利用され完走して "result cache" が出る。
+	#
+	# NB(2026-08-01 実測): 定常時のピーク fd 使用量は同時 agent 数にほぼ比例し、最小で通る
+	#   ulimit -n は W8:60 / W6:48 / W4:40 / W2:32。現行(W8)は上限 64 に対し余裕 4 fd と薄い。
+	#   ただし本テストが cold 実行で稀に落ちる主因は fd ではなく **agent との相互待ちハング**
+	#   (fd 枯渇は必ず 0.1s で "fork failed" エラー終了する。ハングは 60s 無応答)。
+	#   ハングは同時実行数依存で、12 並列なら ~1/12 で再現する(perf/hang_repro.sh)。
 	ulimit -n 64 2>/dev/null
 	SRAVA_SOURCE='var p=[]; var i; for(i=0;i<80;i=i+1){ p=concat(p, prism(3+i,2,1)>>>[i*1.0,0,0]); } export("/tmp/srava-fdleak.stl", combine(p));' exec "$SRAVA" ;;
 while_loop)
@@ -135,7 +328,7 @@ import_err)
 	rm -f /tmp/srava-import-missing.stl
 	SRAVA_SOURCE='export(import("/tmp/srava-import-missing.stl"));' exec "$SRAVA" ;;
 import_err_union)
-	# 失敗 import が下流 agent(union)の上流にある場合: クリーンな import エラーが伝播し(arg type
+	# 失敗 import が下流 module(union)の上流にある場合: クリーンな import エラーが伝播し(arg type
 	# /index mismatch でなく)、起動済み orphan agent でハングしないこと(TIMEOUT で検出)。
 	rm -f /tmp/srava-import-missing2.stl
 	SRAVA_SOURCE='export(import("/tmp/srava-import-missing2.stl") ||| box(1,1,3));' exec "$SRAVA" ;;
@@ -206,9 +399,9 @@ prim_circle_segs)
 	# circle 精度ピッチ(第2引数=辺数): circle(1,8)=八角形 → extrude 八角柱 16v28f。
 	SRAVA_SOURCE='export(extrude(circle(1, 8), 2));' exec "$SRAVA" ;;
 prim_sphere_subdiv)
-	# sphere 精度ピッチ(第2引数=icosphere 細分化): sphere(1,2)=320 面の滑らか球 162v320f。
-	# 既定 sphere(1) は subdiv 0(20 面・従来同形状)で別テスト sphere が担保。
-	SRAVA_SOURCE='export(sphere(1, 2));' exec "$SRAVA" ;;
+	# icosphere(r, subdiv): subdiv=細分回数(二十面体を 2^subdiv 分割)。icosphere(1,2)=162v/320f。
+	# 旧 sphere(1,2) の subdiv 意味論はこの op が継ぐ(sphere は seg 意味論に変更)。
+	SRAVA_SOURCE='export(icosphere(1, 2));' exec "$SRAVA" ;;
 prim_polygon)
 	# 明示点列(時計回りでも CCW 正規化)→ 三角柱 6v8f。
 	SRAVA_SOURCE='export(extrude(polygon([[0,0],[1,2],[2,0]]), 1));' exec "$SRAVA" ;;
@@ -343,6 +536,92 @@ dxf_export)
 	# 2D DXF export(LWPOLYLINE)。エラーにならず D_REF 出力。
 	rm -f /tmp/srava-dxf-test.dxf
 	SRAVA_SOURCE='export("/tmp/srava-dxf-test.dxf", ngon(6,1));' exec "$SRAVA" ;;
+default_kernel_union)
+	# ★manifold 既定 (module("manifold.so",{priority}) で明示・Phase4c で env DEFAULT_OUTPUT 撤去):
+	#   leaf→union→volume が in-proc Manifold で動く。
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("VOL", volume(box(2,2,2) ||| box(1,1,3)));' exec "$SRAVA" ;;
+default_kernel_booleans)
+	# ★manifold 既定: intersection / difference。box(2,2,2) ∩ box(1,1,3) = 1x1x2 = 2 /
+	# box(2,2,2) - box(1,1,3) = 8-2 = 6。
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("IVOL", volume(box(2,2,2) &&& box(1,1,3))); print("DVOL", volume(box(2,2,2) --- box(1,1,3)));' exec "$SRAVA" ;;
+default_kernel_export)
+	# ★manifold 既定: mesh 出力 (STL)。box union = 28 tri (Manifold 表現)。
+	rm -f /tmp/srava-defk-test.stl
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); export("/tmp/srava-defk-test.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	python3 -c 'import struct,sys; b=open("/tmp/srava-defk-test.stl","rb").read(); n=struct.unpack_from("<I",b,80)[0]; print("TRI",n); sys.exit(0 if n==28 else 1)' ;;
+default_kernel_2d_extrude)
+	# ★manifold 既定: 2D (rect) → extrude → volume = 20*10*3 = 600。
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("EVOL", volume(extrude(rect(20,10), 3)));' exec "$SRAVA" ;;
+default_kernel_offset3d)
+	# ★manifold 既定でも 3D offset は CGAL へ自動フォールバック (mf_agent_supports から offset を
+	# 除外・ひさ判断 2026-08-06)。cast 不要で動くこと + 体積が正 (拡大) であることを見る。
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("OVOL", volume(offset(box(2,2,2), 1)) > volume(box(2,2,2)));' exec "$SRAVA" ;;
+default_kernel_import_obj)
+	# ★manifold 既定で import(.obj) が動くこと (Phase2-2 の import_exts 対称化)。mf は STL/OFF しか
+	# 読めないので .obj は CGAL に振られる。旧実装は import が拡張子未検査で mf に振られ失敗していた。
+	# box(2,2,2) を .obj で書いて読み戻し volume=8 を確認。
+	OBJ=/tmp/srava-defk-import.obj
+	rm -f "$OBJ"
+	SRAVA_SOURCE="export(\"$OBJ\", box(2,2,2));" "$SRAVA" >/dev/null 2>&1 || exit 1
+	SRAVA_SOURCE="module(\"manifold.so\",{priority:99}); print(\"IVOL\", volume(import(\"$OBJ\")));" exec "$SRAVA" ;;
+default_kernel_3mf)
+	# ★manifold 既定: .3mf export は CGAL に振られ (mf は STL/OFF のみ)、**本物の 3MF (zip)** が
+	# できること。旧実装は mf に流れて無言で STL の中身になっていた (2026-08-06 修正の回帰)。
+	rm -f /tmp/srava-defk-test.3mf
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); export("/tmp/srava-defk-test.3mf", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	python3 -c 'import zipfile,sys; z=zipfile.ZipFile("/tmp/srava-defk-test.3mf"); ok="3D/3dmodel.model" in z.namelist(); print("ZIP3MF", 1 if ok else 0); sys.exit(0 if ok else 1)' ;;
+disable_cgal)
+	# ★ module("so","off") 実行時無効化 (2026-08-10)。cgal は既定カーネル (priority 20 > manifold 10)。
+	#   module("cgal.so","off") で cgal を routing 候補から外すと、leaf→union→export が次点の manifold へ
+	#   落ちる。判別子 = 三角形数: cgal union = 46 tri / manifold union = 28 tri。★TRI 28 が出れば
+	#   「cgal 無効化 → manifold へフォールバック」の証明 (priority override は使わない = disable の効果)。
+	rm -f /tmp/srava-disable-cgal.stl
+	SRAVA_SOURCE='module("cgal.so","off"); export("/tmp/srava-disable-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	python3 -c 'import struct,sys; b=open("/tmp/srava-disable-cgal.stl","rb").read(); n=struct.unpack_from("<I",b,80)[0]; print("TRI",n); sys.exit(0 if n==28 else 1)' ;;
+disable_cgal_reenable)
+	# ★ off の後 on で戻せること (routing 候補へ復帰)。off→on 後は既定 cgal に戻り TRI 46。
+	rm -f /tmp/srava-reenable-cgal.stl
+	SRAVA_SOURCE='module("cgal.so","off"); module("cgal.so","on"); export("/tmp/srava-reenable-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	python3 -c 'import struct,sys; b=open("/tmp/srava-reenable-cgal.stl","rb").read(); n=struct.unpack_from("<I",b,80)[0]; print("TRI",n); sys.exit(0 if n==46 else 1)' ;;
+disable_bad_option)
+	# ★ 不正な文字列オプションは明示エラー ("off"/"on" 以外)。
+	SRAVA_SOURCE='module("cgal.so","nope"); print("X", 1);' exec "$SRAVA" ;;
+kernel_mix_cast)
+	# ★カーネル混成 (module("manifold.so",{priority}) で manifold 既定に): mf が書いた MFM3 を
+	# cast で cg agent が読む = MFM3→EPECK 昇格読みの回帰 (#3404 の昇格が #3406 の
+	# codec テーブル移行で不通になっていた実バグ・2026-08-06 cgCacheCodecUpgrade で再接続)。
+	# rev4 Phase C: cast は目標**型**指定 (旧 cast("exact") → cast("cg-mesh3d"))。
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("VOL", volume(cast("cg-mesh3d", box(2,2,2) ||| box(1,1,3))));' exec "$SRAVA" ;;
+kernel_mix_cast_downgrade)
+	# ★ cg→mf downgrade の回帰 (2026-08-12 修正): 既定 cgal で作った MESH を cast("mf-mesh3d",…) で
+	#   manifold が読む (mf_codecs の mf-cg-downgrade codec が MESH→mf-mesh3d を decode_mesh_exact で
+	#   double 化)。以前は "cast: needs a mesh" で失敗していた。3D のみ (2D PLY2 は未対応)。
+	SRAVA_SOURCE='print("VOL", volume(cast("mf-mesh3d", box(2,2,2) ||| box(1,1,3))));' exec "$SRAVA" ;;
+kernel_mix_cast_downgrade_leaf)
+	# ★ leaf 入力 × cross-module 変換の COLD 回帰 (2026-08-12 修正): computed (union) と違い
+	#   leaf (box 直) は生産者が速く、A_SAVE_BEGIN で解決された outCache ハンドルを消費者が即読む。
+	#   leaf 生産者の ACT_START HIT 判定が焼き込んだ CV_INVALID を A_SAVE_BEGIN の mark_valid が
+	#   癒さないと「cache not valid and no writer」で panic した。★cold 必須 → cache dir を毎回消す。
+	rm -rf "$SRAVA_CACHE_DIR"
+	SRAVA_SOURCE='print("VOL", volume(cast("mf-mesh3d", box(2,2,2))));' exec "$SRAVA" ;;
+kernel_mix_cast_downgrade_2d)
+	# ★ 2D downgrade (PLY2→mf-cross2d・2026-08-12 実装) + leaf cold の複合回帰。★cold 必須 (同上)。
+	rm -rf "$SRAVA_CACHE_DIR"
+	SRAVA_SOURCE='print("AREA", area(cast("mf-cross2d", rect(4,3))));' exec "$SRAVA" ;;
+kernel_mix_dxf)
+	# ★カーネル混成: mf の 2D (MFC2) を .dxf export (CGAL 固定) が読む = MFC2→Pwh 昇格読みの回帰。
+	rm -f /tmp/srava-kmix-test.dxf
+	SRAVA_SOURCE='module("manifold.so",{priority:99}); export("/tmp/srava-kmix-test.dxf", offset(rect(20,10), 2));' exec "$SRAVA" ;;
+kernel_mix_cgalonly)
+	# ★ choice A (2026-08-10・sig 化): cgal 専用 op (manifold が持たない) に **mf mesh** を渡すと、
+	#   decide_executor が cgal の foreign sig ((mf-…)->…) で直接一致させ cgal へ振り、cgal が昇格読みして実行。
+	#   旧 coercion を明示 sig 化した後も、この暗黙クロスカーネルが維持されることの回帰。
+	#   perimeter (2D cgal 専用・rect は mf)・repair (3D cgal 専用・box は mf) を mf 入力で。
+	OUT=$(SRAVA_SOURCE='module("manifold.so",{priority:99});
+	var ok = 0;
+	if (perimeter(rect(4,3)) > 13) { if (volume(repair(box(2,2,2))) > 7) { ok = 1; } }
+	print("CGONLY", ok);' "$SRAVA" 2>&1 | grep "^CGONLY")
+	if [ "$OUT" = "CGONLY 1" ]; then echo "CGONLY_OK"; else echo "CGONLY_FAIL: $OUT"; fi ;;
 dxf_roundtrip)
 	# DXF export→import round-trip。穴あき額縁が包含 nest で復元 → extrude トンネル付き 16v32f。
 	rm -f /tmp/srava-rt-test.dxf
@@ -656,7 +935,7 @@ print_mesh_array)
 	# (従来 (delayed . <delayed>) が漏れていた回帰)。delayed が出ず .cache が 2 つ出れば OK。
 	OUT=$(SRAVA_SOURCE='print([box(2,2,2) ||| box(1,1,3), box(1,1,1)]);' "$SRAVA" 2>&1 | grep -v '^\[srava\]')
 	if printf '%s' "$OUT" | grep -q 'delayed'; then echo "PMA_FAIL delayed: $OUT"
-	elif [ "$(printf '%s' "$OUT" | grep -o '\.cache' | wc -l)" = "2" ]; then echo "PMA_OK"
+	elif [ "$(printf '%s' "$OUT" | grep -o '\.cache' | wc -l | tr -d '[:space:]')" = "2" ]; then echo "PMA_OK"
 	else echo "PMA_FAIL: $OUT"; fi ;;
 guide_ruler)
 	# std/guide.sra の ruler(細い tube の ものさし)。box(10,10,10) +++ ruler(0,50,10,0.3) →
@@ -671,61 +950,97 @@ color_export)
 	var b = color(box(10,10,10) >>> [20,0,0], "blue");
 	export("'"$OFF"'", a +++ b);' "$SRAVA" >/dev/null 2>&1
 	if grep -q '255 0 0' "$OFF" && grep -q '0 0 255' "$OFF"; then echo "COLOR_OK"; else echo "COLOR_FAIL"; fi ;;
-plugin_echo)
-	# プラグインエージェント疎通: echo プラグイン($SRAVA_ECHO_AGENT)を別プロセスで起動し、
-	# srava から plugin_echo(...) を呼んで構造化結果が返るか。マニフェストを一時 dir に生成。
-	PD=$(mktemp -d)
-	printf 'op = plugin_echo\nbin = %s\nout = value\n' "$SRAVA_ECHO_AGENT" > "$PD/echo.plugin"
-	# native srava が読む PIG_PLUGIN_PATH は native 形に(MSYS /tmp と食い違うため)。Linux は no-op。
-	PDW="$PD"; command -v cygpath >/dev/null 2>&1 && PDW=$(cygpath -m "$PD")
-	OUT=$(PIG_PLUGIN_PATH="$PDW" SRAVA_SOURCE='var r = plugin_echo([1,2,3], "hi", 42); print("ECHO", r[1], r[0][2]);' "$SRAVA" 2>&1 | grep '^ECHO')
-	rm -rf "$PD"
-	# r[1]="hi", r[0][2]=3 → "ECHO hi 3"
-	if [ "$OUT" = "ECHO hi 3" ]; then echo "PLUGIN_OK"; else echo "PLUGIN_FAIL: $OUT"; fi ;;
 plugin_pipeprox)
 	# pipe_proximity プラグイン: U 字に折り返すパイプ(両腕が接近)で自己接近を検出。
 	# 太い半径(2.0)で reportGap 大きめにすると、折り返した腕どうしが接近 → 接近件数 > 0。
-	PD=$(mktemp -d)
-	printf 'op = pipe_proximity\nbin = %s\nout = value\n' "$SRAVA_PIPEPROX_AGENT" > "$PD/pp.plugin"
-	OUT=$(PIG_PLUGIN_PATH="$PD" SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE='
 	var pts = [[0,0,0],[10,0.5,0],[10,3,0],[0,3.5,0]];
 	var hits = pipe_proximity(pts, [1.0, 0.0], 4.0);
 	print("PP", length(hits) > 0);' "$SRAVA" 2>&1 | grep '^PP')
-	rm -rf "$PD"
 	if [ "$OUT" = "PP 1" ]; then echo "PIPEPROX_OK"; else echo "PIPEPROX_FAIL: $OUT"; fi ;;
+plugin_pipeprox_inproc)
+	# ★ .so 化 Phase 5: in-proc 実行の証明。manifest の bin を **存在しないパス**にし、SRAVA_AGENT も
+	#   偽にしても、pipe_proximity.so がロード済み (exec_default=THREAD) なら planner 内 thread
+	#   (ppatsAgent) で完走する = process bin を一切 spawn していない証拠。値は process 版と一致 (PP 1)。
+	OUT=$(SRAVA_AGENT=/nonexistent/BOGUS_AGENT SRAVA_SOURCE='
+	var pts = [[0,0,0],[10,0.5,0],[10,3,0],[0,3.5,0]];
+	var hits = pipe_proximity(pts, [1.0, 0.0], 4.0);
+	print("PP", length(hits) > 0);' "$SRAVA" 2>&1 | grep '^PP')
+	if [ "$OUT" = "PP 1" ]; then echo "PIPEINPROC_OK"; else echo "PIPEINPROC_FAIL: $OUT"; fi ;;
+plugin_pipeprox_process)
+	# ★ Plan A (2026-08-10): process 版の存続。module(so,{exec_default:"process"}) で in-proc を opt-out
+	#   すると、汎用 host **srava_agent** が pipe_proximity.so を dlopen して ppatsAgent を別プロセス実行する
+	#   (旧 pipe_proximity_agent 専用バイナリ + .plugin manifest は廃止)。値は in-proc と一致 (PP 1)。
+	OUT=$(SRAVA_SOURCE='
+	module("pipe_proximity.so", {exec_default:"process"});
+	var pts = [[0,0,0],[10,0.5,0],[10,3,0],[0,3.5,0]];
+	var hits = pipe_proximity(pts, [1.0, 0.0], 4.0);
+	print("PP", length(hits) > 0);' "$SRAVA" 2>&1 | grep '^PP')
+	if [ "$OUT" = "PP 1" ]; then echo "PIPEPROC_OK"; else echo "PIPEPROC_FAIL: $OUT"; fi ;;
+module_demo_ops)
+	# ★ 第3モジュール実証 (Phase 6・完成条件): demo.so を探索路 (srava と同 dir) に置くだけで新 op が
+	#   使える (host 無改修)。module("demo.so",{priority:99}) で demo を既定カーネル化 → generic mk_call 層が
+	#   demo_add/demo_range を pigfKernelAgent ノードとして受理 → EXEC_PROCESS で srava_agent+demo.so 実行。
+	OUT=$(SRAVA_SOURCE='
+	module("demo.so", {priority:99});
+	var ok = 0;
+	if (demo_add(2, 3) == 5) { if (length(demo_range(4)) == 4) { if (demo_range(4)[3] == 3) { ok = 1; } } }
+	print("DEMO", ok);' "$SRAVA" 2>&1 | grep "^DEMO")
+	if [ "$OUT" = "DEMO 1" ]; then echo "DEMO_OK"; else echo "DEMO_FAIL: $OUT"; fi ;;
+module_demo_ops_noprio)
+	# ★ op-owner ルーティング実証: module() priority opt-in を **付けず**に demo_add/demo_range が
+	#   使える。demo だけが持つ op なので decide_out_kernel が owner (demo) へ直送する
+	#   (leaf でも既定カーネル cgal に奪われない)。opt-in が不要になった = op-owner routing の効果。
+	OUT=$(SRAVA_SOURCE='
+	var ok = 0;
+	if (demo_add(2, 3) == 5) { if (length(demo_range(4)) == 4) { if (demo_range(4)[3] == 3) { ok = 1; } } }
+	print("DEMO", ok);' "$SRAVA" 2>&1 | grep "^DEMO")
+	if [ "$OUT" = "DEMO 1" ]; then echo "DEMO_OK"; else echo "DEMO_FAIL: $OUT"; fi ;;
+module_d3_mesh)
+	# ★ 第3(mesh 出力)カーネル実証 (rev4 Phase D-3): d3.so を探索路に置くだけで mesh op が使え、
+	#   codec/wire-stream/cache 往復が成立。d3_cube(s)→mesh・d3_merge(a,b)→連結 mesh(16v/24f)・
+	#   d3_nfaces/d3_nverts→値。module("d3.so",{priority:99}) で d3 を既定カーネル化 (mesh leaf も d3 へ)。
+	OUT=$(SRAVA_SOURCE='
+	module("d3.so", {priority:99});
+	var m = d3_merge(d3_cube(1), d3_cube(2));
+	var ok = 0;
+	if (d3_nfaces(m) == 24) { if (d3_nverts(m) == 16) { ok = 1; } }
+	print("D3", ok);' "$SRAVA" 2>&1 | grep "^D3")
+	if [ "$OUT" = "D3 1" ]; then echo "D3_OK"; else echo "D3_FAIL: $OUT"; fi ;;
+module_d4_mesh)
+	# ★ 第4モジュール d4 のネイティブ mesh 往復 (⑤ P4 の健全性確認): d3 と同じ立方体 2 個 (16v/24f)。
+	#   d4 は exec_default=THREAD なので同型 (d4→d4) は in-proc fast path (in-memory 共有・codec 非経由)。
+	OUT=$(SRAVA_SOURCE='
+	module("d4.so", {priority:99});
+	var m = d4_merge(d4_cube(1), d4_cube(2));
+	var ok = 0;
+	if (d4_nfaces(m) == 24) { if (d4_nverts(m) == 16) { ok = 1; } }
+	print("D4", ok);' "$SRAVA" 2>&1 | grep "^D4")
+	if [ "$OUT" = "D4 1" ]; then echo "D4_OK"; else echo "D4_FAIL: $OUT"; fi ;;
 plugin_pipeadjust)
 	# pipe_adjust プラグイン op(同一 bin が pipe_proximity と両 serve): クリアランス違反の
 	# 折り返しを端点固定で開き、gap >= dMin を満たす(feasible=1 かつ clearViolation≈0)。
-	PD=$(mktemp -d)
-	printf 'op = pipe_adjust\nbin = %s\nout = value\n' "$SRAVA_PIPEPROX_AGENT" > "$PD/pa.plugin"
-	OUT=$(PIG_PLUGIN_PATH="$PD" SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE='
 	var pts = [[0,0,0],[12,0,0],[10,2,0],[12,4,0],[0,4,0]];
 	var res = pipe_adjust(pts, [0.8, 0.0], 0.6, 400, 1, 0.1);
 	var ok = 0;
 	if (res.feasible == 1) { if (res.clearViolation < 0.05) { ok = 1; } }
 	print("PA", ok);' "$SRAVA" 2>&1 | grep '^PA')
-	rm -rf "$PD"
 	if [ "$OUT" = "PA 1" ]; then echo "PIPEADJUST_OK"; else echo "PIPEADJUST_FAIL: $OUT"; fi ;;
 plugin_radius)
 	# 半径プロファイル: スカラ一定 0.8 と、[s,r] キーポイント一定 0.8(クランプで全域 0.8)が
 	# 同じ gap を返すこと(線形補間経路の健全性)。
-	PD=$(mktemp -d)
-	printf 'op = pipe_proximity\nbin = %s\nout = value\n' "$SRAVA_PIPEPROX_AGENT" > "$PD/pp.plugin"
-	OUT=$(PIG_PLUGIN_PATH="$PD" SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE='
 	var pts = [[0,0,0],[12,0,0],[10,2,0],[12,4,0],[0,4,0]];
 	var a = pipe_proximity(pts, 0.8, 8.0)[0][0];
 	var b = pipe_proximity(pts, [[0,0.8],[1000,0.8]], 8.0)[0][0];
 	var d = a - b; if (d < 0) { d = 0 - d; }
 	print("RAD", d < 0.0001);' "$SRAVA" 2>&1 | grep '^RAD')
-	rm -rf "$PD"
 	if [ "$OUT" = "RAD 1" ]; then echo "PIPERADIUS_OK"; else echo "PIPERADIUS_FAIL: $OUT"; fi ;;
 plugin_scene)
 	# N 体(Scene): 可動配管 body0 + 固定障害物 body1。近接検出(>0)し、adjustScene で
 	# body0 を gap>=dMin へ調整(feasible=1 かつ clearViolation≈0)。同一 bin の scene 系 2 op。
-	PD=$(mktemp -d)
-	printf 'op = pipe_scene_proximity\nbin = %s\nout = value\n' "$SRAVA_PIPEPROX_AGENT" > "$PD/sp.plugin"
-	printf 'op = pipe_scene_adjust\nbin = %s\nout = value\n'    "$SRAVA_PIPEPROX_AGENT" > "$PD/sa.plugin"
-	OUT=$(PIG_PLUGIN_PATH="$PD" SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE='
 	var bodies = [
 	  {ctrl: [[0,2,0],[14,2,0],[0,2.2,0]], radius: 0.8, movable: 1},
 	  {ctrl: [[0,4,0],[14,4,0]],           radius: 0.8, movable: 0}
@@ -737,14 +1052,11 @@ plugin_scene)
 	var ok = 0;
 	if (length(nb) > 0) { if (rs.feasible == 1) { if (rs.clearViolation < 0.05) { ok = 1; } } }
 	print("SC", ok);' "$SRAVA" 2>&1 | grep "^SC")
-	rm -rf "$PD"
 	if [ "$OUT" = "SC 1" ]; then echo "PIPESCENE_OK"; else echo "PIPESCENE_FAIL: $OUT"; fi ;;
 plugin_sample)
 	# pipe_sample: 弧長等間隔サンプル。テーパ半径で先頭 r≈1.2(キーポイント厳密)・末尾<先頭、
 	# 隣接間隔が指定ピッチ 1.5 にほぼ一致(弧長等間隔)。
-	PD=$(mktemp -d)
-	printf 'op = pipe_sample\nbin = %s\nout = value\n' "$SRAVA_PIPEPROX_AGENT" > "$PD/sm.plugin"
-	OUT=$(PIG_PLUGIN_PATH="$PD" SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE='
 	var pts = [[0,0,0],[12,0,0],[10,2,0],[12,4,0],[0,4,0]];
 	var d = pipe_sample(pts, [[0,1.2],[100,0.4]], 1.5);
 	var rf = d[0][1]; var rl = d[length(d)-1][1];
@@ -752,15 +1064,11 @@ plugin_sample)
 	var ok = 0;
 	if (rf > 1.19) { if (rf < 1.21) { if (rl < rf) { if (p > 1.4) { if (p < 1.6) { ok = 1; } } } } }
 	print("SM", ok);' "$SRAVA" 2>&1 | grep "^SM")
-	rm -rf "$PD"
 	if [ "$OUT" = "SM 1" ]; then echo "PIPESAMPLE_OK"; else echo "PIPESAMPLE_FAIL: $OUT"; fi ;;
 plugin_separate)
 	# 射影的分離パス: ピッチ≈2r で隣接ターンが接触する 2 周コイルを、pipe_adjust が
 	# gap>=dMin へ押し広げる(energy 法では取れない重なり解消)。before≈0 → after≈dMin。
-	PD=$(mktemp -d)
-	printf 'op = pipe_proximity\nbin = %s\nout = value\n' "$SRAVA_PIPEPROX_AGENT" > "$PD/pp.plugin"
-	printf 'op = pipe_adjust\nbin = %s\nout = value\n'    "$SRAVA_PIPEPROX_AGENT" > "$PD/pa.plugin"
-	OUT=$(PIG_PLUGIN_PATH="$PD" SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE='
 	include "std/math.sra";
 	var ctr=6; var R=12; var r=4; var N=2;
 	var sp=linspace(0,2*PI*N,N*ctr); var x=cos(sp)*R; var y=sin(sp)*R; var z=linspace(0,-2*r*N,N*ctr);
@@ -769,8 +1077,55 @@ plugin_separate)
 	var res=pipe_adjust(coil,[r,0],{dMin:0.5,fixEnds:0,maxIter:200});
 	var ah=pipe_proximity(res.ctrl,[r,0],4*r); var after=999.0; if(length(ah)>0){after=ah[0][0];}
 	var ok=0; if(before<0.2){ if(after>0.4){ ok=1; } } print("SEP",ok);' "$SRAVA" 2>&1 | grep "^SEP")
-	rm -rf "$PD"
 	if [ "$OUT" = "SEP 1" ]; then echo "PIPESEPARATE_OK"; else echo "PIPESEPARATE_FAIL: $OUT"; fi ;;
+pipeprox_fixed_force)
+	# ★ #3408 回帰: fixed 指定の制御点が外力(fZ)下で本当に固定されるか。
+	#   真因は energy solver ではなく後段 polishScene: 接触フリー区間の貪欲拡張が
+	#   blocked(端点・固定 DOF・接触 DOF・硬ピン)を跨いで relaxSpan し、跨いだ点を可動化していた。
+	#   外力下は点を下げるほど energy が下がるので keep-if-lower ガードも効かず固定点が落下する
+	#   (バグ時の実測 z=[0,-1600,-1592,-432,-8,...] → 修正後 z=[0,0,0,0,0,...])。
+	#   ★ 接触が在ることが再現条件: polish は「接触フリー区間」を起点に境界を広げるので、
+	#     自己接触のあるコイル(ピッチ≈2r)でなければこの経路に入らない(直線では踏めない)。
+	OUT=$(SRAVA_SOURCE='
+	include "std/math.sra";
+	var ctr=6; var R=12; var r=4; var N=2;
+	var sp=linspace(0,2*PI*N,N*ctr); var x=cos(sp)*R; var y=sin(sp)*R; var z=linspace(0,-2*r*N,N*ctr);
+	var coil=transpose([x,y,z]);
+	var res=pipe_adjust(coil,[r,0],
+	    {dMin:0.5, fixEnds:1, maxIter:200, solver:"cd", fixed:[0,1,2,3,4], fZ:-0.1});
+	var worst = 0;
+	var i;
+	for ( i = 0 ; i < 5 ; i = i + 1 ) {
+		var d = res.ctrl[i][2] - coil[i][2];
+		if ( d < 0 ) { d = 0 - d; }
+		if ( d > worst ) { worst = d; }
+	}
+	print("PF", worst < 0.001);' "$SRAVA" 2>&1 | grep "^PF")
+	if [ "$OUT" = "PF 1" ]; then echo "PIPEFIXED_OK"; else echo "PIPEFIXED_FAIL: $OUT"; fi ;;
+pipeprox_wspace)
+	# wSpace(制御点間隔の均一化・上流 pipeProximity v0.1.7 の項)。長さ/曲げ項は制御点を曲線に沿って
+	#   スライドさせる変形にほぼ不感(ヌルモード)なので、不均一な間隔は既定 wSpace=0 では是正されない。
+	#   wSpace>0 が「間隔を揃えるばね」として効くことを、区間長²の最大最小比で判定する
+	#   (実測: 入力 92 → wSpace:0 で 92.2 のまま / wSpace:0.1 で 1.016 まで均一化)。
+	OUT=$(SRAVA_SOURCE='
+	var pts = [[0,0,0],[5,0,0],[12,0,0],[60,0,0],[95,0,0],[100,0,0]];
+	var ratio = \(c) {
+		var n = length(c); var i; var mn = 1e30; var mx = 0;
+		for ( i = 1 ; i < n ; i = i + 1 ) {
+			var dx = c[i][0]-c[i-1][0]; var dy = c[i][1]-c[i-1][1]; var dz = c[i][2]-c[i-1][2];
+			var s = dx*dx + dy*dy + dz*dz;
+			if ( s < mn ) { mn = s; }
+			if ( s > mx ) { mx = s; }
+		}
+		return mx / mn;
+	};
+	var a = pipe_adjust(pts, [2.0, 0.0], {dMin: 1.0, maxIter: 40, fixEnds: 1, solver: "cd"});
+	var b = pipe_adjust(pts, [2.0, 0.0], {dMin: 1.0, maxIter: 40, fixEnds: 1, solver: "cd", wSpace: 0.1});
+	var ra = ratio(a.ctrl); var rb = ratio(b.ctrl);
+	var ok = 0;
+	if ( ra > 50 ) { if ( rb < 1.1 ) { if ( b.feasible == 1 ) { ok = 1; } } }
+	print("WS", ok);' "$SRAVA" 2>&1 | grep "^WS")
+	if [ "$OUT" = "WS 1" ]; then echo "PIPEWSPACE_OK"; else echo "PIPEWSPACE_FAIL: $OUT"; fi ;;
 *)
 	echo "unknown mode: $MODE"; exit 2 ;;
 esac

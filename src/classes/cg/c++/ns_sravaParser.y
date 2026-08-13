@@ -16,7 +16,7 @@
  * インライン引数を value-parse するだけ)では pigf* をリンクしないので、これらの
  * include と PROGRAM 専用ヘルパを SRAVA_VALUE_ONLY で落とす(= 同一文法を 2 用途で共有)。 */
 #ifndef SRAVA_VALUE_ONLY
-#include	"cg/c++/pigfSravaAgent.h"
+#include	"pig/c++/pigfModuleAgent.h"
 #include	"pig/c++/pigfAssign.h"
 #include	"pig/c++/pigfSequence.h"
 #include	"pig/c++/pigfIf.h"
@@ -27,8 +27,7 @@
 #include	"pig/c++/pigfMap.h"         /* map(array, fn): 各要素に lambda を適用し配列を返す */
 #include	"pig/c++/pigfMapOp.h"       /* transform 演算子(>>> <> *** @)の配列対応(broadcast/zip) */
 #include	"pig/c++/pigfGate.h"        /* gate(inp1, inp2): inp1 完了時に inp2 を起動(完了フック) */
-#include	"pig/c++/pigfPluginAgent.h"    /* 登録済みプラグイン op を別プロセスへ委ねる薄い agent */
-#include	"pig/c++/pigPluginRegistry.h"  /* op→bin 照会(プラグインレジストリ) */
+#include	"pig/c++/pigModuleRegistry.h"  /* .so 化 Phase 4a: op 受理の generic 層 (descriptor.ops 照会) */
 #endif
 #include	"cg/c++/cgptsLemonParser.h"
 #include	<string.h>
@@ -171,8 +170,8 @@ static sPtr<pigData> mk_varref(sPtr<pigData> name) {
  * 変数を scope chain を辿って更新する(pigfSequence が子スコープでも届く)。 */
 static sPtr<pigData> mk_chain_assign(sPtr<pigData> name, sPtr<pigData> rhs) {
 	sPtr<pigDataArray> seq = thNEW(pigDataArray,());
-	seq->push( mk_assign(PIG_ASSIGN_SET, name, rhs) );
-	seq->push( mk_varref(name) );
+	seq->push_nocheck( mk_assign(PIG_ASSIGN_SET, name, rhs) );
+	seq->push_nocheck( mk_varref(name) );
 	return mk_seq(seq);
 }
 
@@ -191,11 +190,11 @@ static sPtr<pigData> hash_scoped(sPtr<pigData> hop) {
 	sPtr<pigDataOperatorHash> fin = thNEW(pigDataOperatorHash,());
 	for ( int i = 0 ; i + 1 < h->argc() ; i += 2 ) {
 		sPtr<pigData> k = h->arg(i);
-		stmts->push( mk_assign(PIG_ASSIGN_DEF, k, h->arg(i+1)) );   /* var <key> = <値式>(逐次スコープ) */
+		stmts->push_nocheck( mk_assign(PIG_ASSIGN_DEF, k, h->arg(i+1)) );   /* var <key> = <値式>(逐次スコープ) */
 		fin->pushArg(k);
 		fin->pushArg( mk_varref(k) );                              /* <key>: <varref key> */
 	}
-	stmts->push(fin);
+	stmts->push_nocheck(fin);
 	return mk_seq(stmts);
 }
 #else
@@ -210,7 +209,7 @@ static sPtr<pigInfo> opinfo_of(sPtr<pigData> o) { return o.is_notNull() ? o->get
 #ifndef SRAVA_VALUE_ONLY
 /* 単一の二項 mesh op ノードを作る(分配なし)。opinfo があれば **演算子/呼び出しの位置** を優先採用。 */
 static sPtr<pigData> mk_meshop_node(const char* op, sPtr<pigData> a, sPtr<pigData> b, sPtr<pigInfo> opinfo = thNULL) {
-	sPtr<pigDataFunction<pigfSravaAgent> > n = thNEW(pigDataFunction<pigfSravaAgent>,());
+	sPtr<pigDataFunction<pigfModuleAgent> > n = thNEW(pigDataFunction<pigfModuleAgent>,());
 	n->pushArg(a);
 	n->pushArg(b);
 	n->set_op_name(thNEW(stdString,(op)));
@@ -369,15 +368,15 @@ static sPtr<pigData> mk_for(sPtr<pigData> init, sPtr<pigData> cond,
 	/* while の body = seq(catch_continue(body), step)。catch_continue で continue を握りつぶし、
 	 * step を必ず実行する(continue が step を飛ばして無限ループになるのを防ぐ)。break は素通り。 */
 	sPtr<pigDataArray> inner = thNEW(pigDataArray,());
-	inner->push(mk_catch_continue(body));
+	inner->push_nocheck(mk_catch_continue(body));
 	if ( step.is_notNull() )
-		inner->push(step);
+		inner->push_nocheck(step);
 	sPtr<pigData> wh = mk_while(cond, mk_seq(inner));
 	/* 全体 = seq(init, while) */
 	sPtr<pigDataArray> outer = thNEW(pigDataArray,());
 	if ( init.is_notNull() )
-		outer->push(init);
-	outer->push(wh);
+		outer->push_nocheck(init);
+	outer->push_nocheck(wh);
 	return mk_seq(outer);
 }
 #else
@@ -455,6 +454,19 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
+	/* load(so): カーネル/プラグイン .so をロード(planner 側 op・agent 不要・.so 化 Phase 4b)。 */
+	if ( ::strcmp(nm, "load") == 0 ) {
+		sPtr<pigDataOperatorLoad> f = thNEW(pigDataOperatorLoad,(ci));
+		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		return f;
+	}
+	/* module(so[, {exec_default, priority}]): .so をロードし設定上書き(planner 側 op・docs §2.4)。 */
+	if ( ::strcmp(nm, "module") == 0 ) {
+		sPtr<pigDataOperatorModule> f = thNEW(pigDataOperatorModule,(ci));
+		for ( int i = 0 ; i < na && i < 2 ; ++i )
+			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+		return f;
+	}
 	/* concat(a, b, ...): 配列連結(planner 側 op・agent 不要)。配列は要素展開、非配列は 1 要素追加。 */
 	if ( ::strcmp(nm, "concat") == 0 ) {
 		sPtr<pigDataOperatorConcat> f = thNEW(pigDataOperatorConcat,(ci));
@@ -507,7 +519,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 			/* export(path, mesh[, unit]): agent op で書き出し。root 観測が継続解決まで待てるよう
 			 * pigcgOperatorExport で包む(agent の継続 pair を実値に剥がす)。
 			 * 引数は常に 3 本に揃える(path, mesh, unit)。unit 省略時は空文字(= 無単位)。 */
-			sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+			sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* path */
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* mesh */
 			if ( na >= 3 )
@@ -515,6 +527,12 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 			else
 				f->pushArg(thNEW(pigDataString,("")));                          /* 無単位 */
 			f->set_op_name(thNEW(stdString,("export")));
+			/* out_cache=1 (#3406, 2026-07-31 メモ 1. でひさ再決定。2026-07-30 の 0 を差し戻し):
+			 * export の結果は **D_REF キャッシュ**。planner は演算キャッシュを見て、同一キャッシュ
+			 * の演算が二重に発行された場合 2 本目以降を 1 本目の完了待ちにする(inflight/HIT)。
+			 * export でこれが効くと **同一ファイルが何重にも上書きされるのを防げる**。そのためには
+			 * 「最初の export が終わったこと」が(読めるかどうかはともかく)キャッシュファイルの形で
+			 * 共有されている必要がある。 */
 			f->set_out_cache(1);
 		f->set_info(ci);
 			sPtr<pigcgOperatorExport> e = thNEW(pigcgOperatorExport,());
@@ -531,11 +549,11 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	 * そのまま渡す(path/params=inline・mesh=cache はフレームワークが型で振り分ける)。export と同じく
 	 * pigcgOperatorExport で包み root 観測が完了まで待つ。 */
 	if ( ::strcmp(nm, "export_vox") == 0 && na >= 3 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		for ( int i = 0 ; i < na ; ++i )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 		f->set_op_name(thNEW(stdString,("export_vox")));
-		f->set_out_cache(1);
+		f->set_out_cache(1);   /* export と同じ理由(#3406, 2026-07-31 メモ 1.) */
 		f->set_info(ci);
 		sPtr<pigcgOperatorExport> e = thNEW(pigcgOperatorExport,());
 		e->pushArg(f);
@@ -546,7 +564,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	 * pigcgOperatorExportAsync/asyncExports を統一プリミティブ async に畳む)。複数 export_async は並列、
 	 * 完了は flush() かプログラム末尾(drain_async)で待つ。 */
 	if ( ::strcmp(nm, "export_async") == 0 && na >= 2 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* path */
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* mesh */
 		if ( na >= 3 )
@@ -554,6 +572,9 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		else
 			f->pushArg(thNEW(pigDataString,("")));
 		f->set_op_name(thNEW(stdString,("export")));   /* agent op 自体は export(書き出し)と同一 */
+		/* out_cache=1(export と同じ・#3406 2026-07-31 メモ 1.)。非ブロッキング性は out_cache では
+		 * なく外側の pigcgOperatorAsync(trigger→後で compact)が担っている。trigger() は compact()
+		 * を呼ばない(pigData.h)ので、export_async の並列性は out_cache に依存しない。 */
 		f->set_out_cache(1);
 		f->set_info(ci);
 		sPtr<pigcgOperatorExport> e = thNEW(pigcgOperatorExport,());   /* root 観測(継続→実値) */
@@ -620,7 +641,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		/* import(path): 結果は普通のメッシュキャッシュ。引数パスを pigDataFileRef で包み、
 		 * プランナーが **ファイル内容ハッシュ**でキャッシュキーを作る(content-addressed)。
 		 * agent へは serialize=パスが渡り read_polygon_mesh で読む。 */
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		if ( na >= 1 )
 			f->pushArg(thNEW(pigDataFileRef,(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))))));
 		f->set_op_name(thNEW(stdString,("import")));
@@ -631,12 +652,12 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* translate は内部的に (mesh, vector) に統一。translate(m,x,y,z) はここで [x,y,z] に梱包し、
 	 * translate(m, v)(v=ベクトル式。演算子 m>>>v もこの形)はそのまま通す。 */
 	if ( ::strcmp(nm, "translate") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		if ( na == 4 ) {
 			sPtr<pigDataArray> vec = thNEW(pigDataArray,());
 			for ( int i = 1 ; i < 4 ; ++i )
-				vec->push(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+				vec->push_nocheck(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 			f->pushArg(vec);
 		} else {                                                      /* (mesh, vector) */
 			for ( int i = 1 ; i < na ; ++i )
@@ -650,7 +671,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* offset は球細分化省略可: offset(m, d)(2 引数)は subdiv 既定 1 を補う。offset(m, d, n) はそのまま
 	 * (n=3D 球の細分化レベル。大=滑らか・重い。2D は無視)。 */
 	if ( ::strcmp(nm, "offset") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* d */
 		if ( na >= 3 )
@@ -665,7 +686,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* revolve(m[, angle[, segs]]): angle 省略=360(全周)、segs 省略=32(全周の分割数=回転ピッチ)。
 	 * 内部は常に (mesh, angle, segs) の 3 引数に統一。 */
 	if ( ::strcmp(nm, "revolve") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		f->pushArg( na >= 2 ? a->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))   /* angle */
 		                    : sPtr<pigData>(thNEW(pigDataInteger,((INTEGER64)360))) );
@@ -679,7 +700,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* rotate は軸省略可: rotate(m, deg)(2 引数)は軸 "z"(2D 面内回転 / 3D は z 軸)を補う。
 	 * rotate(m, axis, deg)(3 引数)はそのまま。演算子 m@(deg) も 2 引数経由でここに来る。 */
 	if ( ::strcmp(nm, "rotate") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		if ( na == 2 ) {
 			f->pushArg(thNEW(pigDataString,("z")));                   /* 既定軸 */
@@ -696,12 +717,12 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* scale は内部 (mesh, X)。scale(m,sx,sy,sz) は [sx,sy,sz] に梱包、scale(m,s)(均等)/
 	 * scale(m,[sx,sy,sz])/ 演算子 m***s はそのまま通す(計算本体が スカラ/配列 を判別)。 */
 	if ( ::strcmp(nm, "scale") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		if ( na == 4 ) {
 			sPtr<pigDataArray> vec = thNEW(pigDataArray,());
 			for ( int i = 1 ; i < 4 ; ++i )
-				vec->push(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+				vec->push_nocheck(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 			f->pushArg(vec);
 		} else {                                                      /* (mesh, scalar|vector) */
 			for ( int i = 1 ; i < na ; ++i )
@@ -747,7 +768,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* circle / sphere は精度ピッチ省略可。circle(r)→(r, 32 辺)、sphere(r)→(r, subdiv 0)。
 	 * circle(r, segs) / sphere(r, subdiv) はそのまま。内部は常に 2 引数 (r, pitch) に統一。 */
 	if ( ::strcmp(nm, "circle") == 0 || ::strcmp(nm, "sphere") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* r */
 		if ( na >= 2 )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* pitch(segs / subdiv) */
@@ -763,7 +784,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* 肉厚(値返し): thin_spots(m, t_min [, rays [, cone]]) は mesh + 閾値 + (任意)レイ本数 + (任意)コーン全角(度)
 	 * を取り [[x,y,z,thk],..] を返す。rays 省略=25 / cone 省略=45°。agent は常に 4 引数(THIN_IN)で受けるので補う。 */
 	if ( ::strcmp(nm, "thin_spots") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* t_min */
 		if ( na > 2 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)2))));   /* rays */
@@ -778,7 +799,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* 近接(値返し・二項): distance/closest/farthest は 2 mesh を取り 値/配列 を返す。out_cache(0)=値出力。 */
 	if ( ::strcmp(nm, "distance") == 0 || ::strcmp(nm, "closest") == 0
 	  || ::strcmp(nm, "farthest") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		for ( int i = 0 ; i < na ; ++i )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 		f->set_op_name(thNEW(stdString,(nm)));
@@ -789,7 +810,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	if ( ::strcmp(nm, "area") == 0 || ::strcmp(nm, "valid") == 0
 	  || ::strcmp(nm, "volume") == 0 || ::strcmp(nm, "perimeter") == 0
 	  || ::strcmp(nm, "centroid") == 0 || ::strcmp(nm, "bbox") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
 		f->set_op_name(thNEW(stdString,(nm)));
 		f->set_out_cache(0);   /* 値返し */
@@ -799,7 +820,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* polygon / line: 点列を取る 2D op。2 形式を許す(点の配列 1 個 / 点を別々の引数で)。
 	 * polygon=塗り多角形、line=ガイド(開ポリライン)。内部は常に「点の配列 1 個」を agent へ。 */
 	if ( ::strcmp(nm, "polygon") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		if ( na == 1 ) {
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		} else {
@@ -818,7 +839,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	 *   line([x0,y0], [x1,y1], ...)  点を別々の引数で(>= 2 引数 → 1 つの配列に梱包)
 	 * 内部は常に「点の配列 1 個」を agent(cgaLine)へ渡す。 */
 	if ( ::strcmp(nm, "line") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		if ( na == 1 ) {
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* 既に点の配列 */
 		} else {
@@ -835,7 +856,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* tube(path[, segs]): path=[[[x,y,z],r],...] を 3D 折れ線まわりに掃引した管。segs=断面円の辺数
 	 * (精度ピッチ。省略=32)。内部は常に 2 引数 (path, segs)。path は構造 inline 値。 */
 	if ( ::strcmp(nm, "tube") == 0 ) {
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* path */
 		if ( na >= 2 )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* segs */
@@ -859,8 +880,9 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	  || ::strcmp(nm, "color") == 0   /* 着色: mesh + 色指定(名前/#RRGGBB/[r,g,b]) */
 	  || ::strcmp(nm, "union") == 0
 	  || ::strcmp(nm, "intersection") == 0 || ::strcmp(nm, "difference") == 0
+	  || ::strcmp(nm, "cast") == 0     /* cast(type_string, mesh): カーネル明示変換(#3404) */
 	  || ::strcmp(nm, "combine") == 0 ) {  /* combine: 交差許容のメッシュ合体(viewer 用・演算子 +++) */
-		sPtr<pigDataFunction<pigfSravaAgent> > f = thNEW(pigDataFunction<pigfSravaAgent>,());
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		for ( int i = 0 ; i < na ; ++i )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 		f->set_op_name(thNEW(stdString,(nm)));
@@ -868,16 +890,26 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		f->set_info(ci);
 		return f;
 	}
-	/* 登録済みプラグイン op(pig プラグインレジストリ)→ プラグインエージェントノード(pig 層)。
-	 * builtin でも lambda でもない名前を、別プロセスのプラグインバイナリへ委ねる。 */
-	if ( pigplugin_is_op(nm) ) {
-		sPtr<pigDataFunction<pigfPluginAgent> > f = thNEW(pigDataFunction<pigfPluginAgent>,());
-		for ( int i = 0 ; i < na ; ++i )
-			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
-		f->set_op_name(thNEW(stdString,(nm)));
-		f->set_out_cache( pigplugin_op_out_mesh(nm) ? 1 : 0 );   /* value=0(インライン) / mesh=1 */
-		f->set_info(ci);
-		return f;
+	/* ★ .so 化 Phase 4a: op 受理の layer 3 (generic)。上の糖衣付き builtin に該当しない名前でも、
+	 * ロード済みモジュール .so の descriptor.ops に載っていれば pigfModuleAgent ノードとして受理する
+	 * (grammar を触らず新カーネル/プラグインが op を足せる)。out_cache は descriptor の出力型 (mesh/value) から。
+	 * 糖衣が要る op (circle/rotate/offset/… や measure 系) は上で個別処理済みなのでここには来ない。
+	 * ★ Plan A (2026-08-10): plugin レイヤ廃止に伴い pipe_proximity 等の値 op も**この generic 経路**へ
+	 *   (旧 pigfPluginAgent 分岐撤去)。値 op は decide_executor が -1 → op-owner routing で owner へ・in-proc
+	 *   可否は agent_module_name の exec_default 判定で決まる (mesh カーネルと同一機構・demo.so と同じ扱い)。 */
+	/* ★ #3427 ③: レジストリは app 所有。パーサ (cgptsLemonParser) の TS_STATE 実行中なので
+	 *   pig_current_registry() (sCallSection TLS) で planner app のレジストリへ届く。 */
+	{
+		sPtr<pigModuleRegistry> reg = pig_current_registry();
+		if ( reg != thNULL && reg->any_supports_op(nm) ) {
+			sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
+			for ( int i = 0 ; i < na ; ++i )
+				f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+			f->set_op_name(thNEW(stdString,(nm)));
+			f->set_out_cache( reg->op_out_is_mesh(nm) == 1 ? 1 : 0 );
+			f->set_info(ci);
+			return f;
+		}
 	}
 	/* builtin でない名前 → lambda 変数の apply。callee=変数参照(評価で lambda 値)、続けて実引数。 */
 	{
@@ -934,30 +966,30 @@ static sPtr<pigData> mk_mapop(const char* op, sPtr<pigData> m, sPtr<pigDataArray
 }
 static sPtr<pigData> mk_xlate_op(sPtr<pigData> m, sPtr<pigData> v) {
 	sPtr<pigDataArray> args = thNEW(pigDataArray,());
-	args->push(m); args->push(v);
+	args->push_nocheck(m); args->push_nocheck(v);
 	return mk_mapop("translate", m, args);
 }
 static sPtr<pigData> mk_mirror_op(sPtr<pigData> m, sPtr<pigData> v) {
 	sPtr<pigDataArray> args = thNEW(pigDataArray,());
-	args->push(m); args->push(v);
+	args->push_nocheck(m); args->push_nocheck(v);
 	return mk_mapop("mirror", m, args);
 }
 static sPtr<pigData> mk_scale_op(sPtr<pigData> m, sPtr<pigData> v) {
 	sPtr<pigDataArray> args = thNEW(pigDataArray,());
-	args->push(m); args->push(v);
+	args->push_nocheck(m); args->push_nocheck(v);
 	return mk_mapop("scale", m, args);
 }
 static sPtr<pigData> mk_rot_op(sPtr<pigData> m, sPtr<pigData> arglist) {
 	sPtr<pigDataArray> al = sPtr<pigDataArray>::d_cast(arglist);
 	int na = al.is_notNull() ? al->length() : 0;
 	sPtr<pigDataArray> args = thNEW(pigDataArray,());
-	args->push(m);
+	args->push_nocheck(m);
 	if ( na == 1 ) {                      /* m @ (deg) → 軸 "z" 既定 */
-		args->push(thNEW(pigDataString,("z")));
-		args->push(al->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		args->push_nocheck(thNEW(pigDataString,("z")));
+		args->push_nocheck(al->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 	} else {                             /* m @ (axis, deg) */
 		for ( int i = 0 ; i < na ; ++i )
-			args->push(al->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+			args->push_nocheck(al->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 	}
 	return mk_mapop("rotate", m, args);
 }
@@ -998,7 +1030,7 @@ input ::= MODE_VALUE value(V).
 stmt_list(A) ::= .
 		{ A = thNEW(pigDataArray,()); }
 stmt_list(A) ::= stmt_list(L) stmt(S).
-		{ sPtr<pigDataArray>::d_cast(L)->push(S); A = L; }
+		{ sPtr<pigDataArray>::d_cast(L)->push_nocheck(S); A = L; }
 
 stmt(A) ::= VAR IDENT(N) ASSIGN arhs(E) SEMI.
 		{ A = mk_assign(PIG_ASSIGN_DEF, N, E); }
@@ -1151,9 +1183,9 @@ value(A) ::= LBRACE vhash(B) RBRACE.       { A = B; }
 vlist(A) ::= .                  { A = thNEW(pigDataArray,()); }
 vlist(A) ::= vlist_ne(L).       { A = L; }
 vlist_ne(A) ::= value(E).
-		{ A = thNEW(pigDataArray,()); sPtr<pigDataArray>::d_cast(A)->push(E); }
+		{ A = thNEW(pigDataArray,()); sPtr<pigDataArray>::d_cast(A)->push_nocheck(E); }
 vlist_ne(A) ::= vlist_ne(L) COMMA value(E).
-		{ sPtr<pigDataArray>::d_cast(L)->push(E); A = L; }
+		{ sPtr<pigDataArray>::d_cast(L)->push_nocheck(E); A = L; }
 vhash(A) ::= vkey(K) COLON value(V).
 		{ A = hash_put(thNEW(pigDataHash,()), K, V); }
 vhash(A) ::= vhash(L) COMMA vkey(K) COLON value(V).
@@ -1165,13 +1197,13 @@ vkey(A) ::= STRING(N).  { A = N; }
 paramlist(A) ::= .                       { A = thNEW(pigDataArray,()); }
 paramlist(A) ::= paramlist_ne(L).        { A = L; }
 paramlist_ne(A) ::= IDENT(N).
-		{ A = thNEW(pigDataArray,()); sPtr<pigDataArray>::d_cast(A)->push(N); }
+		{ A = thNEW(pigDataArray,()); sPtr<pigDataArray>::d_cast(A)->push_nocheck(N); }
 paramlist_ne(A) ::= paramlist_ne(L) COMMA IDENT(N).
-		{ sPtr<pigDataArray>::d_cast(L)->push(N); A = L; }
+		{ sPtr<pigDataArray>::d_cast(L)->push_nocheck(N); A = L; }
 
 arglist(A) ::= .                    { A = thNEW(pigDataArray,()); }
 arglist(A) ::= arglist_ne(L).       { A = L; }
 arglist_ne(A) ::= expr(E).
-		{ A = thNEW(pigDataArray,()); sPtr<pigDataArray>::d_cast(A)->push(E); }
+		{ A = thNEW(pigDataArray,()); sPtr<pigDataArray>::d_cast(A)->push_nocheck(E); }
 arglist_ne(A) ::= arglist_ne(L) COMMA expr(E).
-		{ sPtr<pigDataArray>::d_cast(L)->push(E); A = L; }
+		{ sPtr<pigDataArray>::d_cast(L)->push_nocheck(E); A = L; }

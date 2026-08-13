@@ -20,6 +20,7 @@
  *    result          派生が ACT 終了時にセット(FIN で parent へ返す)
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigwire.h"
 #include	"pig/c++/osglue.h"
 #include	"ts2/c++/stdEvent.h"
@@ -214,5 +215,10 @@ TS_STATE(FIN_ptsWireCacheStreamReader_START)
 		parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,result)));
 	else
 		parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)errCode)));
+	/* ★ §9: result はイベントに載せた (受け手が持つ) ので手放す。バッファも空に。 */
+	result = thNULL;
+	cacheFileName = thNULL;
+	meta.length(0);
+	rec_payload.length(0);
 	return rDO|FIN_ptsObject_START;
 }

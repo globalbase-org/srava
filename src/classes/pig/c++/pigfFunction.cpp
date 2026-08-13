@@ -5,6 +5,7 @@
  * 派生(pigfConst / pigfAssign / pigfSequence ...)が ACT/FIN を上書きして実体を与える。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfFunction_.h"
 

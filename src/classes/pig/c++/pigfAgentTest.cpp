@@ -11,26 +11,26 @@
  * agent パスは SRAVA_AGENT、キャッシュ dir は SRAVA_CACHE_DIR(main が test 用に設定・清掃)。
  */
 #include	"ts2/c++/tinyState.h"
+#include	"ts2/c++/tsApplication.h"    /* ctor の parent 型 (ptsApplication 派生・#3427 ③) */
+#include	"pig/c++/ptsApplication.h"   /* 基底 (テスト app = registry 所有者・#3427 ③) */
+#include	"pig/c++/pigModuleRegistry.h"
 #include	"pig/c++/pigData.h"
-#include	"cg/c++/pigfSravaAgent.h" /* pigDataFunction<pigfSravaAgent> のインスタンス化 */
+#include	"pig/c++/pigfModuleAgent.h" /* pigDataFunction<pigfModuleAgent> のインスタンス化 */
 #include	"_ts2/c++/pigfAgentTest_.h"
 
 #include	<stdio.h>
 #include	<string.h>
 #include	<stdlib.h>   /* getenv(CACHE_DIR 既定) */
 
-CLASS_TINYSTATE(pig/c++/pigfAgentTest,pig/c++/ptsObject)
+CLASS_TINYSTATE(pig/c++/pigfAgentTest,pig/c++/ptsApplication)
 
-int pigfAgentTest_exitCode = 0;
+/* ★ #3427 ③: 旧 file-global pigfAgentTest_exitCode は撤去 (可変 static 全廃)。
+ * 失敗はメンバ testExitCode に集約し、main が exit_code() で読む。
+ * fixture (cgal_test_fixture.cpp) は INI から app レジストリへ登録する。 */
+extern void srava_register_cgal_test_fixture(sPtr<pigModuleRegistry> reg);
 
-/* 1 チェック。ok=0 で fail。各 check は yield 後の成功パスで 1 回だけ呼ばれる。 */
-static void CHECK(const char *name, int ok) {
-	::printf("[pigfagent] %-26s : %s\n", name, ok ? "PASS" : "FAIL");
-	if (!ok) pigfAgentTest_exitCode = 1;
-}
-
-static sPtr<pigDataFunction<pigfSravaAgent> > mkAgent2(sPtr<pigData> a0, sPtr<pigData> a1) {
-	sPtr<pigDataFunction<pigfSravaAgent> > fn = thNEW(pigDataFunction<pigfSravaAgent>,());
+static sPtr<pigDataFunction<pigfModuleAgent> > mkAgent2(sPtr<pigData> a0, sPtr<pigData> a1) {
+	sPtr<pigDataFunction<pigfModuleAgent> > fn = thNEW(pigDataFunction<pigfModuleAgent>,());
 	fn->pushArg(a0);
 	if (a1.is_notNull()) fn->pushArg(a1);
 	return fn;
@@ -43,12 +43,15 @@ TS_BEGIN_IMPLEMENT
 class TS_THISCLASS : public TS_BASECLASS {
 public:
 	pigfAgentTest_(
-		sPtr<tinyState> parent);
+		sPtr<tsApplication> parent);
 
-	sRptr<tinyState,tinyState>		parent;
+	sRptr<tsApplication,tinyState>		parent;
 
 	virtual sPtr<pigEnvironment>	get_env();
+	int	exit_code();                       /* main が完走後に読む (旧 file-global の置換) */
 protected:
+	void	CHECK(const char *name, int ok);   /* 1 チェック。ok=0 で fail */
+	int			testExitCode;
 	sPtr<pigEnvironment>	env;
 	sPtr<pigData>		node1, r1;     /* T1/T2 */
 	sPtr<pigData>		node2, r2;
@@ -62,6 +65,7 @@ TS_END_IMPLEMENT
 TS_BEGIN_INTERFACE
 #include	"ts2/c++/sRptr.h"
 class tinyState;
+class tsApplication;
 class pigData;
 class pigEnvironment;
 TS_END_INTERFACE
@@ -70,10 +74,24 @@ TS_END_INTERFACE
 
 
 pigfAgentTest_::pigfAgentTest_(TS_ARGS0)
-        : ptsObject_(parent),
+        : ptsApplication_(parent),
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
+    testExitCode = 0;
+}
+
+void
+pigfAgentTest_::CHECK(const char *name, int ok)
+{
+	::printf("[pigfagent] %-26s : %s\n", name, ok ? "PASS" : "FAIL");
+	if (!ok) testExitCode = 1;
+}
+
+int
+pigfAgentTest_::exit_code()
+{
+	return testExitCode;
 }
 
 sPtr<pigEnvironment>
@@ -87,8 +105,11 @@ pigfAgentTest_::get_env()
 	STATE MACHINE  (各状態 1 compact = yield 後の成功パスで 1 回だけ check)
 ********************************************/
 
-TS_STATE(INI_ptsObject_START)
+TS_STATE(INI_ptsApplication_START)   /* 基底 INI_ptsObject_START (ptsApp=自分 + registry 生成) の次 */
 {
+	/* ★ #3427 ③: cgal.so を link しないテストなので、最小 cgal メタ + VALUE パーサを
+	 * **app 所有レジストリ**へ登録 (旧: main() からグローバルへ)。routing 判断用。 */
+	srava_register_cgal_test_fixture(module_registry);
 	/* ノードは INI で一度だけ構築する。compact は yield で状態関数を先頭から再走させるため、
 	 * 状態内でノードを作ると毎回作り直して agent を無限起動してしまう(重要)。 */
 	env   = thNEW(pigEnvironment,(thNULL));
@@ -162,12 +183,12 @@ TS_STATE(ACT_T4)
 
 	/* tinyState tsSignalCore の SIGCHLD dangling 修正済(Redmine #3361)につき、
 	 * 旧 keepalive+_exit ワークアラウンドは撤去。通常 idle 終了に戻す。
-	 * (app idle 終了後、main が pigfAgentTest_exitCode を返す) */
+	 * (app idle 終了後、main が exit_code() を返す) */
 	::fflush(stdout);
 	return rDO|FIN_START;
 }
 
 TS_STATE(FIN_START)
 {
-	return rDO|FIN_ptsObject_START;
+	return rDO|FIN_ptsApplication_START;
 }

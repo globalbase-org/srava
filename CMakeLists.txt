@@ -10,20 +10,59 @@ find_package(Threads REQUIRED)
 
 # CGAL(エージェント側のみリンク。プランナーは CGAL 非依存を維持)。
 # 重い幾何演算(corefinement union 等)に EPECK kernel を使う → GMP/MPFR 依存は CGAL::CGAL が運ぶ。
-find_package(CGAL REQUIRED)
-# cgaVoxelize(export_vox)の vox.h5 書き出し用。無ければ export_vox だけ無効化(srava 本体はビルドされる)。
-# ⚠ Cygwin の libhdf5-devel は cmake config(/usr/cmake/hdf5-config.cmake)が壊れており
-#   find_package(HDF5) が FATAL で configure を落とす。voxelize は任意機能なので Cygwin では既定で無効化。
-#   有効化したい(config を直した)場合は -DSRAVA_ENABLE_HDF5=ON。
-if(CYGWIN AND NOT SRAVA_ENABLE_HDF5)
-  message(STATUS "Cygwin: HDF5(export_vox)は既定で無効(壊れた hdf5-config を回避・-DSRAVA_ENABLE_HDF5=ON で有効化)")
-else()
-  find_package(HDF5 COMPONENTS C)
+#
+# ★ SRAVA_MODULE_CGAL (2026-08-10): cgal カーネルを **ビルドに含めるか**。既定 ON = 従来どおり
+#   (find_package CGAL REQUIRED・cgal.so + cgal 専用テストをビルド)。OFF にすると:
+#     - find_package(CGAL) を呼ばない → **CGAL/GMP/MPFR 非依存でビルドできる** (CGAL 未導入環境向け)。
+#     - cgal.so・cgatsAgent・test_cgatsagent・srava_module_cgal_so/srava_type_cgal を作らない。
+#     - planner/srava_agent は cgal.so への依存を持たず、既定カーネルは次点 (manifold 等) になる。
+#   ★ ただし ctest の大多数 (既定カーネル=cgal 前提の一般幾何テスト) は CGAL ON を前提とする
+#     (OFF での ctest 全緑は保証しない=「ビルドできること」の保証)。実行時に個別カーネルを切るだけ
+#     なら再ビルド不要の `module("cgal.so","off")` を使う (docs agent_so_design.md §2.4)。
+option(SRAVA_MODULE_CGAL "build CGAL geometry module (find_package CGAL REQUIRED; OFF = CGAL 非依存ビルド)" ON)
+# 後方互換: 旧名 SRAVA_KERNEL_CGAL を尊重 (kernel→module リネーム・2026-08-10)。
+if(DEFINED SRAVA_KERNEL_CGAL)
+  set(SRAVA_MODULE_CGAL ${SRAVA_KERNEL_CGAL})
 endif()
-if(HDF5_FOUND)
-  message(STATUS "HDF5 found → export_vox(voxel化→vox.h5)を有効化")
+
+# ★ モジュール option は **全てここで宣言する** (2026-08-12)。
+#   実体(FetchContent / target 定義)はファイル後半の各ブロックにあるが、option() をそこに置くと
+#   **クリーン configure の 1 回目**だけ if(SRAVA_MODULE_MANIFOLD) が偽になり、それより前(855/901/1989 行)
+#   にある add_test 群 (manifold 系 19 本) が静かに登録されない。2 回目以降はキャッシュに載るので 226 本に
+#   なり、「初回 207 / 再 configure 226」という再現しにくい差になっていた。宣言を使用より前に集約して回避。
+option(SRAVA_MODULE_PIPEPROX "build pipe_proximity module (vendored source)" ON)
+# 後方互換で旧名を尊重 (plugin→kernel→module と 2 度改名・2026-08-10)。新しい方が後勝ち順で効くよう
+#   SRAVA_PLUGIN_PIPEPROX → SRAVA_KERNEL_PIPEPROX → (現行) SRAVA_MODULE_PIPEPROX の順に上書き。
+if(DEFINED SRAVA_PLUGIN_PIPEPROX)
+  set(SRAVA_MODULE_PIPEPROX ${SRAVA_PLUGIN_PIPEPROX})
+endif()
+if(DEFINED SRAVA_KERNEL_PIPEPROX)
+  set(SRAVA_MODULE_PIPEPROX ${SRAVA_KERNEL_PIPEPROX})
+endif()
+option(SRAVA_MODULE_MANIFOLD "build Manifold geometry module (FetchContent)" ON)
+# 後方互換: 旧名 SRAVA_KERNEL_MANIFOLD を尊重 (kernel→module リネーム・2026-08-10)。
+if(DEFINED SRAVA_KERNEL_MANIFOLD)
+  set(SRAVA_MODULE_MANIFOLD ${SRAVA_KERNEL_MANIFOLD})
+endif()
+if(SRAVA_MODULE_CGAL)
+  find_package(CGAL REQUIRED)
+  # cgaVoxelize(export_vox)の vox.h5 書き出し用。無ければ export_vox だけ無効化(srava 本体はビルドされる)。
+  # ⚠ Cygwin の libhdf5-devel は cmake config(/usr/cmake/hdf5-config.cmake)が壊れており
+  #   find_package(HDF5) が FATAL で configure を落とす。voxelize は任意機能なので Cygwin では既定で無効化。
+  #   有効化したい(config を直した)場合は -DSRAVA_ENABLE_HDF5=ON。
+  # HDF5(cgaVoxelize)は cgal カーネル専用なので CGAL ブロック内で検出する。
+  if(CYGWIN AND NOT SRAVA_ENABLE_HDF5)
+    message(STATUS "Cygwin: HDF5(export_vox)は既定で無効(壊れた hdf5-config を回避・-DSRAVA_ENABLE_HDF5=ON で有効化)")
+  else()
+    find_package(HDF5 COMPONENTS C)
+  endif()
+  if(HDF5_FOUND)
+    message(STATUS "HDF5 found → export_vox(voxel化→vox.h5)を有効化")
+  else()
+    message(STATUS "HDF5 not found → export_vox は無効（srava 本体は通常ビルド）")
+  endif()
 else()
-  message(STATUS "HDF5 not found → export_vox は無効（srava 本体は通常ビルド）")
+  message(STATUS "SRAVA_MODULE_CGAL=OFF → CGAL 非依存ビルド (cgal.so・cgal 専用テストを除外・既定カーネルは次点へ)")
 endif()
 
 # tinyState ランタイム(find_package: <prefix>/lib/cmake/tinyState の imported target)
@@ -56,6 +95,11 @@ endif()
 # src/h(手書きヘッダ)、build(tscpp2 生成 _ts2/c++/)、tinyState install を引けるように
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/h
+  # .so 化 Phase 3a: 幾何実体を modules/ へ移設。include 接頭辞 (cg/c++/, mf/c++/) は温存し、
+  #   各カーネルの h ルートを -I で足して従来の #include をそのまま解決する (dir 名 cgal/manifold と
+  #   接頭辞 cg/mf が食い違うのは移行期の許容事項)。言語層ヘッダは src/h/cg/c++ に残る。
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/h
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/h
   ${CMAKE_BINARY_DIR}
   ${TINYSTATE_INC}
 )
@@ -67,15 +111,70 @@ enable_testing()
 # ------------------------------------------------------------------
 # pig コア(stdObject ベースの軽パス。状態機械ではない → tscpp2 不要)
 # ------------------------------------------------------------------
-add_library(pig STATIC
+# ★ 2026-08-12: libpig を共有ライブラリにしたので **RPATH** が要る。過去 2 回 (manifold / pipeprox)
+#   「共有ライブラリを RPATH で辿れず agent closed before handshake」で死んでいるので既定を明示する。
+#   bin/ からは ../lib、モジュール (lib/srava/modules/) からは ../.. が $PREFIX/lib を指す。
+if(APPLE)
+  set(CMAKE_INSTALL_RPATH "@loader_path/../lib")
+  set(SRAVA_MODULE_RPATH "@loader_path/../..")
+else()
+  set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
+  set(SRAVA_MODULE_RPATH "$ORIGIN/../..")
+endif()
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)   # ビルドツリーは CMake 既定の build-rpath で解決させる
+
+# ★ 2026-08-12: pig を **共有ライブラリ** にした (Windows モジュール対応の前提)。
+#   従来: pig=STATIC + pts ランタイム(AGENT_HOST_SRC)を各 host が個別コンパイル → モジュール .so は
+#         pig/pts/tinyState を **未解決のまま**残し host の -rdynamic + RTLD_GLOBAL で dlopen 時に解決。
+#   これは ELF 固有の idiom で **PE/COFF (Windows) では成立しない** (DLL はリンク時未解決を許さない)。
+#   → pig + AGENT_HOST_SRC(pts) + tinyState を 1 本の共有ライブラリに集約し、host もモジュールも
+#     両方これにリンクする。モジュールの未定義シンボルが 0 になり Windows でも DLL 化できる。
+#   実測 (nm -D -u manifold.so): モジュールが host に要求していたシンボル 292 本 =
+#     pig 51 / pts 74 / ts2・tinyState 55 / libc・libstdc++ 72。→ 3 者すべてを共有ライブラリに入れる。
+#   ⚠ tinyState は **PIC ビルドが必要** (非 PIC の .a は共有ライブラリに埋め込めない)。Redmine #3421。
+add_library(pig SHARED
   src/classes/pig/c++/pigData.cpp
+  src/classes/pig/c++/pigCacheCodec.cpp
+  src/classes/pig/c++/pigModuleRegistry.cpp   # モジュール (カーネル/プラグイン) 一元レジストリ (K1〜K3 集約・Phase 1)
+  src/classes/pig/c++/pigTypeRegistry.cpp     # rev4 型ディスパッチ (§9) の型軸レジストリ (Phase A)
+  src/classes/pig/c++/pigModuleLoader.cpp     # .so 動的ロード (dlopen/dlsym/abi 検査・Phase 3b)
+  src/classes/pig/c++/pigExecBackend.cpp      # 起動方式 (thread/process) → Mediator 生成の抽象 (Phase 1)
   src/classes/pig/c++/pigCacheManager.cpp   # キャッシュ dir 機構(pig 層・pigwire のみ依存)。sweep を呼ぶ実行体は pig をリンク済み
   src/classes/pig/c++/pigValueCodec.cpp     # 値の往復(serialize の対の parser)。プラグイン機構の I-O
-  src/classes/pig/c++/pigPluginSDK.cpp      # プラグインエージェント SDK(pigwire serve・CGAL/srava 非依存)
-  src/classes/pig/c++/pigPluginRegistry.cpp # プラグイン op レジストリ(マニフェスト読取・op→bin)
+  src/classes/pig/c++/pigValueParser.cpp    # 値パーサ生成子レジストリ(言語パーサを pig 層から起動)
+  src/classes/pig/c++/pigDataRef.cpp        # D_REF の pigData 表現(pigDataPair("D_REF",{...}))
 )
-target_compile_definitions(pig PRIVATE PIG_PLUGIN_SYSDIR="${CMAKE_INSTALL_PREFIX}/share/srava/plugins")
-target_link_libraries(pig PUBLIC ${TINYSTATE_LIB} Threads::Threads m)
+# tinyState の埋め込み。当初 whole-archive を試したが、libtinyState2.a には **それ自体が未解決参照を
+#   持つオブジェクト** (stdBalancedTree.cpp.o → `stdBalancedTree_::callback(...)` /
+#   `vtable for sBalancedTreeCondition` が未定義) が含まれており、全取り込みするとリンクが落ちる
+#   (通常リンクでは誰も参照しないので表面化しない)。→ 通常リンクにして、モジュール側に不足が出るなら
+#   その分だけ手当てする方針。Redmine #3421 に記録。
+# ★ tinyState は **PRIVATE**。共有ライブラリ化後は libpig 自身が tinyState を取り込んで
+#   シンボルを export するので、consumer が **静的 libtinyState2.a を重ねてリンクする必要は無い**。
+#   むしろ Windows(PE) では import lib (libpig.dll.a) と静的 .a の両方が定義を持つことになり
+#   "multiple definition of stdObject::addref()" 等でリンクが落ちる (ELF は無害なので Linux では
+#   露見しなかった)。Threads/m/dl は consumer も直接使うので PUBLIC のまま。
+# ★ tinyState の伝播は **OS で要件が逆**になる:
+#   - ELF(Linux/macOS): 共有ライブラリは未解決シンボルを許すので libpig.so は「自分が使う分」しか
+#     tinyState を取り込まない。consumer 自身の inline コード (sPtr.h の addref/relref、ts2Parallel 等)
+#     が要求する分は consumer 側で静的 tinyState をリンクして解決する必要がある → **PUBLIC** で伝播。
+#   - PE(Windows): DLL はリンク時に全解決が要るので libpig.dll は tinyState を取り込んで export する。
+#     consumer が更に静的 libtinyState2.a を重ねると import lib と定義が衝突し
+#     "multiple definition of stdObject::addref()" で落ちる → **PRIVATE** にして伝播させない。
+#   (本質的な解は「libpig が tinyState を丸ごと内包する」= whole-archive だが、libtinyState2.a に
+#    自身が未解決参照を持つ .o (stdBalancedTree) があり全取り込みできない。Redmine #3421 参照。)
+# ★ 2026-08-13: tinyState v2.0.0-rc8 で stdBalancedTree の未定義 virtual 3 つが実装されたため、
+#   **whole-archive による完全内包が可能になった** (rc7 までは stdBalancedTree.cpp.o が自身で
+#   未解決参照を持ち、全取り込みすると exe のリンクが落ちた)。
+#   完全内包により「libpig が tinyState のすべてを持ち export する」= consumer は libpig だけを見れば
+#   よい、が全 OS で成立する → PRIVATE で伝播不要・OS 分岐も不要。
+#   (rc7 まではやむなく OS 分岐していた: ELF は「足りない分だけ静的補充」ができるが、PE は import lib と
+#    静的 .a が衝突するのでそれができず、Windows で srava.exe が ts2Parallel 未解決で落ちていた。)
+target_link_libraries(pig PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${TINYSTATE_LIB}>")
+target_link_libraries(pig PUBLIC Threads::Threads m ${CMAKE_DL_LIBS})
+# 共有ライブラリなので install が要る (host / モジュールが実行時に参照する)。
+install(TARGETS pig LIBRARY DESTINATION lib)
 
 # 単体テスト
 add_executable(test_pigwire test/pigwire_test.cpp)
@@ -91,13 +190,6 @@ add_test(NAME pigvaluecodec COMMAND test_pigvaluecodec)
 set_tests_properties(pigvaluecodec PROPERTIES
   PASS_REGULAR_EXPRESSION "pigvaluecodec: ALL PASS"
   FAIL_REGULAR_EXPRESSION "FAIL")
-
-# ------------------------------------------------------------------
-# 参照プラグインエージェント(プラグイン規約の疎通確認)。pig + libtinyState のみ。
-#   CGAL も srava も状態機械もリンクしない = 薄い SDK の実証。
-# ------------------------------------------------------------------
-add_executable(echo_agent plugins/echo/echo_agent.cpp)
-target_link_libraries(echo_agent PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
 
 # ------------------------------------------------------------------
 # tinyState ビルド経路の検証 probe(tscpp2 codegen → compile → link → run)
@@ -120,6 +212,10 @@ add_test(NAME tinystate_smoke COMMAND smoke_tinystate)
 tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsObject.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsApplication.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsAgentApplication.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsDataCache.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsAgent.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsGenericAgent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfFunction.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfAssign.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfMain.cpp
@@ -127,60 +223,65 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWireCacheStreamWriterText.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWireCacheStreamReader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWireCacheStreamReaderText.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/ptscgWireCacheStreamWriterMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/ptscgWireCacheStreamWriterMesh.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWireCacheStreamWriterRef.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/ptscgWireCacheStreamReaderMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWireCacheStreamReaderRef.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/ptscgWireCacheStreamReaderMesh.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWireStreamTest.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWirePipe.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsMediator.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsMediatorExternal.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsMediatorInternal.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsWirePipeTest.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/wpBigParent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/wpBigChild.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsAgentStub.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfAgent.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/pigfSravaAgent.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfPluginAgent.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfModuleAgent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfAgentTest.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsCalcBody.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaBox.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaPrism.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaPyramid.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaSphere.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaUnion.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaCombine.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaIntersection.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaDifference.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaExport.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaVoxelize.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaImport.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaTranslate.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaRotate.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaMirror.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaScale.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaTransform.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaColor.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaRect.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaNgon.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaCircle.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaPolygon.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaLine.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaSection.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaExtrude.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaTube.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaRevolve.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaOffset.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaArea.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaValid.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaRepair.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaVolume.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaPerimeter.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaCentroid.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaBbox.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaDistance.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaClosest.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaFarthest.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgaThinSpots.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgatsAgent.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgatsAgentTest.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaBox.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPrism.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPyramid.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaSphere.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaIcosphere.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaUnion.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCombine.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaIntersection.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaDifference.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaExport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaVoxelize.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaImport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaTranslate.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRotate.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaMirror.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaScale.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaTransform.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaColor.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRect.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaNgon.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCircle.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPolygon.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaLine.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaSection.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaExtrude.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaTube.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRevolve.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaOffset.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaArea.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaValid.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRepair.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaVolume.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPerimeter.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCentroid.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaBbox.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaDistance.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaClosest.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaFarthest.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaThinSpots.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCast.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgatsAgent.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgatsAgentTest.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgptsPlanner.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgptsLemonParser.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfSequence.cpp
@@ -197,6 +298,13 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/tsPipeRepro.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/tsTeardownRepro.cpp
 )
+
+# ★ pig ライブラリは pigExecBackend.cpp → ptsMediator.h → 生成 _ts2/c++/ptsMediator_pb.h を
+#   (推移的に) include するので pigts_codegen に依存させる。他の消費ターゲット (srava_agent/cgal/
+#   test_pigf 等) は既に add_dependencies(... pigts_codegen) 済だが、pig ライブラリだけ欠けていて
+#   クリーン並列ビルドで "ptsMediator_pb.h: No such file" が間欠発生していた (pigExecBackend 追加時の
+#   張り忘れ)。pig は 90 行で定義済 (pigts_codegen 定義より前) なので依存はここで張る。
+add_dependencies(pig pigts_codegen)
 
 # ------------------------------------------------------------------
 # lemonc++ パーサ生成(2.3): lemon_cpp ホストツールをビルド → 文法 .y から ns_sravaParser.cpp/.h 生成
@@ -218,26 +326,23 @@ add_custom_command(
   COMMENT "lemon_cpp: generating srava parser from ns_sravaParser.y")
 add_custom_target(gen_srava_parser DEPENDS ${SRAVA_GEN}/ns_sravaParser.cpp ${SRAVA_GEN}/ns_sravaParser.h)
 
+# ★ #3427 ③: ptsApplication が app 所有レジストリ (pigModuleRegistry/loader/ptsDataCache_helper) に
+#   依存するようになったため、pts ランタイムの個別コンパイルをやめ libpig(共有・全部入り) をリンクする
+#   (2026-08-12 の libpig 統合の残りを回収)。
 add_executable(smoke_pts
   src/main/pts_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
 )
 add_dependencies(smoke_pts pigts_codegen)
-target_link_libraries(smoke_pts PRIVATE ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(smoke_pts PRIVATE pig Threads::Threads m)
 add_test(NAME pts_smoke COMMAND smoke_pts)
 
 # pigf async 機構の end-to-end(pigDataFunction<pigfConst> → 非同期 yield/resume → 42)
 add_executable(test_pigf
   src/main/pigf_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/pigfFunction.cpp
-  src/classes/pig/c++/pigfAssign.cpp
   src/classes/pig/c++/pigfMain.cpp
-  src/classes/pig/c++/pigfOps.cpp
 )
 add_dependencies(test_pigf pigts_codegen)
-target_link_libraries(test_pigf PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(test_pigf PRIVATE pig Threads::Threads m)
 add_test(NAME pigf COMMAND test_pigf)
 
 # ------------------------------------------------------------------
@@ -247,17 +352,10 @@ add_test(NAME pigf COMMAND test_pigf)
 # ------------------------------------------------------------------
 add_executable(test_cachestream
   src/main/cachestream_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWireCacheStreamWriter.cpp
-  src/classes/pig/c++/ptsWireCacheStreamWriterText.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReader.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReaderText.cpp
   src/classes/pig/c++/ptsWireStreamTest.cpp
 )
 add_dependencies(test_cachestream pigts_codegen)
-target_link_libraries(test_cachestream PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(test_cachestream PRIVATE pig Threads::Threads m)
 add_test(NAME cachestream COMMAND test_cachestream)
 
 # ------------------------------------------------------------------
@@ -268,15 +366,10 @@ add_test(NAME cachestream COMMAND test_cachestream)
 if(NOT WIN32)
 add_executable(test_wirepipe
   src/main/wirepipe_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
   src/classes/pig/c++/ptsWirePipeTest.cpp
 )
 add_dependencies(test_wirepipe pigts_codegen)
-target_link_libraries(test_wirepipe PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(test_wirepipe PRIVATE pig Threads::Threads m)
 add_test(NAME wirepipe COMMAND test_wirepipe)
 endif()
 
@@ -295,27 +388,17 @@ endif()
 # ------------------------------------------------------------------
 add_executable(wp_child
   src/main/wp_child_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
   src/classes/pig/c++/wpBigChild.cpp
 )
 add_dependencies(wp_child pigts_codegen)
-target_link_libraries(wp_child PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(wp_child PRIVATE pig Threads::Threads m)
 
 add_executable(wp_parent
   src/main/wp_parent_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
   src/classes/pig/c++/wpBigParent.cpp
 )
 add_dependencies(wp_parent pigts_codegen wp_child)
-target_link_libraries(wp_parent PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(wp_parent PRIVATE pig Threads::Threads m)
 
 add_test(NAME wirepipe_big COMMAND wp_parent)
 set_tests_properties(wirepipe_big PROPERTIES
@@ -330,30 +413,14 @@ set_tests_properties(wirepipe_big PROPERTIES
 # ------------------------------------------------------------------
 add_executable(srava_agent_stub
   src/main/agent_stub_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
-  src/classes/pig/c++/ptsWireCacheStreamWriter.cpp
-  src/classes/pig/c++/ptsWireCacheStreamWriterText.cpp
   src/classes/pig/c++/ptsAgentStub.cpp
 )
 add_dependencies(srava_agent_stub pigts_codegen)
-target_link_libraries(srava_agent_stub PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(srava_agent_stub PRIVATE pig Threads::Threads m)
 
 add_executable(test_pigfagent
   src/main/pigfagent_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReader.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReaderText.cpp
-  src/classes/pig/c++/pigfFunction.cpp
-  src/classes/pig/c++/pigfAgent.cpp
-  src/classes/cg/c++/pigfSravaAgent.cpp
+  src/main/cgal_test_fixture.cpp             # Phase D-1: 旧 pigfModuleAgent placeholder の移設先
   src/classes/cg/c++/cgptsLemonParser.cpp   # pigfAgent が値結果を VALUE パース(対称化)
   src/classes/pig/c++/pigfOps.cpp            # pigDataOperatorVariable(値規則 IDENT 用)
   src/classes/pig/c++/pigfAgentTest.cpp
@@ -362,7 +429,7 @@ add_executable(test_pigfagent
 add_dependencies(test_pigfagent pigts_codegen srava_agent_stub gen_srava_parser)
 target_include_directories(test_pigfagent PRIVATE ${SRAVA_GEN})
 target_compile_definitions(test_pigfagent PRIVATE SRAVA_VALUE_ONLY)
-target_link_libraries(test_pigfagent PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(test_pigfagent PRIVATE pig Threads::Threads m)
 add_test(NAME pigfagent COMMAND test_pigfagent)
 # agent バイナリのパスを test 実行時に注入(pigfAgent が getenv("SRAVA_AGENT") で読む)
 set_tests_properties(pigfagent PROPERTIES
@@ -371,117 +438,51 @@ set_tests_properties(pigfagent PROPERTIES
 # ------------------------------------------------------------------
 # step6 cgatsAgent: dispatch テーブル + 計算本体(ptsCalcBody)を持つ実エージェント骨格
 #   srava_agent     : cgatsAgent を起動する実エージェントプロセス(CGAL 未リンク・box=ダミー)
-#   test_cgatsagent : pigDataFunction<pigfSravaAgent>(op=box) を compact → srava_agent と往復
+#   test_cgatsagent : pigDataFunction<pigfModuleAgent>(op=box) を compact → srava_agent と往復
 # ------------------------------------------------------------------
-add_executable(srava_agent
-  src/main/srava_agent_main.cpp
+# ------------------------------------------------------------------
+# .so 化 Phase 3c: 単一 srava_agent (カーネル非依存 host)。argv の .so を dlopen して実行体を起こす。
+#   旧 srava_agent (CGAL 静的リンク) / srava_agent_mf (manifold 静的リンク) の 2 バイナリを廃止し、
+#   1 本の host に集約 (docs §1.2)。カーネル幾何は cgal.so / manifold.so から供給される。
+#   host は pts* 実行体基盤 (AGENT_HOST_SRC) + libpig のみ・-rdynamic で自シンボルを export し、
+#   dlopen(RTLD_NOW) が .so の未解決 pig/pts/tinyState を解決する。
+# ------------------------------------------------------------------
+
+# host (pts* 実行体基盤)。srava_agent 本体 + カーネル .so の両方から使う (単一ソース)。
+set(AGENT_HOST_SRC
   src/classes/pig/c++/ptsObject.cpp
   src/classes/pig/c++/ptsApplication.cpp
+  src/classes/pig/c++/ptsAgentApplication.cpp
+  src/classes/pig/c++/ptsDataCache.cpp
+  src/classes/pig/c++/ptsWireCacheStreamReaderText.cpp
+  src/classes/pig/c++/ptsMediator.cpp
+  src/classes/pig/c++/ptsAgent.cpp
+  src/classes/pig/c++/pigAgentRegistry.cpp
   src/classes/pig/c++/osglue.cpp
   src/classes/pig/c++/ptsWirePacket.cpp
   src/classes/pig/c++/ptsWirePipe.cpp
   src/classes/pig/c++/ptsWireCacheStreamWriter.cpp
   src/classes/pig/c++/ptsWireCacheStreamWriterText.cpp
   src/classes/pig/c++/ptsWireCacheStreamReader.cpp
-  src/classes/cg/c++/ptscgWireCacheStreamWriterMesh.cpp
   src/classes/pig/c++/ptsWireCacheStreamWriterRef.cpp
-  src/classes/cg/c++/ptscgWireCacheStreamReaderMesh.cpp
-  src/classes/cg/c++/cgMesh.cpp
-  src/classes/cg/c++/cgMesh3D.cpp       # cgMesh3D の多態メソッド(booleans/affine/codec/factory)
-  src/classes/cg/c++/cgMesh2D.cpp       # cgMesh2D の多態メソッド(2D booleans/affine/codec)
+  src/classes/pig/c++/ptsWireCacheStreamReaderRef.cpp
+  src/classes/pig/c++/pigRefCacheCodec.cpp
   src/classes/pig/c++/ptsCalcBody.cpp
-  src/classes/cg/c++/cgaBox.cpp
-  src/classes/cg/c++/cgaPrism.cpp
-  src/classes/cg/c++/cgaPyramid.cpp
-  src/classes/cg/c++/cgaSphere.cpp
-  src/classes/cg/c++/cgaUnion.cpp
-  src/classes/cg/c++/cgaCombine.cpp
-  src/classes/cg/c++/cgaIntersection.cpp
-  src/classes/cg/c++/cgaDifference.cpp
-  src/classes/cg/c++/cgaExport.cpp
-  $<$<BOOL:${HDF5_FOUND}>:src/classes/cg/c++/cgaVoxelize.cpp>   # HDF5 がある時だけコンパイル
-  src/classes/cg/c++/cgaImport.cpp          # import(path): 外部ファイル読み(read_polygon_mesh)
-  src/classes/cg/c++/cgaTranslate.cpp       # transform 系: translate/rotate/mirror/scale/transform
-  src/classes/cg/c++/cgaRotate.cpp
-  src/classes/cg/c++/cgaMirror.cpp
-  src/classes/cg/c++/cgaScale.cpp
-  src/classes/cg/c++/cgaTransform.cpp
-  src/classes/cg/c++/cgaColor.cpp
-  src/classes/cg/c++/cgaRect.cpp            # 2D プリミティブ
-  src/classes/cg/c++/cgaNgon.cpp
-  src/classes/cg/c++/cgaCircle.cpp
-  src/classes/cg/c++/cgaPolygon.cpp
-  src/classes/cg/c++/cgaLine.cpp
-  src/classes/cg/c++/cgaSection.cpp
-  src/classes/cg/c++/cgaExtrude.cpp         # 2D→3D 角柱
-  src/classes/cg/c++/cgaTube.cpp            # 3D 折れ線まわりの掃引管
-  src/classes/cg/c++/cgaRevolve.cpp         # 2D→3D 回転体
-  src/classes/cg/c++/cgaOffset.cpp          # 2D オフセット
-  src/classes/cg/c++/cgaArea.cpp            # 計測(値返し): area
-  src/classes/cg/c++/cgaValid.cpp           # 検査(値返し): valid
-  src/classes/cg/c++/cgaRepair.cpp          # 修復(mesh 返し): repair
-  src/classes/cg/c++/cgaVolume.cpp          # 計測(値返し): volume
-  src/classes/cg/c++/cgaPerimeter.cpp       # 計測(値返し): perimeter
-  src/classes/cg/c++/cgaCentroid.cpp        # 計測(配列返し): centroid
-  src/classes/cg/c++/cgaBbox.cpp            # 計測(入れ子配列返し): bbox
-  src/classes/cg/c++/cgaDistance.cpp        # 近接(値返し): distance
-  src/classes/cg/c++/cgaClosest.cpp         # 近接(配列返し): closest
-  src/classes/cg/c++/cgaFarthest.cpp        # 近接(配列返し): farthest
-  src/classes/cg/c++/cgaThinSpots.cpp       # 肉厚 SDF(入れ子配列返し): thin_spots
-  src/classes/cg/c++/cgatsAgent.cpp
-  src/classes/cg/c++/cgptsLemonParser.cpp   # inline 引数の value-parse(VALUE モード)
-  src/classes/pig/c++/pigfOps.cpp            # pigDataOperatorVariable::_start(value 規則 IDENT 用)
-  ${SRAVA_GEN}/ns_sravaParser.cpp            # 共有文法。SRAVA_VALUE_ONLY で値規則のみ有効化
-)
-add_dependencies(srava_agent pigts_codegen gen_srava_parser)
-target_include_directories(srava_agent PRIVATE ${SRAVA_GEN} ${HDF5_C_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
-# 同一文法を VALUE 専用にコンパイル(PROGRAM 用 pigf* ノードをリンクしない)。
-target_compile_definitions(srava_agent PRIVATE SRAVA_VALUE_ONLY $<$<BOOL:${HDF5_FOUND}>:SRAVA_HAVE_HDF5>)
-target_link_libraries(srava_agent PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m CGAL::CGAL ${HDF5_C_LIBRARIES} ${HDF5_LIBRARIES})
-
-add_executable(test_cgatsagent
-  src/main/cgatsagent_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReader.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReaderText.cpp
+  src/classes/pig/c++/ptsGenericAgent.cpp        # モジュール実行体の共通基底 (状態機械集約・派生は各 .so)
+  # ★ 2026-08-12: mediator 実装も libpig へ (従来は srava/test_* が各自足していた。共有ライブラリでは
+  #   ptsMediator.cpp が参照する実装が lib 内に無いと未解決のまま残り exe 側のリンクが落ちる)。
+  src/classes/pig/c++/ptsMediatorExternal.cpp
+  src/classes/pig/c++/ptsMediatorInternal.cpp
+  # ★ 2026-08-13: pigf* 層 (言語フレームワークの状態機械) も libpig へ。
+  #   従来は srava / test_pigfagent / test_cgatsagent が **各自コンパイル** していた (3 重)。
+  #   Windows では更に深刻で、pigData.h の pigDataFunction<T>::_start がヘッダ内で
+  #   sThreadKey<sCallSection>::operator->() を実体化するため、**exe と libpig.dll が別々の
+  #   thread_local static を持ち** (PE はイメージ跨ぎでシンボルを統一しない = ELF の
+  #   STB_GNU_UNIQUE 相当が無い)、caller() が null を返して SIGSEGV していた。
+  #   実体化を libpig 側 1 箇所に集約して import へ一本化する。
   src/classes/pig/c++/pigfFunction.cpp
   src/classes/pig/c++/pigfAgent.cpp
-  src/classes/cg/c++/pigfSravaAgent.cpp
-  src/classes/cg/c++/cgptsLemonParser.cpp   # pigfAgent が値結果を VALUE パース(対称化)
-  src/classes/pig/c++/pigfOps.cpp            # pigDataOperatorVariable(値規則 IDENT 用)
-  src/classes/cg/c++/cgatsAgentTest.cpp
-  ${SRAVA_GEN}/ns_sravaParser.cpp            # 値規則のみ(SRAVA_VALUE_ONLY)
-)
-add_dependencies(test_cgatsagent pigts_codegen srava_agent gen_srava_parser)
-target_include_directories(test_cgatsagent PRIVATE ${SRAVA_GEN})
-target_compile_definitions(test_cgatsagent PRIVATE SRAVA_VALUE_ONLY)
-target_link_libraries(test_cgatsagent PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
-add_test(NAME cgatsagent COMMAND test_cgatsagent)
-set_tests_properties(cgatsagent PROPERTIES
-  ENVIRONMENT SRAVA_AGENT=$<TARGET_FILE:srava_agent>)
-
-# ------------------------------------------------------------------
-# step17 cgptsPlanner: プランナープロセス srava(ptsApplication 派生 = プランナー実態元祖)
-#   起動時スイープ → パーズ(スタブ手組み union(box,box)) → 評価 → 終了時クリーンアップ → exit_code
-#   CGAL 非リンク(プランナーは CGAL 非依存)。エージェントは srava_agent を ts2System で起動。
-# ------------------------------------------------------------------
-add_executable(srava
-  src/main/srava_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
-  src/classes/pig/c++/osglue.cpp
-  src/classes/pig/c++/ptsWirePacket.cpp
-  src/classes/pig/c++/ptsWirePipe.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReader.cpp
-  src/classes/pig/c++/ptsWireCacheStreamReaderText.cpp
-  src/classes/pig/c++/pigfFunction.cpp
-  src/classes/pig/c++/pigfAgent.cpp
-  src/classes/cg/c++/pigfSravaAgent.cpp
-  src/classes/pig/c++/pigfPluginAgent.cpp   # プラグイン op を別プロセスへ委ねる薄い agent(planner のみ)
+  src/classes/pig/c++/pigfModuleAgent.cpp
   src/classes/pig/c++/pigfAssign.cpp
   src/classes/pig/c++/pigfOps.cpp
   src/classes/pig/c++/pigfSequence.cpp
@@ -494,13 +495,479 @@ add_executable(srava
   src/classes/pig/c++/pigfGate.cpp
   src/classes/pig/c++/pigfAsync.cpp
   src/classes/pig/c++/pigfSystem.cpp
+)
+
+# ★ 2026-08-12: pts ランタイムを libpig(共有) に取り込む。従来は host 3 本 (srava / srava_agent /
+#   srava_module_probe) が同じ AGENT_HOST_SRC を **各自コンパイル** し、モジュールは未解決のまま
+#   host の -rdynamic に頼っていた。共有ライブラリに 1 部だけ置き、host もモジュールも参照する。
+#   (SRAVA_VALUE_ONLY は ns_sravaParser.y にしか効かないので、1 箇所コンパイルで挙動は変わらない)
+target_sources(pig PRIVATE ${AGENT_HOST_SRC})
+target_include_directories(pig PRIVATE ${SRAVA_GEN})
+add_dependencies(pig pigts_codegen)
+
+# cgal.so の幾何ソース (テスト専用 cgatsAgentTest は除く)。cgal.so ターゲットで使う。
+set(CGAL_KERNEL_SRC
+  modules/cgal/c++/ptscgWireCacheStreamWriterMesh.cpp
+  modules/cgal/c++/ptscgWireCacheStreamReaderMesh.cpp
+  modules/cgal/c++/cgCacheCodec.cpp
+  modules/cgal/c++/cgMesh.cpp
+  modules/cgal/c++/cgMesh3D.cpp
+  modules/cgal/c++/cgMesh2D.cpp
+  modules/cgal/c++/cgaBox.cpp
+  modules/cgal/c++/cgaPrism.cpp
+  modules/cgal/c++/cgaPyramid.cpp
+  modules/cgal/c++/cgaSphere.cpp
+  modules/cgal/c++/cgaIcosphere.cpp
+  modules/cgal/c++/cgaUnion.cpp
+  modules/cgal/c++/cgaCombine.cpp
+  modules/cgal/c++/cgaIntersection.cpp
+  modules/cgal/c++/cgaDifference.cpp
+  modules/cgal/c++/cgaExport.cpp
+  $<$<BOOL:${HDF5_FOUND}>:modules/cgal/c++/cgaVoxelize.cpp>
+  modules/cgal/c++/cgaImport.cpp
+  modules/cgal/c++/cgaTranslate.cpp
+  modules/cgal/c++/cgaRotate.cpp
+  modules/cgal/c++/cgaMirror.cpp
+  modules/cgal/c++/cgaScale.cpp
+  modules/cgal/c++/cgaTransform.cpp
+  modules/cgal/c++/cgaColor.cpp
+  modules/cgal/c++/cgaRect.cpp
+  modules/cgal/c++/cgaNgon.cpp
+  modules/cgal/c++/cgaCircle.cpp
+  modules/cgal/c++/cgaPolygon.cpp
+  modules/cgal/c++/cgaLine.cpp
+  modules/cgal/c++/cgaSection.cpp
+  modules/cgal/c++/cgaExtrude.cpp
+  modules/cgal/c++/cgaTube.cpp
+  modules/cgal/c++/cgaRevolve.cpp
+  modules/cgal/c++/cgaOffset.cpp
+  modules/cgal/c++/cgaArea.cpp
+  modules/cgal/c++/cgaValid.cpp
+  modules/cgal/c++/cgaRepair.cpp
+  modules/cgal/c++/cgaVolume.cpp
+  modules/cgal/c++/cgaPerimeter.cpp
+  modules/cgal/c++/cgaCentroid.cpp
+  modules/cgal/c++/cgaBbox.cpp
+  modules/cgal/c++/cgaDistance.cpp
+  modules/cgal/c++/cgaClosest.cpp
+  modules/cgal/c++/cgaFarthest.cpp
+  modules/cgal/c++/cgaThinSpots.cpp
+  modules/cgal/c++/cgaCast.cpp
+  modules/cgal/c++/cgatsAgent.cpp
+)
+
+add_executable(srava_agent
+  src/main/srava_agent_main.cpp
+  # ${AGENT_HOST_SRC} は libpig(共有) に移動 (2026-08-12)
+)
+add_dependencies(srava_agent pigts_codegen gen_srava_parser)
+target_include_directories(srava_agent PRIVATE ${SRAVA_GEN})
+target_compile_definitions(srava_agent PRIVATE SRAVA_VALUE_ONLY)
+target_link_libraries(srava_agent PRIVATE pig Threads::Threads m ${CMAKE_DL_LIBS})
+set_target_properties(srava_agent PROPERTIES ENABLE_EXPORTS ON)   # -rdynamic: dlopen した .so から host シンボルを解決
+
+# ==================================================================
+# .so 化 Phase 3b/3c: カーネル .so (cgal.so / manifold.so) + dlopen ローダ検証プローブ。
+#   幾何ソース (AGENT_HOST_SRC / CGAL_KERNEL_SRC) は srava_agent の直前で定義済み。
+#   srava_module_probe は .so を dlopen して記述子取得 + 全シンボル解決を検証する。
+#   ★ カーネル .so は pig/pts/tinyState を bundle しない。host (probe / srava_agent) が -rdynamic で
+#     export → dlopen(RTLD_NOW) が .so の未解決シンボルを host から解決する (docs §1.2)。
+# ==================================================================
+
+# cgal.so: 幾何 + manifest。CGAL は bundle・pig/pts/tinyState は未解決のまま (host 供給)。
+# ★ SRAVA_MODULE_CGAL=OFF では cgal.so を作らない (CGAL 非依存ビルド)。
+if(SRAVA_MODULE_CGAL)
+add_library(cgal MODULE ${CGAL_KERNEL_SRC} modules/cgal/manifest.cpp)
+set_target_properties(cgal PROPERTIES PREFIX "" OUTPUT_NAME "cgal")   # → cgal.so
+add_dependencies(cgal pigts_codegen gen_srava_parser)
+target_include_directories(cgal PRIVATE ${SRAVA_GEN})
+target_compile_definitions(cgal PRIVATE SRAVA_VALUE_ONLY $<$<BOOL:${HDF5_FOUND}>:SRAVA_HAVE_HDF5>)
+install(TARGETS cgal LIBRARY DESTINATION lib/srava/modules)   # → $PREFIX/lib/srava/modules/cgal.so (ローダの SYSDIR)
+target_link_libraries(cgal PRIVATE pig CGAL::CGAL)
+set_target_properties(cgal PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+if(HDF5_FOUND)
+  target_include_directories(cgal PRIVATE ${HDF5_C_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+  target_link_libraries(cgal PRIVATE ${HDF5_C_LIBRARIES} ${HDF5_LIBRARIES})
+endif()
+# srava_agent は実行時に cgal.so を dlopen する → 一緒にビルドされることを保証。
+add_dependencies(srava_agent cgal)
+endif()
+
+# srava_module_probe: .so を dlopen して記述子を検証する host (§8 並走確認・3c srava_agent の原型)。
+add_executable(srava_module_probe
+  src/main/srava_module_probe_main.cpp
+  # ${AGENT_HOST_SRC} は libpig(共有) に移動 (2026-08-12)
+)
+add_dependencies(srava_module_probe pigts_codegen gen_srava_parser)
+target_include_directories(srava_module_probe PRIVATE ${SRAVA_GEN})
+target_compile_definitions(srava_module_probe PRIVATE SRAVA_VALUE_ONLY)
+target_link_libraries(srava_module_probe PRIVATE pig Threads::Threads m ${CMAKE_DL_LIBS})
+set_target_properties(srava_module_probe PROPERTIES ENABLE_EXPORTS ON)   # -rdynamic
+
+# cgal.so が dlopen でき、記述子 (make_agent 付き) が読めることを検証。
+# ★ cgal.so を作らない SRAVA_MODULE_CGAL=OFF では登録しない (probe 自体は他カーネルで使う)。
+if(SRAVA_MODULE_CGAL)
+add_test(NAME srava_module_cgal_so
+  COMMAND srava_module_probe $<TARGET_FILE:cgal>)
+set_tests_properties(srava_module_cgal_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=cgal .*make_agent=yes")
+
+# ★ rev4 Phase A: cgal.so の manifest 静的初期化が型軸レジストリへ実装型を登録できること
+# (cg-mesh3d=MESH / cg-cross2d=PLY2)。type_name↔タグ 1:1 の土台配線の end-to-end 検証。
+add_test(NAME srava_type_cgal
+  COMMAND srava_module_probe $<TARGET_FILE:cgal>)
+set_tests_properties(srava_type_cgal PROPERTIES
+  PASS_REGULAR_EXPRESSION "TYPES cg-mesh3d,cg-cross2d")
+endif()
+
+# ★ test_cgatsagent は cgatsAgentTest.cpp (CGAL include) + srava_agent 経由で cgal.so を要する
+#   cgal 専用テスト → SRAVA_MODULE_CGAL=OFF ではビルド/登録しない。
+if(SRAVA_MODULE_CGAL)
+add_executable(test_cgatsagent
+  src/main/cgatsagent_main.cpp
+  src/main/cgal_test_fixture.cpp             # Phase D-1: 旧 pigfModuleAgent placeholder の移設先
+  src/classes/cg/c++/cgptsLemonParser.cpp   # pigfAgent が値結果を VALUE パース(対称化)
+  src/classes/pig/c++/pigfOps.cpp            # pigDataOperatorVariable(値規則 IDENT 用)
+  modules/cgal/c++/cgatsAgentTest.cpp
+  ${SRAVA_GEN}/ns_sravaParser.cpp            # 値規則のみ(SRAVA_VALUE_ONLY)
+)
+add_dependencies(test_cgatsagent pigts_codegen srava_agent gen_srava_parser)
+target_include_directories(test_cgatsagent PRIVATE ${SRAVA_GEN})
+target_compile_definitions(test_cgatsagent PRIVATE SRAVA_VALUE_ONLY)
+target_link_libraries(test_cgatsagent PRIVATE pig Threads::Threads m)
+add_test(NAME cgatsagent COMMAND test_cgatsagent)
+set_tests_properties(cgatsagent PROPERTIES
+  ENVIRONMENT SRAVA_AGENT=$<TARGET_FILE:srava_agent>)
+endif()   # SRAVA_MODULE_CGAL (test_cgatsagent)
+
+# ------------------------------------------------------------------
+# step17 cgptsPlanner: プランナープロセス srava(ptsApplication 派生 = プランナー実態元祖)
+#   起動時スイープ → パーズ(スタブ手組み union(box,box)) → 評価 → 終了時クリーンアップ → exit_code
+#   CGAL 非リンク(プランナーは CGAL 非依存)。エージェントは srava_agent を ts2System で起動。
+# ------------------------------------------------------------------
+add_executable(srava
+  src/main/srava_main.cpp
   src/classes/cg/c++/cgptsLemonParser.cpp
   src/classes/cg/c++/cgptsPlanner.cpp
   ${SRAVA_GEN}/ns_sravaParser.cpp
 )
 add_dependencies(srava pigts_codegen srava_agent gen_srava_parser)
+if(SRAVA_MODULE_CGAL)
+  add_dependencies(srava cgal)   # cgal: planner が起動時に dlopen (SRAVA_MODULE_CGAL=OFF では非依存)
+endif()
 target_include_directories(srava PRIVATE ${SRAVA_GEN})
-target_link_libraries(srava PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(srava PRIVATE pig Threads::Threads m)
+# ★ .so 化 Phase 3c-2: planner は起動時にカーネル .so を dlopen し in-proc thread 実行する。
+#   dlopen した .so の未解決 pig/pts シンボルを planner 本体から解決させるため -rdynamic で export。
+set_target_properties(srava PROPERTIES ENABLE_EXPORTS ON)
+
+# ★ in-proc 実行体の host インフラ (ptsCalcBody / D_REF codec) を planner に **無条件で**リンクする
+#   (2026-08-10)。カーネル .so (d2/d3/manifold/pipe) は ptsCalcBody 派生の計算本体を bundle せず host
+#   供給に頼る。planner は起動時に探索路の全 .so を dlopen して記述子を読むが、typeinfo (_ZTI…) は
+#   データシンボルなので RTLD_LAZY でも即解決される → ptsCalcBody を持たない planner はそれを使う .so
+#   (d3.so 等) を **PROCESS カーネルであっても**ロードできず落ちる。以前は manifold/pipeprox ブロックが
+#   条件付きで足していたため、両方 OFF (例: SRAVA_MODULE_CGAL=OFF の最小構成) で d2/d3 がロード不能だった。
+#   常に足すことで「どのカーネル集合でも planner が全 .so を dlopen できる」を保証する。
+target_sources(srava PRIVATE
+  src/classes/pig/c++/ptsCalcBody.cpp            # in-proc 計算本体基盤 (.so 非 bundle・全カーネルが依存)
+  src/classes/pig/c++/ptsGenericAgent.cpp        # モジュール実行体の共通基底 (in-proc 派生 agent が使う host インフラ)
+  src/classes/pig/c++/pigRefCacheCodec.cpp       # D_REF codec (in-proc pigDataCache 共有)
+  src/classes/pig/c++/ptsWireCacheStreamWriterRef.cpp
+  src/classes/pig/c++/ptsWireCacheStreamReaderRef.cpp
+)
+
+# ------------------------------------------------------------------
+# demo.so — 第3モジュール実証 (docs §7 Phase 6・完成条件)。CGAL も Manifold も FetchContent も
+#   使わない最小の value-only モジュール (demo_add / demo_range)。**ホストを一切改修せず**、この .so を
+#   探索路 (planner/srava_agent と同 dir) に置くだけで新 op が使えることを示す。
+#   EXEC_PROCESS 専用 = 2 個目の in-proc thread カーネル境界 (⑤・保留中) を踏まない。
+#   スクリプト側は `module("demo.so",{priority:99})` で demo を既定カーネルにする (opt-in)。
+# ------------------------------------------------------------------
+tinystate_codegen(demo_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/dematsAgent.cpp)
+add_library(demo_module MODULE
+  modules/demo/dematsAgent.cpp
+  modules/demo/demo_compute.cpp
+  modules/demo/manifest.cpp)
+set_target_properties(demo_module PROPERTIES PREFIX "" OUTPUT_NAME "demo")   # → demo.so
+target_link_libraries(demo_module PRIVATE pig)   # libpig(共有) にリンク (2026-08-12)
+set_target_properties(demo_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+add_dependencies(demo_module pigts_codegen demo_ts_codegen)
+target_include_directories(demo_module PRIVATE modules/demo)
+add_dependencies(srava demo_module)         # planner が起動時に dlopen (generic op 受理)
+add_dependencies(srava_agent demo_module)   # srava_agent が process 実行時に dlopen (make_agent)
+
+# demo.so が dlopen でき記述子 (make_agent 付き) が読めることを検証 (RTLD_NOW 全解決)。
+add_test(NAME srava_module_demo_so
+  COMMAND srava_module_probe $<TARGET_FILE:demo_module>)
+set_tests_properties(srava_module_demo_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=demo .*make_agent=yes")
+
+# ★ 完成条件の実証: ホスト無改修で demo.so の新 op が使えるか (generic mk_call 層 + agent() opt-in)。
+add_test(NAME srava_module_demo_ops
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_demo_ops)
+set_tests_properties(srava_module_demo_ops PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-demo-ops"
+  PASS_REGULAR_EXPRESSION "DEMO_OK"
+  FAIL_REGULAR_EXPRESSION "DEMO_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# ★ op-owner ルーティング実証: agent() priority opt-in なしで demo op が owner (demo) へ流れる。
+add_test(NAME srava_module_demo_ops_noprio
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_demo_ops_noprio)
+set_tests_properties(srava_module_demo_ops_noprio PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-demo-noprio"
+  PASS_REGULAR_EXPRESSION "DEMO_OK"
+  FAIL_REGULAR_EXPRESSION "DEMO_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# ------------------------------------------------------------------
+# d3.so — 第3(mesh 出力)カーネル実証 (rev4 Phase D-3・エージェント非依存の最終形)。
+#   demo.so (value-only) に続き **mesh (cacheable typed body) を出力する**第3カーネル。CGAL も
+#   Manifold も FetchContent も使わない (依存は host 供給の pig/pts/tinyState のみ)。d3.so を探索路に
+#   置くだけで d3_cube/d3_merge/d3_nfaces/d3_nverts が使え、mesh の codec/wire-stream/cache 往復が成立。
+#   exec_default=PROCESS (in-proc だと mesh が in-memory 共有で codec 非経由になるため・⑤ 回避)。
+# ------------------------------------------------------------------
+tinystate_codegen(d3_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/ptsd3WireCacheStreamWriterMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/ptsd3WireCacheStreamReaderMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/d3aCube.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/d3aMerge.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/d3aNfaces.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/d3aNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d3/d3atsAgent.cpp)
+add_library(d3_module MODULE
+  modules/d3/d3Mesh.cpp
+  modules/d3/d3CacheCodec.cpp
+  modules/d3/ptsd3WireCacheStreamWriterMesh.cpp
+  modules/d3/ptsd3WireCacheStreamReaderMesh.cpp
+  modules/d3/d3aCube.cpp
+  modules/d3/d3aMerge.cpp
+  modules/d3/d3aNfaces.cpp
+  modules/d3/d3aNverts.cpp
+  modules/d3/d3atsAgent.cpp
+  modules/d3/manifest.cpp)
+set_target_properties(d3_module PROPERTIES PREFIX "" OUTPUT_NAME "d3")   # → d3.so
+target_link_libraries(d3_module PRIVATE pig)   # libpig(共有) にリンク (2026-08-12)
+set_target_properties(d3_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+add_dependencies(d3_module pigts_codegen d3_ts_codegen)
+target_include_directories(d3_module PRIVATE modules/d3)
+add_dependencies(srava d3_module)         # planner が起動時に dlopen (記述子/型登録)
+add_dependencies(srava_agent d3_module)   # srava_agent が process 実行時に dlopen (make_agent)
+
+# d3.so が dlopen でき記述子 (make_agent 付き) が読めること (RTLD_NOW 全解決)。
+add_test(NAME srava_module_d3_so
+  COMMAND srava_module_probe $<TARGET_FILE:d3_module>)
+set_tests_properties(srava_module_d3_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=d3 .*make_agent=yes")
+
+# d3.so の manifest 静的初期化が型軸レジストリへ実装型を登録できること (d3-mesh3d=D3M3)。
+add_test(NAME srava_type_d3
+  COMMAND srava_module_probe $<TARGET_FILE:d3_module>)
+set_tests_properties(srava_type_d3 PROPERTIES
+  PASS_REGULAR_EXPRESSION "TYPES d3-mesh3d")
+
+# ★ mesh 出力の第3カーネルが host 無改修で走り、mesh の codec/cache 往復が成立すること:
+#   d3_nfaces(d3_merge(d3_cube(1), d3_cube(2))) == 24 かつ d3_nverts == 16 (立方体 2 個=16v/24f)。
+add_test(NAME srava_module_d3_mesh
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_d3_mesh)
+set_tests_properties(srava_module_d3_mesh PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-d3-mesh"
+  PASS_REGULAR_EXPRESSION "D3_OK"
+  FAIL_REGULAR_EXPRESSION "D3_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# ★ rev4 最終形の実証: planner (+ generic srava_agent) と d3.so **だけ**を隔離 dir にコピーして走らせ、
+#   CGAL/Manifold なしで mesh カーネルが完走すること = 「planner + 第3カーネル 1 個だけで走る
+#   (エージェント非依存)」。ホストは全てカーネル中立で、幾何は d3.so のみが供給する。
+add_test(NAME srava_module_d3_standalone
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_d3_standalone.sh
+          $<TARGET_FILE:srava> $<TARGET_FILE:srava_agent> $<TARGET_FILE:d3_module>)
+set_tests_properties(srava_module_d3_standalone PROPERTIES
+  PASS_REGULAR_EXPRESSION "D3_STANDALONE_OK"
+  FAIL_REGULAR_EXPRESSION "D3_STANDALONE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# ------------------------------------------------------------------
+# d4.so — 第4(in-proc mesh 消費)モジュール (⑤ cross-module 型変換・P4)。
+#   d3 のクローンだが exec_default=EXEC_THREAD (in-proc)。**2 個目の in-proc mesh モジュール**として、
+#   別モジュール (manifold=in-proc) が作った mf-mesh3d を **自型 d4-mesh3d として in-proc 消費**し、
+#   converted get_body(type) 経路 (MFM3→d4-mesh3d の d4-mf-upgrade reader) を初めて exercise する。
+#   d4.so 自体は Manifold/CGAL/FetchContent 非依存 — MFM3 の生バイトを読むだけ (framing は d4Mesh と同一)。
+# ------------------------------------------------------------------
+tinystate_codegen(d4_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/ptsd4WireCacheStreamWriterMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/ptsd4WireCacheStreamReaderMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aCube.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aMerge.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aNfaces.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4atsAgent.cpp)
+add_library(d4_module MODULE
+  modules/d4/d4Mesh.cpp
+  modules/d4/d4CacheCodec.cpp
+  modules/d4/ptsd4WireCacheStreamWriterMesh.cpp
+  modules/d4/ptsd4WireCacheStreamReaderMesh.cpp
+  modules/d4/d4aCube.cpp
+  modules/d4/d4aMerge.cpp
+  modules/d4/d4aNfaces.cpp
+  modules/d4/d4aNverts.cpp
+  modules/d4/d4atsAgent.cpp
+  modules/d4/manifest.cpp)
+set_target_properties(d4_module PROPERTIES PREFIX "" OUTPUT_NAME "d4")   # → d4.so
+target_link_libraries(d4_module PRIVATE pig)   # libpig(共有) にリンク (2026-08-12)
+set_target_properties(d4_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+add_dependencies(d4_module pigts_codegen d4_ts_codegen)
+target_include_directories(d4_module PRIVATE modules/d4)
+add_dependencies(srava d4_module)
+add_dependencies(srava_agent d4_module)
+
+# d4.so が dlopen でき記述子が読めること + 型軸に d4-mesh3d が登録されること。
+add_test(NAME srava_module_d4_so
+  COMMAND srava_module_probe $<TARGET_FILE:d4_module>)
+set_tests_properties(srava_module_d4_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=d4 .*make_agent=yes")
+add_test(NAME srava_type_d4
+  COMMAND srava_module_probe $<TARGET_FILE:d4_module>)
+set_tests_properties(srava_type_d4 PROPERTIES
+  PASS_REGULAR_EXPRESSION "TYPES d4-mesh3d")
+
+# d4 ネイティブ mesh 往復 (d3 と同じ・自型消費の健全性確認・in-proc fast path)。
+add_test(NAME srava_module_d4_mesh
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_d4_mesh)
+set_tests_properties(srava_module_d4_mesh PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-d4-mesh"
+  PASS_REGULAR_EXPRESSION "D4_OK"
+  FAIL_REGULAR_EXPRESSION "D4_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# ------------------------------------------------------------------
+# ★ ⑤ P4 の本丸: **in-proc cross-module 型変換** の実証 (manifold 必須)。
+#   manifold(in-proc) が作った mf mesh を d4(in-proc) が d4_nfaces/d4_nverts で消費する。routing は
+#   d4 op の foreign sig (mf-mesh3d) で d4 へ振られ、d4 の get_body(d4-mesh3d) が MFM3 file を
+#   d4-mf-upgrade reader で変換読みする (converted 経路)。dedup (同一 mf cache を 2 消費で変換 1 回) も
+#   SRAVA_DBG_CONV の計装行数で検証する。
+# ------------------------------------------------------------------
+if(SRAVA_MODULE_MANIFOLD)
+  add_test(NAME srava_module_d4_xconv
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_d4_xconv.sh $<TARGET_FILE:srava>)
+  set_tests_properties(srava_module_d4_xconv PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>"
+    PASS_REGULAR_EXPRESSION "D4X_OK"
+    FAIL_REGULAR_EXPRESSION "D4X_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+endif()
+
+# ------------------------------------------------------------------
+# d5.so — 2 個目の in-proc mesh 消費モジュール (⑤ conv **多型共存**テスト用・d4 のクローン・別自型 d5-mesh3d)。
+#   d4 と d5 が同一の mf mesh を各々の自型 (d4-mesh3d / d5-mesh3d) として同時 in-proc 消費 → pigDataCache の
+#   conv body-list に型別エントリが 2 つ共存することを実証する (旧・単一 conv スロットは互いに上書き/競合した)。
+# ------------------------------------------------------------------
+tinystate_codegen(d5_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/ptsd5WireCacheStreamWriterMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/ptsd5WireCacheStreamReaderMesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/d5aCube.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/d5aMerge.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/d5aNfaces.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/d5aNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d5/d5atsAgent.cpp)
+add_library(d5_module MODULE
+  modules/d5/d5Mesh.cpp
+  modules/d5/d5CacheCodec.cpp
+  modules/d5/ptsd5WireCacheStreamWriterMesh.cpp
+  modules/d5/ptsd5WireCacheStreamReaderMesh.cpp
+  modules/d5/d5aCube.cpp
+  modules/d5/d5aMerge.cpp
+  modules/d5/d5aNfaces.cpp
+  modules/d5/d5aNverts.cpp
+  modules/d5/d5atsAgent.cpp
+  modules/d5/manifest.cpp)
+set_target_properties(d5_module PROPERTIES PREFIX "" OUTPUT_NAME "d5")   # → d5.so
+target_link_libraries(d5_module PRIVATE pig)   # libpig(共有) にリンク (2026-08-12)
+set_target_properties(d5_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+add_dependencies(d5_module pigts_codegen d5_ts_codegen)
+target_include_directories(d5_module PRIVATE modules/d5)
+add_dependencies(srava d5_module)
+add_dependencies(srava_agent d5_module)
+
+add_test(NAME srava_module_d5_so
+  COMMAND srava_module_probe $<TARGET_FILE:d5_module>)
+set_tests_properties(srava_module_d5_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=d5 .*make_agent=yes")
+
+# ★ conv 多型共存: 同一 mf cache を d4(→d4-mesh3d) と d5(→d5-mesh3d) が同時 in-proc 消費し、両変換が
+#   成立 (両者 12) かつ SRAVA_DBG_CONV に **2 本の異なる [CONV] 行** が出る (= body-list に 2 エントリ共存)。
+if(SRAVA_MODULE_MANIFOLD)
+  add_test(NAME srava_module_d45_multitype
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_d45_multitype.sh $<TARGET_FILE:srava>)
+  set_tests_properties(srava_module_d45_multitype PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>"
+    PASS_REGULAR_EXPRESSION "D45_OK"
+    FAIL_REGULAR_EXPRESSION "D45_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+endif()
+
+# ------------------------------------------------------------------
+# d2.so — 第2(2D)カーネル (rev4「同一形式を 2 カーネルが次元分担で I/O」実演・§9.4/§9.7 Q-E)。
+#   d3 (3D 専用) の対になる 2D 専用カーネル。両者は同じ「生配列 mesh 形式」を共有しつつ **異なる次元型**
+#   (d3-mesh3d / d2-shape2d) を持ち、**同じ op 名 `dcount`** をそれぞれ自分の次元型で申告する。
+#   dcount は 2 owner なので op-owner routing は発火せず、decide_executor が入力型 (次元) で正しいカーネルへ
+#   振る = (kernel×次元) 2 軸問題の型ディスパッチによる解決。d3 と同じく CGAL/Manifold/FetchContent 非依存。
+# ------------------------------------------------------------------
+tinystate_codegen(d2_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d2/ptsd2WireCacheStreamWriterShape.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d2/ptsd2WireCacheStreamReaderShape.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d2/d2aSquare.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d2/d2aCount.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d2/d2atsAgent.cpp)
+add_library(d2_module MODULE
+  modules/d2/d2Shape.cpp
+  modules/d2/d2CacheCodec.cpp
+  modules/d2/ptsd2WireCacheStreamWriterShape.cpp
+  modules/d2/ptsd2WireCacheStreamReaderShape.cpp
+  modules/d2/d2aSquare.cpp
+  modules/d2/d2aCount.cpp
+  modules/d2/d2atsAgent.cpp
+  modules/d2/manifest.cpp)
+set_target_properties(d2_module PROPERTIES PREFIX "" OUTPUT_NAME "d2")   # → d2.so
+target_link_libraries(d2_module PRIVATE pig)   # libpig(共有) にリンク (2026-08-12)
+set_target_properties(d2_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+add_dependencies(d2_module pigts_codegen d2_ts_codegen)
+target_include_directories(d2_module PRIVATE modules/d2)
+add_dependencies(srava d2_module)
+add_dependencies(srava_agent d2_module)
+
+# d2.so が dlopen でき記述子が読めること + 型軸に d2-shape2d が登録されること。
+add_test(NAME srava_module_d2_so
+  COMMAND srava_module_probe $<TARGET_FILE:d2_module>)
+set_tests_properties(srava_module_d2_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=d2 .*make_agent=yes")
+add_test(NAME srava_type_d2
+  COMMAND srava_module_probe $<TARGET_FILE:d2_module>)
+set_tests_properties(srava_type_d2 PROPERTIES
+  PASS_REGULAR_EXPRESSION "TYPES d2-shape2d")
+
+# ★ 次元分担ルーティングの実演: d2.so + d3.so **だけ**を隔離 dir に置き、**同一 op `dcount`** が
+#   入力型の次元で正しいカーネルへ振られること: dcount(d3_cube(1))==8 (→d3・頂点数)・
+#   dcount(d2_square(1))==4 (→d2・点数)。CGAL/Manifold なしで (kernel×次元) 2 軸問題の解決を実証。
+add_test(NAME srava_shared_dim
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_shared_dim.sh
+          $<TARGET_FILE:srava> $<TARGET_FILE:srava_agent> $<TARGET_FILE:d2_module> $<TARGET_FILE:d3_module>)
+set_tests_properties(srava_shared_dim PROPERTIES
+  PASS_REGULAR_EXPRESSION "SHARED_DIM_OK"
+  FAIL_REGULAR_EXPRESSION "SHARED_DIM_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# ------------------------------------------------------------------
+# 起動方式 registry の remote 枠 確認 (docs §7 Phase 6・実装は別)。ダミー "remote" backend を
+#   register_backend → make("remote") が dispatch すること・未登録名は dispatch しないことを確認。
+#   pigExecBackend の静的初期化が thread/process = ptsMediatorInternal/External を thNEW するので
+#   それらと host インフラ (AGENT_HOST_SRC) をリンクする。
+# ------------------------------------------------------------------
+add_executable(exec_backend_remote_probe
+  src/main/exec_backend_remote_probe_main.cpp
+  # ${AGENT_HOST_SRC} は libpig(共有) に移動 (2026-08-12)
+)
+add_dependencies(exec_backend_remote_probe pigts_codegen)
+target_include_directories(exec_backend_remote_probe PRIVATE ${SRAVA_GEN})
+target_compile_definitions(exec_backend_remote_probe PRIVATE SRAVA_VALUE_ONLY)
+target_link_libraries(exec_backend_remote_probe PRIVATE pig Threads::Threads m ${CMAKE_DL_LIBS})
+add_test(NAME exec_backend_remote COMMAND exec_backend_remote_probe)
+set_tests_properties(exec_backend_remote PROPERTIES
+  PASS_REGULAR_EXPRESSION "REMOTE_SLOT_OK"
+  FAIL_REGULAR_EXPRESSION "REMOTE_SLOT_FAIL|Segmentation|Aborted|core dumped")
 
 # ------------------------------------------------------------------
 # インストール: srava(プランナー)と srava_agent(CGAL ワーカ)を bin へ。
@@ -769,15 +1236,6 @@ set_tests_properties(srava_color_export PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-colorexp"
   PASS_REGULAR_EXPRESSION "COLOR_OK"
   FAIL_REGULAR_EXPRESSION "COLOR_FAIL|Segmentation|Aborted|core dumped|ERROR|parse error|unknown op"
-  TIMEOUT 30)
-
-# プラグインエージェント疎通(別プロセスの echo プラグインを pigwire で呼ぶ・end-to-end)。
-add_test(NAME srava_plugin_echo
-  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_echo)
-set_tests_properties(srava_plugin_echo PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pluginecho;SRAVA_ECHO_AGENT=$<TARGET_FILE:echo_agent>"
-  PASS_REGULAR_EXPRESSION "PLUGIN_OK"
-  FAIL_REGULAR_EXPRESSION "PLUGIN_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
   TIMEOUT 30)
 
 # combine(+++)入力へのブール分配則 (a+++b)&&&c / (a+++b)---c。
@@ -1518,11 +1976,144 @@ set_tests_properties(srava_2d_svg_roundtrip PROPERTIES
   PASS_REGULAR_EXPRESSION "nv=16 nf=32"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
   TIMEOUT 20)
+# ★カーネル混成の回帰 (2026-08-06): manifold 既定下で cg agent が MFM3/MFC2 を昇格読みできること。
+# SRAVA_MODULE_MANIFOLD=ON の中でしか意味を持たないが、add_test はこの位置 (dxf 系と同居) に置き、
+# ゲートは下の if で行う。
+if(SRAVA_MODULE_MANIFOLD)
+# ★manifold 既定の煙テスト (2026-08-06): env に SRAVA_DEFAULT_OUTPUT を入れない = 出荷既定
+#   (Manifold 内蔵ビルドでは manifold) そのものを踏む。既存スイートは exact をピン留めして
+#   CGAL カバレッジを維持しているため、既定経路はこの群だけが検証する。
+add_test(NAME srava_default_kernel_union
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_union)
+set_tests_properties(srava_default_kernel_union PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-union"
+  PASS_REGULAR_EXPRESSION "VOL 9"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_default_kernel_booleans
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_booleans)
+set_tests_properties(srava_default_kernel_booleans PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-bool"
+  PASS_REGULAR_EXPRESSION "IVOL 2(\n|.)*DVOL 6"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_default_kernel_export
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_export)
+set_tests_properties(srava_default_kernel_export PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-exp"
+  PASS_REGULAR_EXPRESSION "TRI 28"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_default_kernel_2d_extrude
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_2d_extrude)
+set_tests_properties(srava_default_kernel_2d_extrude PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-ext"
+  PASS_REGULAR_EXPRESSION "EVOL 600"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_default_kernel_offset3d
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_offset3d)
+set_tests_properties(srava_default_kernel_offset3d PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-off"
+  PASS_REGULAR_EXPRESSION "OVOL 1"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 40)
+
+add_test(NAME srava_default_kernel_3mf
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_3mf)
+set_tests_properties(srava_default_kernel_3mf PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-3mf"
+  PASS_REGULAR_EXPRESSION "ZIP3MF 1"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_default_kernel_import_obj
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> default_kernel_import_obj)
+set_tests_properties(srava_default_kernel_import_obj PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-defk-impobj"
+  PASS_REGULAR_EXPRESSION "IVOL 8"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+
+add_test(NAME srava_kernel_mix_cast
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> kernel_mix_cast)
+set_tests_properties(srava_kernel_mix_cast PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-kmix-cast"
+  PASS_REGULAR_EXPRESSION "VOL 9"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_kernel_mix_cast_downgrade
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> kernel_mix_cast_downgrade)
+set_tests_properties(srava_kernel_mix_cast_downgrade PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-kmix-cast-dn"
+  PASS_REGULAR_EXPRESSION "VOL 9"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+# ★ leaf 入力 × cross-module 変換の COLD 回帰 (2026-08-12): A_SAVE_BEGIN の mark_valid が無いと
+# leaf 生産者の CV_INVALID 焼き込みが下流へ渡り panic。テスト側 (srava_parse.sh) が cache dir を
+# 毎回消して cold を保証する。
+add_test(NAME srava_kernel_mix_cast_downgrade_leaf
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> kernel_mix_cast_downgrade_leaf)
+set_tests_properties(srava_kernel_mix_cast_downgrade_leaf PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-kmix-cast-dnleaf"
+  PASS_REGULAR_EXPRESSION "VOL 8"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error|panic"
+  TIMEOUT 20)
+add_test(NAME srava_kernel_mix_cast_downgrade_2d
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> kernel_mix_cast_downgrade_2d)
+set_tests_properties(srava_kernel_mix_cast_downgrade_2d PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-kmix-cast-dn2d"
+  PASS_REGULAR_EXPRESSION "AREA 12"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error|panic"
+  TIMEOUT 20)
+add_test(NAME srava_kernel_mix_dxf
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> kernel_mix_dxf)
+set_tests_properties(srava_kernel_mix_dxf PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-kmix-dxf"
+  PASS_REGULAR_EXPRESSION "result (cache|value)"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+# ★ choice A: cgal 専用 op (manifold が持たない) に mf mesh を渡す暗黙クロスカーネル (sig 化後も維持)。
+add_test(NAME srava_kernel_mix_cgalonly
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> kernel_mix_cgalonly)
+set_tests_properties(srava_kernel_mix_cgalonly PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-kmix-cgonly"
+  PASS_REGULAR_EXPRESSION "CGONLY_OK"
+  FAIL_REGULAR_EXPRESSION "CGONLY_FAIL|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+
+# ★ agent("so","off"/"on") 実行時無効化 (2026-08-10)。cgal を切って manifold へ落ちる/戻すのを
+#   三角形数 (cgal union=46 / manifold union=28) で判別。cgal+manifold 両方が要る (cgal.so をロードして
+#   off にするので SRAVA_MODULE_CGAL も要件) → manifold ブロック内 + cgal ガード。
+if(SRAVA_MODULE_CGAL)
+add_test(NAME srava_disable_cgal
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> disable_cgal)
+set_tests_properties(srava_disable_cgal PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-disable-cgal"
+  PASS_REGULAR_EXPRESSION "TRI 28"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_disable_cgal_reenable
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> disable_cgal_reenable)
+set_tests_properties(srava_disable_cgal_reenable PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-reenable-cgal"
+  PASS_REGULAR_EXPRESSION "TRI 46"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 20)
+add_test(NAME srava_disable_bad_option
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> disable_bad_option)
+set_tests_properties(srava_disable_bad_option PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-disable-bad"
+  PASS_REGULAR_EXPRESSION "module: string option must be"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 20)
+endif()   # SRAVA_MODULE_CGAL (disable_cgal 系)
+endif()
+
 add_test(NAME srava_2d_dxf_export
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> dxf_export)
 set_tests_properties(srava_2d_dxf_export PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-2d-dxf"
-  PASS_REGULAR_EXPRESSION "result cache"
+  PASS_REGULAR_EXPRESSION "result (cache|value)"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
   TIMEOUT 20)
 add_test(NAME srava_2d_dxf_roundtrip
@@ -1575,7 +2166,10 @@ add_test(NAME srava_3d_offset_shell
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> offset_3d_shell)
 set_tests_properties(srava_3d_offset_shell PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-3d-offs"
-  PASS_REGULAR_EXPRESSION "nv=82 nf=156"
+  # 3D offset(Minkowski/Nef)の正確な nv/nf は CGAL バージョン依存(例: Linux baseline 82/156 vs
+  # macOS の CGAL 6.2 で 84/160)。厳密個数を固定せず「非自明な閉メッシュが出て crash しない」を検証
+  # (空/退化なら nv/nf が 1 桁 → 不一致。real な破綻は FAIL_REGULAR_EXPRESSION で捕捉)。
+  PASS_REGULAR_EXPRESSION "nv=[1-9][0-9]+ nf=[1-9][0-9]+"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
   TIMEOUT 60)
 add_test(NAME srava_3d_offset_inset
@@ -1780,13 +2374,18 @@ set_tests_properties(srava_workergate_eagain PROPERTIES
   TIMEOUT 40)
 
 # fd リーク回帰: ulimit -n 64・cap=8(同時 8 agent で fd は収まる)で多数の agent を回す。FIN で rfd/pipe を
-# 閉じれば fd は再利用され完走("result cache")。閉じ忘れ=リークがあれば fd が累積枯渇し、launch 失敗で
+# 閉じれば fd は再利用され完走("result cache="/"result value="・export の out_cache=0 化で後者)。
+# 閉じ忘れ=リークがあれば fd が累積枯渇し、launch 失敗で
 # "Lower PIG_MAX_WORKERS"(ERROR[)になり FAIL。★ limit 固定方針なので backoff に頼らず cap を明示する。
 add_test(NAME srava_fdleak
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> fdleak)
 set_tests_properties(srava_fdleak PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-fdleak;PIG_MAX_WORKERS=8"
-  PASS_REGULAR_EXPRESSION "result cache="
+  # PIG_MAX_WORKERS=4 (2026-08-01): ピーク fd 使用量は同時 agent 数にほぼ比例し、最小で通る
+  # ulimit -n は W8:56 / W6:48 / W4:40 (実測)。上限 64 に対し W8 では余裕 8 fd しかなく、
+  # フル ctest の同時実行下では ~10%/cold run で "fork failed" になっていた。W4 なら余裕 24 fd。
+  # fork 回数(240)は変わらないのでリーク検出力は落ちない (1 agent 1 fd でも漏れれば 40 個で枯渇)。
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-fdleak;PIG_MAX_WORKERS=4"
+  PASS_REGULAR_EXPRESSION "result (cache=|value=)"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR\\["
   TIMEOUT 60)
 
@@ -1908,9 +2507,71 @@ add_test(NAME srava_shape_sphere
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> sphere)
 set_tests_properties(srava_shape_sphere PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-sph"
-  PASS_REGULAR_EXPRESSION "nv=12 nf=20"
+  PASS_REGULAR_EXPRESSION "nv=258 nf=512"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op"
   TIMEOUT 20)
+
+# ★sphere / icosphere が cgal と manifold で体積 bit 一致 (共通 geodesic.h)。manifold ビルド時のみ。
+if(SRAVA_MODULE_MANIFOLD)
+add_test(NAME srava_sphere_kernel_agree
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> sphere_kernel_agree)
+set_tests_properties(srava_sphere_kernel_agree PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-sph-agree"
+  PASS_REGULAR_EXPRESSION "AGREE"
+  FAIL_REGULAR_EXPRESSION "MISMATCH|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 30)
+
+# ★tube (3D 掃引管 / 2D 帯) が cgal と manifold で一致 (共通 common/tube.h・#3415)。
+#   bit 一致は要求しない (cgal=厳密積算 / manifold=double 積算・2D は合併エンジンが別) → 相対許容で見る。
+add_test(NAME srava_tube_kernel_agree
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> tube_kernel_agree)
+set_tests_properties(srava_tube_kernel_agree PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-tube-agree"
+  PASS_REGULAR_EXPRESSION "AGREE"
+  FAIL_REGULAR_EXPRESSION "MISMATCH|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 30)
+
+# ★#3415 続き: manifold 側の color + 色つき 3MF export (共通ライタ common/mesh3mf.h)。
+#   palette/pid の形・単位・色を付けても幾何が変わらないことを見る。
+add_test(NAME srava_mf_color_3mf
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> mf_color_3mf)
+set_tests_properties(srava_mf_color_3mf PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-mfcolor"
+  PASS_REGULAR_EXPRESSION "MFCOLOR-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 40)
+
+# ★#3415 + color/3mf の到達点: pipe_clearance.sra と同じ形の連鎖 (map→tube→color→combine→色つき 3MF)
+#   が **存在しない SRAVA_AGENT** で完走する = 丸ごと in-proc に乗った証明。
+add_test(NAME srava_mf_pipe_scene_inproc
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> mf_pipe_scene_inproc)
+set_tests_properties(srava_mf_pipe_scene_inproc PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-mfpipe"
+  PASS_REGULAR_EXPRESSION "MFPIPE-INPROC-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 60)
+
+# ★in-proc の落とし穴の回帰: map/lambda で作ったネスト配列を取る op (tube/polygon) が
+#   in-proc と process で同じ答えになること。配列要素は eager 解決されないので compact() が要る。
+add_test(NAME srava_mf_inproc_nested_array
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> mf_inproc_nested_array)
+set_tests_properties(srava_mf_inproc_nested_array PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-mfnested"
+  PASS_REGULAR_EXPRESSION "NESTED-INPROC-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 60)
+
+# ★#3415 の眼目: tube 主体の連鎖が丸ごと in-proc (manifold) に乗ること。
+#   存在しない SRAVA_AGENT で完走 = agent プロセスを一度も要らなかった証明。
+#   cgal 最優先の同式が失敗することも見る (空振りテスト防止)。
+add_test(NAME srava_mf_tube_inproc
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> mf_tube_inproc)
+set_tests_properties(srava_mf_tube_inproc PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-mftube-inproc"
+  PASS_REGULAR_EXPRESSION "MFTUBE-INPROC-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 40)
+endif()
 
 # 2.2 ファイル export: 拡張子で形式判定(write_polygon_mesh)。OFF と STL を検証。
 add_test(NAME srava_export_off
@@ -1934,12 +2595,10 @@ set_tests_properties(srava_export_stl PROPERTIES
 # ------------------------------------------------------------------
 add_executable(repro_ts2_sigchld
   src/main/repro_ts2_sigchld_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
   src/classes/pig/c++/tsSysRepro.cpp
 )
 add_dependencies(repro_ts2_sigchld pigts_codegen)
-target_link_libraries(repro_ts2_sigchld PRIVATE ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(repro_ts2_sigchld PRIVATE pig Threads::Threads m)   # ★ #3427 ③: libpig リンクへ
 
 # ------------------------------------------------------------------
 # ts2IO::write_c pipe バッファ超え停止バグの最小再現(ctest 非登録 = ハング前提の手動実行用)
@@ -1949,12 +2608,10 @@ target_link_libraries(repro_ts2_sigchld PRIVATE ${TINYSTATE_LIB} Threads::Thread
 # ------------------------------------------------------------------
 add_executable(repro_pipe
   src/main/repro_pipe_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
   src/classes/pig/c++/tsPipeRepro.cpp
 )
 add_dependencies(repro_pipe pigts_codegen)
-target_link_libraries(repro_pipe PRIVATE ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(repro_pipe PRIVATE pig Threads::Threads m)   # ★ #3427 ③: libpig リンクへ
 
 # ------------------------------------------------------------------
 # 多数 ts2System 子の一括 teardown レース(worker thread の pipe FIN/abort vs main app teardown)
@@ -1964,65 +2621,146 @@ target_link_libraries(repro_pipe PRIVATE ${TINYSTATE_LIB} Threads::Threads m)
 # ------------------------------------------------------------------
 add_executable(repro_teardown
   src/main/repro_teardown_main.cpp
-  src/classes/pig/c++/ptsObject.cpp
-  src/classes/pig/c++/ptsApplication.cpp
   src/classes/pig/c++/tsTeardownRepro.cpp
 )
 add_dependencies(repro_teardown pigts_codegen)
-target_link_libraries(repro_teardown PRIVATE ${TINYSTATE_LIB} Threads::Threads m)
+target_link_libraries(repro_teardown PRIVATE pig Threads::Threads m)   # ★ #3427 ③: libpig リンクへ
 
 # ------------------------------------------------------------------
-# プラグイン: pipe_proximity(可変太さパイプの自己接近検出・別 repo MIT・CGAL 非依存)。
-#   opt-in。ON で pipe_proximity を FetchContent(v0.1.1 pin)取得し、host 側アダプタ
-#   (plugins/pipe_proximity/)と一緒に pipe_proximity_agent をビルドする。
+# カーネル: pipe_proximity(可変太さパイプの自己接近検出・MIT・CGAL 非依存)。value 出力の
+#   解析カーネル。opt-in。コアライブラリ(pipeprox)は modules/pipe_proximity/vendor/pipeProximity/ に
+#   **取り込み済み**(2026-08-12・以前は別 repo を FetchContent していたが同梱に変更)。host 側アダプタ
+#   (modules/pipe_proximity/)と一緒に pipe_proximity.so をビルドする(demo/d3 等と同じ .so 機構)。
 #   依存方向は一方向(cgal-processor → pipe_proximity)。アダプタ + 登録は host 側。
 # ------------------------------------------------------------------
-option(SRAVA_PLUGIN_PIPEPROX "build pipe_proximity plugin agent (FetchContent)" OFF)
-if(SRAVA_PLUGIN_PIPEPROX)
-  include(FetchContent)
-  FetchContent_Declare(pipeprox
-    GIT_REPOSITORY ssh://git@project.globalbase.org/git_repo/proj/gs/pipeProximity.git
-    GIT_TAG v0.1.6)
-  FetchContent_MakeAvailable(pipeprox)
-  # 上流バグ回避(ソースは fork しない・Issue で戻す): pipe_proximity v0.1.1 の bvh.hpp が
-  # std::max({...}) を <algorithm> 無しで使う。新しい libstdc++(Debian13)は透過 include しないので
-  # pipeprox の各 TU に <algorithm> を強制 include する(ビルドレベルの回避・上流修正で除去可)。
-  if(TARGET pipeprox)
-    target_compile_options(pipeprox PRIVATE -include algorithm)
-  endif()
+# option(SRAVA_MODULE_PIPEPROX) と旧名の後方互換はファイル冒頭 (§option 集約) で宣言済み。
+if(SRAVA_MODULE_PIPEPROX)
+  # ---- pipeprox コアライブラリ: 取り込み済みソースから直接ビルド (FetchContent 廃止・2026-08-12)。
+  #      upstream=v0.1.6・MIT・GLOBALBASE UMUT。取り込み内容は vendor/pipeProximity/VENDORED.md 参照。
+  #      bvh.hpp/gradient.cpp の <algorithm> 欠落は取り込みソース側で修正済み (旧 -include algorithm 回避は撤去)。----
+  set(PIPEPROX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/modules/pipe_proximity/vendor/pipeProximity)
+  add_library(pipeprox STATIC
+    ${PIPEPROX_DIR}/src/bezier.cpp
+    ${PIPEPROX_DIR}/src/bvh.cpp
+    ${PIPEPROX_DIR}/src/proximity.cpp
+    ${PIPEPROX_DIR}/src/gradient.cpp
+    ${PIPEPROX_DIR}/src/cd_parallel.cpp
+    ${PIPEPROX_DIR}/src/controller.cpp)
+  target_include_directories(pipeprox PUBLIC ${PIPEPROX_DIR}/include)
+  # .a を pipe_proximity.so (MODULE) にリンクするため PIC でビルド (非 PIC はリロケーションエラー)。
+  set_target_properties(pipeprox PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  find_package(Threads REQUIRED)   # cd_parallel.cpp が std::thread
+  target_link_libraries(pipeprox PUBLIC Threads::Threads)
 
-  # 2 TU 分離: agent(SDK/::pipe)と adapter(pipe ヘッダ/namespace pipe)。namespace pipe ↔ POSIX
-  # ::pipe の衝突回避。境界は plain 型(pipe_proximity_adapter.h)。
-  add_executable(pipe_proximity_agent
-    plugins/pipe_proximity/pipe_proximity_agent.cpp
-    plugins/pipe_proximity/pipe_proximity_adapter.cpp)
-  target_include_directories(pipe_proximity_agent PRIVATE plugins/pipe_proximity)
-  # pig(SDK/値コーデック)+ libtinyState(sPtr)+ pipeprox(MIT)。CGAL も srava もリンクしない。
-  target_link_libraries(pipe_proximity_agent PRIVATE pig ${TINYSTATE_LIB} Threads::Threads m pipeprox)
+  # 取り込んだ pipeprox の単体回帰テスト (upstream tests/test_pipe.cpp・失敗数=exit code)。
+  add_executable(pipeprox_test_pipe ${PIPEPROX_DIR}/tests/test_pipe.cpp)
+  target_link_libraries(pipeprox_test_pipe PRIVATE pipeprox)
+  add_test(NAME srava_pipeprox_vendored_test COMMAND pipeprox_test_pipe)
+  set_tests_properties(srava_pipeprox_vendored_test PROPERTIES
+    FAIL_REGULAR_EXPRESSION "FAIL:" TIMEOUT 30)
 
-  # 統合テスト(別プロセス起動・自己接近検出が返るか)。
-  add_test(NAME srava_plugin_pipeprox
-    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_pipeprox)
-  set_tests_properties(srava_plugin_pipeprox PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipeprox;SRAVA_PIPEPROX_AGENT=$<TARGET_FILE:pipe_proximity_agent>"
-    PASS_REGULAR_EXPRESSION "PIPEPROX_OK"
-    FAIL_REGULAR_EXPRESSION "PIPEPROX_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
+  # ---- pipe_proximity.so (in-proc/process 両対応の .so モジュール・docs §5)。plugin を kernel と
+  #      同じ .so 機構に載せ、exec_default=THREAD のとき planner 内 thread (ptsMediatorInternal) で、
+  #      exec_default=process (opt-out) のとき srava_agent が dlopen して別プロセスで走らせる。
+  #      ★ Plan A (2026-08-10): 旧 process 専用バイナリ pipe_proximity_agent + .plugin manifest +
+  #      pigfPluginAgent/pigPluginRegistry は廃止し、demo.so と同じ generic 経路に一本化した。
+  #      ppatsAgent (ptsAgent 派生) と ppaCompute (ptsCalcBody 派生) を tscpp2 codegen。pipeprox を
+  #      bundle・pig/pts/tinyState は host 供給 (undefined のままビルド・manifold.so と同方針)。----
+  tinystate_codegen(pp_ts_codegen
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/pipe_proximity/ppatsAgent.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/pipe_proximity/ppaCompute.cpp)
+  add_library(pipe_proximity_module MODULE
+    modules/pipe_proximity/ppatsAgent.cpp
+    modules/pipe_proximity/ppaCompute.cpp
+    modules/pipe_proximity/pipe_proximity_compute.cpp
+    modules/pipe_proximity/pipe_proximity_adapter.cpp
+    modules/pipe_proximity/manifest.cpp)
+  set_target_properties(pipe_proximity_module PROPERTIES PREFIX "" OUTPUT_NAME "pipe_proximity")  # → pipe_proximity.so
+  add_dependencies(pipe_proximity_module pigts_codegen pp_ts_codegen)
+  target_include_directories(pipe_proximity_module PRIVATE modules/pipe_proximity)
+  target_link_libraries(pipe_proximity_module PRIVATE pig pipeprox)
+  set_target_properties(pipe_proximity_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+  add_dependencies(srava pipe_proximity_module)   # planner が起動時に dlopen (in-proc thread 実行)
+  add_dependencies(srava_agent pipe_proximity_module)   # ★Plan A: process 実行も srava_agent が dlopen
+
+  # in-proc 実行体 (ppatsAgent/ppaCompute) が使う host インフラ (ptsCalcBody) は .so に bundle されず
+  # planner が供給する。★2026-08-10: ptsCalcBody は srava 定義直後に **無条件で**リンクするようにした
+  #   (どのカーネル集合でも planner が全 .so を dlopen できるように) ので、ここでの追加は不要になった。
+
+  # pipe_proximity.so が dlopen でき、記述子 (make_agent 付き) が読めることを検証 (RTLD_NOW 全解決)。
+  add_test(NAME srava_module_pipeprox_so
+    COMMAND srava_module_probe $<TARGET_FILE:pipe_proximity_module>)
+  set_tests_properties(srava_module_pipeprox_so PROPERTIES
+    PASS_REGULAR_EXPRESSION "MODULE_OK name=pipe_proximity .*make_agent=yes")
+
+  # ★ Plan A: 旧 srava_plugin_pipeprox (process 専用バイナリ経路のテスト) は撤去。in-proc は
+  #   srava_plugin_pipeprox_inproc、process(srava_agent 経由)は srava_plugin_pipeprox_process が覆う。
+
+  # ★ .so 化 Phase 5: in-proc 実行の証明。manifest の bin も SRAVA_AGENT も偽にして完走する
+  #   = pipe_proximity.so を planner 内 thread (ppatsAgent) で実行し、プロセスを一切 spawn していない。
+  add_test(NAME srava_plugin_pipeprox_inproc
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_pipeprox_inproc)
+  set_tests_properties(srava_plugin_pipeprox_inproc PROPERTIES
+    ENVIRONMENT "SRAVA_CACHE_DIR=/tmp/srava-pipeinproc"
+    PASS_REGULAR_EXPRESSION "PIPEINPROC_OK"
+    FAIL_REGULAR_EXPRESSION "PIPEINPROC_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly"
+    TIMEOUT 60)
+
+  # ★ .so 化 Phase 5 (§5.4): process 版の存続。agent(so,{exec_default:"process"}) で in-proc を
+  #   opt-out し、実 bin を別プロセス起動する経路が .so ロード後も生きていることを確認。
+  add_test(NAME srava_plugin_pipeprox_process
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_pipeprox_process)
+  set_tests_properties(srava_plugin_pipeprox_process PROPERTIES
+    ENVIRONMENT "SRAVA_CACHE_DIR=/tmp/srava-pipeproc;SRAVA_AGENT=$<TARGET_FILE:srava_agent>"
+    PASS_REGULAR_EXPRESSION "PIPEPROC_OK"
+    FAIL_REGULAR_EXPRESSION "PIPEPROC_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
 
   # 統合テスト(同一 bin の 2 つ目の op): 距離調整コントローラ pipe_adjust が違反を解消するか。
   add_test(NAME srava_plugin_pipeadjust
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_pipeadjust)
   set_tests_properties(srava_plugin_pipeadjust PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipeadjust;SRAVA_PIPEPROX_AGENT=$<TARGET_FILE:pipe_proximity_agent>"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipeadjust"
     PASS_REGULAR_EXPRESSION "PIPEADJUST_OK"
     FAIL_REGULAR_EXPRESSION "PIPEADJUST_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
+
+  # ★ #3408 回帰: fixed 指定の制御点が外力(fZ)下でも動かないこと。真因は polishScene の貪欲拡張が
+  #   blocked(固定 DOF・硬ピン)を跨いで relaxSpan していたこと。修正は develop-v1 の faf03c7 を
+  #   modules/ 構造へ移植したもの (bench は plugins/ 廃止後に分岐していたため渡っていなかった)。
+  # ★硬ピンの joint 範囲検査 (2026-08-13)。範囲外は以前ヒープを壊していた (in-proc=corrupted
+  #   double-linked list / process=agent 死)。今は ①ライブラリ側で弾き ②srava が明示エラーを返す。
+  #   範囲内の硬ピンが従来どおり動くことも併せて見る (弾きすぎの検出)。
+  add_test(NAME srava_pipeprox_pin_range
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> pipeprox_pin_range)
+  set_tests_properties(srava_pipeprox_pin_range PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pinrange"
+    PASS_REGULAR_EXPRESSION "PINRANGE-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|unknown op|parse error"
+    TIMEOUT 60)
+
+  add_test(NAME srava_pipeprox_fixed_force
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> pipeprox_fixed_force)
+  set_tests_properties(srava_pipeprox_fixed_force PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipefixed"
+    PASS_REGULAR_EXPRESSION "PIPEFIXED_OK"
+    FAIL_REGULAR_EXPRESSION "PIPEFIXED_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
+    TIMEOUT 300)
+
+  # wSpace(制御点間隔の均一化・上流 v0.1.7 の項)の配線回帰。既定 0=従来一致・指定時に効くこと。
+  add_test(NAME srava_pipeprox_wspace
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> pipeprox_wspace)
+  set_tests_properties(srava_pipeprox_wspace PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipewspace"
+    PASS_REGULAR_EXPRESSION "PIPEWSPACE_OK"
+    FAIL_REGULAR_EXPRESSION "PIPEWSPACE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
+    TIMEOUT 120)
 
   # 統合テスト: 半径プロファイル([s,r] キーポイント線形補間)がスカラ一定と整合するか。
   add_test(NAME srava_plugin_radius
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_radius)
   set_tests_properties(srava_plugin_radius PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-piperadius;SRAVA_PIPEPROX_AGENT=$<TARGET_FILE:pipe_proximity_agent>"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-piperadius"
     PASS_REGULAR_EXPRESSION "PIPERADIUS_OK"
     FAIL_REGULAR_EXPRESSION "PIPERADIUS_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
@@ -2031,7 +2769,7 @@ if(SRAVA_PLUGIN_PIPEPROX)
   add_test(NAME srava_plugin_scene
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_scene)
   set_tests_properties(srava_plugin_scene PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipescene;SRAVA_PIPEPROX_AGENT=$<TARGET_FILE:pipe_proximity_agent>"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipescene"
     PASS_REGULAR_EXPRESSION "PIPESCENE_OK"
     FAIL_REGULAR_EXPRESSION "PIPESCENE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
@@ -2040,7 +2778,7 @@ if(SRAVA_PLUGIN_PIPEPROX)
   add_test(NAME srava_plugin_sample
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_sample)
   set_tests_properties(srava_plugin_sample PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipesample;SRAVA_PIPEPROX_AGENT=$<TARGET_FILE:pipe_proximity_agent>"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipesample"
     PASS_REGULAR_EXPRESSION "PIPESAMPLE_OK"
     FAIL_REGULAR_EXPRESSION "PIPESAMPLE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
@@ -2049,34 +2787,205 @@ if(SRAVA_PLUGIN_PIPEPROX)
   add_test(NAME srava_plugin_separate
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_separate)
   set_tests_properties(srava_plugin_separate PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipeseparate;SRAVA_PIPEPROX_AGENT=$<TARGET_FILE:pipe_proximity_agent>"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipeseparate"
     PASS_REGULAR_EXPRESSION "PIPESEPARATE_OK"
     FAIL_REGULAR_EXPRESSION "PIPESEPARATE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
 
-  # install: バイナリを libexec/srava/plugins へ、installed bin を指すマニフェストを share/srava/plugins
-  # (= registry の既定 sysdir)へ自動生成して配置。→ install 後は環境変数なしで pipe_proximity() が使える。
-  #   同一 bin が 5 つの op(検出 / 調整 / scene 検出 / scene 調整 / サンプル)を serve するので、
-  #   マニフェストは op ごとに 1 ファイル(規約 = 1 ファイル 1 op)生成する。
-  install(TARGETS pipe_proximity_agent RUNTIME DESTINATION libexec/srava/plugins)
-  set(_pp_bin "${CMAKE_INSTALL_PREFIX}/libexec/srava/plugins/pipe_proximity_agent")
-  function(_pp_manifest op arity comment)
-    file(WRITE "${CMAKE_BINARY_DIR}/${op}.plugin"
-"# ${comment}(cmake --install が installed bin を指して自動生成)。\n\
-op   = ${op}\n\
-bin  = ${_pp_bin}\n\
-out  = value\n\
-args = ${arity}\n")
-  endfunction()
-  _pp_manifest(pipe_proximity       "1..3" "pipe_proximity: 自己接近検出")
-  _pp_manifest(pipe_adjust          "1..6" "pipe_adjust: 距離調整コントローラ(params ハッシュ or 位置引数)")
-  _pp_manifest(pipe_scene_proximity "1..2" "pipe_scene_proximity: N 体近接検出")
-  _pp_manifest(pipe_scene_adjust    "2..3" "pipe_scene_adjust: N 体距離調整(adjustScene)")
-  _pp_manifest(pipe_sample          "1..3" "pipe_sample: 弧長等間隔サンプル([pos,r] を tube へ)")
-  install(FILES "${CMAKE_BINARY_DIR}/pipe_proximity.plugin"
-                "${CMAKE_BINARY_DIR}/pipe_adjust.plugin"
-                "${CMAKE_BINARY_DIR}/pipe_scene_proximity.plugin"
-                "${CMAKE_BINARY_DIR}/pipe_scene_adjust.plugin"
-                "${CMAKE_BINARY_DIR}/pipe_sample.plugin"
-          DESTINATION share/srava/plugins)
+  # ★ Plan A: install は pipe_proximity.so を探索路 (lib/srava/modules) へ置く方式へ (kernel と同じ)。
+  #   旧 process バイナリ + .plugin manifest 自動生成は廃止。
+  install(TARGETS pipe_proximity_module LIBRARY DESTINATION lib/srava/modules)
 endif()
+
+# ------------------------------------------------------------------
+# 第2幾何カーネル: Manifold(github.com/elalish/manifold・Apache-2.0・#3404)。
+#   opt-in。ON で Manifold を FetchContent(v3.5.2 pin)取得。MANIFOLD_PAR=OFF(シリアル)＝
+#   srava のプロセス fan-out に並列を寄せる方針(#3404 / 実測 2026-07-23: Manifold は per-op 直列律速)。
+#   まずは疎通 mf_smoke(box∖sphere 1回)。通れば mfatsAgent(cgatsAgent ミラー)へ。
+# ------------------------------------------------------------------
+# option(SRAVA_MODULE_MANIFOLD) と旧名の後方互換はファイル冒頭 (§option 集約) で宣言済み。
+if(SRAVA_MODULE_MANIFOLD)
+  include(FetchContent)
+  set(MANIFOLD_TEST   OFF CACHE BOOL "" FORCE)
+  set(MANIFOLD_PAR    OFF CACHE BOOL "" FORCE)   # シリアル(並列は srava の fan-out で稼ぐ)
+  set(MANIFOLD_CBIND  OFF CACHE BOOL "" FORCE)   # C++ API を直利用(C FFI 不要)
+  set(MANIFOLD_PYBIND OFF CACHE BOOL "" FORCE)
+  # ★ Manifold を **静的リンク**(自己完結の installed バイナリに。共有だと libmanifold.so.3 を
+  #    RPATH で辿れず「agent closed before handshake」で死ぬ)。pig/tinyState と同じ方針。
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+  # ★ EXCLUDE_FROM_ALL (CMake 3.28+): 依存 (manifold と、その下の clipper2) の **install ルールを無視**する。
+  #   FetchContent_MakeAvailable は内部で add_subdirectory するので、これが無いと manifold 側の install()
+  #   が srava の install に相乗りし、libmanifold.a(58MB) / include/manifold/ / lib/cmake/manifold/ /
+  #   pkgconfig/manifold.pc まで $PREFIX に撒かれる。srava は manifold を **静的リンクして自己完結**して
+  #   いるので実行にはこれらは不要で、しかもユーザが自前で入れた manifold を上書きして壊しうる。
+  #   ビルドには影響しない (srava のターゲットが manifold::manifold に依存しているので、依存関係により
+  #   通常どおりビルドされる = "inter-target dependencies supersede this exclusion")。
+  FetchContent_Declare(manifold
+    GIT_REPOSITORY https://github.com/elalish/manifold.git
+    GIT_TAG v3.5.2
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(manifold)
+  # ★ Cygwin 可搬性回避(ソースは fork しない): Cygwin の <ctype.h> は _S/_N/... をマクロ定義するため、
+  #   manifold svd.h のローカル変数 `_S`(Symmetric3x3 _S)がマクロ 8 に置換され compile が壊れる。
+  #   Cygwin ビルド時のみ svd.h の識別子 `_S` を rename する(冪等・他 OS は無関係。上流 Issue で戻す)。
+  if(CYGWIN AND manifold_SOURCE_DIR)
+    execute_process(COMMAND sed -i "s/\\b_S\\b/svdS_/g" "${manifold_SOURCE_DIR}/src/svd.h")
+  endif()
+
+  # mf 幾何ラッパ(mfMesh)+ 疎通テスト。pig(pigData)+ tinyState + Manifold をリンク(CGAL 非依存)。
+  add_executable(mf_smoke
+    src/main/mf_smoke_main.cpp
+    modules/manifold/c++/mfMesh.cpp
+    modules/manifold/c++/mfCross.cpp)
+  target_link_libraries(mf_smoke PRIVATE manifold::manifold pig Threads::Threads m)
+
+  # ---- srava-agent-mf: Manifold カーネルのエージェントプロセス(cgatsAgent 版のミラー・CGAL 非依存)----
+  # mf の状態機械クラスを tscpp2 codegen(pig 層状態機械は pigts_codegen が生成済)。
+  tinystate_codegen(mf_ts_codegen
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/ptsmfWireCacheStreamWriterMesh.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/ptsmfWireCacheStreamReaderMesh.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaBox.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaSphere.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaIcosphere.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaUnion.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaIntersection.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaDifference.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaExport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCast.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaPolygon.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaPrism.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaRevolve.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaVolume.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaBbox.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaTranslate.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaRotate.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaScale.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaMirror.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaTransform.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaArea.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaValid.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCentroid.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaImport.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaRect.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCircle.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaNgon.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaExtrude.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCombine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaSection.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaOffset.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaTube.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaColor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfatsAgent.cpp
+  )
+  # ---- .so 化 Phase 3c: srava_agent_mf バイナリは廃止 (単一 srava_agent + manifold.so に集約・
+  #      docs §1.2)。manifold 幾何は下記 manifold.so から供給される。 ----
+
+  # ---- .so 化 Phase 3b: manifold.so (幾何 + manifest)。manifold を bundle・pig/pts/tinyState は
+  #      host 供給。ソースは srava_agent_mf の modules/manifold/c++ 部分と当面二重管理 (3c で統合)。----
+  set(MF_KERNEL_SRC
+    modules/manifold/c++/ptsmfWireCacheStreamWriterMesh.cpp
+    modules/manifold/c++/ptsmfWireCacheStreamReaderMesh.cpp
+    modules/manifold/c++/mfCacheCodec.cpp
+    modules/manifold/c++/mfMesh.cpp
+    modules/manifold/c++/mfCross.cpp
+    modules/manifold/c++/mfaBox.cpp
+    modules/manifold/c++/mfaSphere.cpp
+    modules/manifold/c++/mfaIcosphere.cpp
+    modules/manifold/c++/mfaUnion.cpp
+    modules/manifold/c++/mfaIntersection.cpp
+    modules/manifold/c++/mfaDifference.cpp
+    modules/manifold/c++/mfaExport.cpp
+    modules/manifold/c++/mfaCast.cpp
+    modules/manifold/c++/mfaPolygon.cpp
+    modules/manifold/c++/mfaPrism.cpp
+    modules/manifold/c++/mfaRevolve.cpp
+    modules/manifold/c++/mfaVolume.cpp
+    modules/manifold/c++/mfaBbox.cpp
+    modules/manifold/c++/mfaTranslate.cpp
+    modules/manifold/c++/mfaRotate.cpp
+    modules/manifold/c++/mfaScale.cpp
+    modules/manifold/c++/mfaMirror.cpp
+    modules/manifold/c++/mfaTransform.cpp
+    modules/manifold/c++/mfaArea.cpp
+    modules/manifold/c++/mfaValid.cpp
+    modules/manifold/c++/mfaCentroid.cpp
+    modules/manifold/c++/mfaImport.cpp
+    modules/manifold/c++/mfaRect.cpp
+    modules/manifold/c++/mfaCircle.cpp
+    modules/manifold/c++/mfaNgon.cpp
+    modules/manifold/c++/mfaExtrude.cpp
+    modules/manifold/c++/mfaCombine.cpp
+    modules/manifold/c++/mfaSection.cpp
+    modules/manifold/c++/mfaOffset.cpp
+    modules/manifold/c++/mfaTube.cpp
+    modules/manifold/c++/mfaColor.cpp
+    modules/manifold/c++/mfatsAgent.cpp
+  )
+  add_library(manifold_module MODULE ${MF_KERNEL_SRC} modules/manifold/manifest.cpp)
+  set_target_properties(manifold_module PROPERTIES PREFIX "" OUTPUT_NAME "manifold")   # → manifold.so
+  add_dependencies(manifold_module pigts_codegen mf_ts_codegen gen_srava_parser)
+  target_include_directories(manifold_module PRIVATE ${SRAVA_GEN})
+  target_compile_definitions(manifold_module PRIVATE SRAVA_VALUE_ONLY)
+  target_link_libraries(manifold_module PRIVATE pig manifold::manifold)
+  set_target_properties(manifold_module PROPERTIES INSTALL_RPATH "${SRAVA_MODULE_RPATH}")   # lib/srava/modules → $PREFIX/lib
+  install(TARGETS manifold_module LIBRARY DESTINATION lib/srava/modules)   # → $PREFIX/lib/srava/modules/manifold.so
+  add_dependencies(srava_agent manifold_module)   # srava_agent が実行時に manifold.so を dlopen
+
+  # manifold.so が dlopen でき、記述子 (make_agent 付き) が読めることを検証。
+  add_test(NAME srava_module_manifold_so
+    COMMAND srava_module_probe $<TARGET_FILE:manifold_module>)
+  set_tests_properties(srava_module_manifold_so PROPERTIES
+    PASS_REGULAR_EXPRESSION "MODULE_OK name=manifold .*make_agent=yes")
+
+  # ★ rev4 Phase A: manifold.so の manifest 静的初期化が型軸レジストリへ実装型を登録できること
+  # (mf-mesh3d=MFM3 / mf-cross2d=MFC2)。
+  add_test(NAME srava_type_manifold
+    COMMAND srava_module_probe $<TARGET_FILE:manifold_module>)
+  set_tests_properties(srava_type_manifold PROPERTIES
+    PASS_REGULAR_EXPRESSION "TYPES mf-mesh3d,mf-cross2d")
+
+  # ---- .so 化 Phase 3c-2: manifold の in-proc 実行を **静的リンクから dlopen へ**。planner は
+  #      manifold を静的リンクせず、起動時に manifold.so を探索路からロードする (srava_main の
+  #      pigModuleLoader::load_search_path)。mfatsAgent の静的初期化 (agent/記述子/codec 登録) は
+  #      .so ロード時に走り、pigfModuleAgent が SRAVA_INPROC + thread 可能カーネルのとき
+  #      ptsMediatorInternal で planner 内 thread 実行する。旧来ここに列挙していた mf 幾何 +
+  #      Manifold リンクは撤去 (二重管理の解消)。
+  #      ★ in-proc 実行体 (manifold.so 側) が使う **host インフラ** (ptsCalcBody / ref codec) は .so に
+  #        bundle されず planner が供給する必要がある。★2026-08-10: これらは srava 定義直後に **無条件で**
+  #        リンクするようにしたので、ここでの追加は不要になった (manifold OFF でも d2/d3 が dlopen 可能)。
+  add_dependencies(srava manifold_module)
+
+  # ---- in-process 評価器の回帰テスト (#3406 4.3)。
+  #   他の 176 テストは既定カーネル=CGAL なので、SRAVA_INPROC=1 を付けても agent_kernel_name() が
+  #   thNULL を返して全部 External に落ちる = ptsMediatorInternal は一度も実行されない。
+  #   ここだけ DEFAULT_OUTPUT=manifold を明示して Internal 経路を必ず踏ませ、External と同じ答えに
+  #   なることを見る(詳細は test/srava_inproc.sh の冒頭コメント)。
+  add_test(NAME srava_inproc_value
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_inproc.sh $<TARGET_FILE:srava> value)
+  set_tests_properties(srava_inproc_value PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-inproc-val"
+    PASS_REGULAR_EXPRESSION "INPROC-VALUE-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|ERROR"
+    TIMEOUT 30)
+  add_test(NAME srava_inproc_mesh
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_inproc.sh $<TARGET_FILE:srava> mesh)
+  set_tests_properties(srava_inproc_mesh PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-inproc-mesh"
+    PASS_REGULAR_EXPRESSION "INPROC-MESH-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|ERROR"
+    TIMEOUT 30)
+endif()
+
+# ------------------------------------------------------------------
+# ★ 2026-08-12: 全テストにモジュール探索路を固定注入する。
+#   モジュールの探索路には install 先 ($PREFIX/lib/srava/modules) も含まれるため、注入しないと
+#   ctest の結果が **その機械の install 状態に依存** する (ビルドツリーの .so を検証しているつもりが
+#   install 済みの古い .so を読んでいた、という取り違えが実際に起きた)。
+#   $SRAVA_MODULE_PATH は探索路の最後 = 最優先なので、これでビルドツリーのモジュールに固定される。
+#   個々のテストが持つ ENVIRONMENT (SRAVA_AGENT 等) は APPEND なので壊さない。
+# ------------------------------------------------------------------
+get_property(_srava_all_tests DIRECTORY PROPERTY TESTS)
+foreach(_t IN LISTS _srava_all_tests)
+  set_property(TEST ${_t} APPEND PROPERTY
+    ENVIRONMENT "SRAVA_MODULE_PATH=$<TARGET_FILE_DIR:srava>")
+endforeach()

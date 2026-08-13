@@ -62,9 +62,13 @@ static int hash_in_used(INTEGER64 h, const INTEGER64 *used, int nused)
 }
 
 /* 参照キャッシュ(D_REF: export 出力 / import 入力)の妥当性チェック。
- * 先頭レコードが D_REF で、その path が指す実ファイルが存在しなければ 1(= stale)。
+ * D_REF レコードの path が指す実ファイルが存在しなければ 1(= stale)。
  * D_REF でない(mesh/data)キャッシュや読めない場合は 0(触らない)。
- * D_REF payload: kind(u8) + path_len(u16 LE) + path(bytes) + size/mtime/chash(各 i64)。 */
+ * ファイル構成: streamhdr, D_META"REF "(4CC タグ), D_REF, END  ← 先頭 D_META は全種別共通
+ *               (catalog §1 の不変条件。2026-07-31 メモ 2. で D_REF にもタグを付けた)
+ * D_REF payload: kind(u8) + path_len(u16 LE) + path(bytes) + size/mtime/chash(各 i64)。
+ * NB: ここは起動時スイープの高速パス。状態遷移機械(ptsWireCacheStreamReaderRef)を回すほどの
+ *     ことはしない、というのが現時点の判断(ひさ 2026-07-31)。先頭数十バイトの手読みで済ませる。 */
 static int cache_ref_file_missing(const char *cachePath)
 {
 	FILE *f = ::fopen(cachePath, "rb");
@@ -75,6 +79,11 @@ static int cache_ref_file_missing(const char *cachePath)
 	  || ::fread(rh,  1, WIRE_RECHDR_SIZE,  f) != (size_t)WIRE_RECHDR_SIZE ) { ::fclose(f); return 0; }
 	uint16_t type, flags; uint32_t len;
 	wire_get_rechdr(rh, &type, &flags, &len);
+	if ( type == D_META ) {          /* 先頭の 4CC タグレコードを読み飛ばして次を見る */
+		if ( ::fseek(f, (long)len, SEEK_CUR) != 0
+		  || ::fread(rh, 1, WIRE_RECHDR_SIZE, f) != (size_t)WIRE_RECHDR_SIZE ) { ::fclose(f); return 0; }
+		wire_get_rechdr(rh, &type, &flags, &len);
+	}
 	if ( type != D_REF || len < 3 ) { ::fclose(f); return 0; }
 	uint8_t pre[3];
 	if ( ::fread(pre, 1, 3, f) != 3 ) { ::fclose(f); return 0; }
@@ -89,7 +98,9 @@ static int cache_ref_file_missing(const char *cachePath)
 
 /* 掃除の **per-file** ログは既定で出さない(数が多くて煩い)。PIG_DEBUG が立っている時だけ出す。
  * 件数サマリ([pig] startup sweep / exit cleanup: N 個)は常に出す。 */
-static int sweep_verbose() { static int v = ( ::getenv("PIG_DEBUG") != 0 ); return v; }
+/* ★ #3427 ④: 旧・関数内 static の getenv キャッシュ (write-once の可変 static) を廃し都度読む。
+ * sweep は起動時 1 回の低頻度パスなので getenv 直読みで十分。 */
+static int sweep_verbose() { return ( ::getenv("PIG_DEBUG") != 0 ); }
 
 /* CACHE_DIR の *.cache を掃除。戻り = 削除数。
  *   used==0 (起動時スイープ): 死体(番兵なし & writer_pid not live / 不正ヘッダ)のみ削除。完了は残す。

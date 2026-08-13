@@ -88,5 +88,9 @@ TS_STATE(FIN_START)             // 派生がここを上書きして後片付け
 }
 TS_STATE(FIN_ptsObject_START)
 {
+	/* ★ §9: 終了時点で app 参照を手放す。ptsApplication 自身は ptsApp = ifThis の**自己参照**
+	 * なので、ここで切らないと参照が残り続ける。派生の FIN は全てここへ畳まれる前に自分の
+	 * ptsApp 利用 (gate_release / agent_leave 等) を済ませている。 */
+	ptsApp = thNULL;
 	return rDO|FIN_TINYSTATE_START;
 }

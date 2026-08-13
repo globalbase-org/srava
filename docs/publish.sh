@@ -24,7 +24,7 @@ scp -q -r "$OUT"/* "$host:$path/"
 # 3) 疎通確認
 echo "verifying → $URL"
 ok=1
-for f in "" srava_function_reference.html srava_language_reference.html srava_plugin_reference.html style.css; do
+for f in "" srava_function_reference.html srava_language_reference.html srava_module_reference.html style.css; do
   code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL$f" || echo "ERR")
   echo "  [$code] $URL$f"
   [ "$code" = "200" ] || ok=0

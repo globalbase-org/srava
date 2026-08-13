@@ -10,6 +10,7 @@
  *   ACT_FIRE  : inp2.trigger()(側効果のみ・値は捨てる) → FIN
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfGate_.h"
 
@@ -73,7 +74,7 @@ TS_STATE(ACT_WAIT)
 {
 	/* inp1 が mesh 継続("delayed")なら実完了(cdr->cdr=A_SAVE_BEGIN で解決)まで待つ。
 	 * 値返し op やエラーは即完了扱い。helper 自身が promise に listen して yield→再走で待つ。 */
-	if ( ! gateVal->is_error() && gateVal->car()->get_str()->cmp("delayed") == 0 )
+	if ( ! gateVal->is_error() && pig_is_delayed(gateVal) )
 		gateVal->cdr()->cdr()->compact();
 	return rDO|ACT_FIRE;
 }

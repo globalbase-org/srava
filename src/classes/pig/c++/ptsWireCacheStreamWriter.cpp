@@ -16,6 +16,7 @@
  *    d_ref_output(...)          D_REF OUTPUT レコードを書く
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigwire.h"
 #include	"pig/c++/osglue.h"
@@ -224,5 +225,6 @@ TS_STATE(FIN_ptsWireCacheStreamWriter_START)
 		::close(fd); fd = -1;
 	}
 	parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)errCode)));
+	cacheFileName = thNULL;   /* §9 */
 	return rDO|FIN_ptsObject_START;
 }

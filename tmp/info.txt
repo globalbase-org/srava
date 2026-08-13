@@ -1,3 +1,0 @@
-cgalp-cache v2
-os=Linux/x86_64
-agent=/usr/local/bin/cgalp_agent sz=223178288 mt=1782744815

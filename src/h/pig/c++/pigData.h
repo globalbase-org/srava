@@ -19,6 +19,7 @@
  *    全て compact() ゲートウェイ(観測したら解決)。Array/Hash は要素を eager 解決しない。
  */
 #include <stdint.h>
+#include <vector>                /* P4: pigDataCache の型別 conv body-list */
 #include "ts2/c++/ts_types.h"    /* INTEGER64 (tinyState v2: ts2/c/ 廃止→c++/ に inline) */
 #include "ts2/c++/stdObject.h"
 #include "ts2/c++/sPtr.h"
@@ -31,11 +32,48 @@ class ptsObject;   /* tinyState 系 元祖(pig/c++/ptsObject)。pigDataFunction 
 
 typedef INTEGER64 pHashKeyType;
 
+/* ptsDataCache (pigDataCache 専用 helper) の起動モードと生成子フック (#3406, 2026-07-29 メモ 3.)。
+ * pigData.cpp は pig 静的ライブラリに入るため codegen クラス ptsDataCache を直接 thNEW できない
+ * (tinyState 実行体を持たない単体テストが link 不能になる)。ptsDataCache.cpp の TU が静的初期化で
+ * 生成子を登録し、set_body/get_body はフック経由で起動する (未登録なら body の素朴な入れ物として
+ * 動く = 単体テスト互換)。**消費者向け API ではない** (pig 内部配線)。 */
+class pigData;
+class pigDataCache;
+/* ★ P3 (⑤ cross-module 変換): LOAD_CONV を追加。SAVE=保存 / LOAD=canonical 読み (file 4CC を自型 reader で
+ *   読む) / LOAD_CONV=変換読み (file 4CC + helper の target_type で reader_for を引き conv エントリへ)。 */
+enum { PDC_MODE_SAVE = 0, PDC_MODE_LOAD = 1, PDC_MODE_LOAD_CONV = 2 };
+/* ★ P4 修正 (conv リスト化): target_type を factory 引数に追加。LOAD_CONV のとき「どの型へ変換読みするか」を
+ *   **helper 自身が不変に保持**する (共有 conv スロットの単一 convType を廃止 → 異型同時要求の競合を根絶)。
+ *   SAVE/LOAD では thNULL。 */
+typedef sPtr<tinyState> (*pigDataCacheHelperFn)(sPtr<tinyState> starter, sPtr<pigDataCache> cache, int mode,
+                                               sPtr<stdString> target_type);
+/* ★ #3427 ③: 旧 pigDataCache_set_helper_factory (プロセスグローバルのフック登録) は撤去。
+ * 生成子は app 所有レジストリ (pigModuleRegistry::set_pdc_helper) が持ち、ptsApplication の
+ * INI が ptsDataCache_helper() を登録する。 */
+
 /* v を compact(=観測で解決) してから __TYPE か判定。true=その型である。 */
 #define is_pigDataType(__TYPE, v)  sPtr<__TYPE>::d_cast((v)->compact()).is_notNull()
 
 /* 3-way 比較の結果 */
 enum pigCmp { PIG_LT = -1, PIG_EQ = 0, PIG_GT = 1, PIG_INCOMP = 2 };
+
+/* ★ カーネル id の「値なし」番兵 (#3404)。カーネル id は今や **モジュールレジストリの登録順**
+ *   (pigModuleRegistry・.so 申告駆動) で決まり、cgal/manifold の固定値は持たない (rev4 Phase D で
+ *   MODULE_CGAL=1 / MODULE_MANIFOLD=2 を撤去。routing のカーネル名指しは全て型ディスパッチ+registry
+ *   クエリへ移行済)。MODULE_NONE = id 0 = "delayed" = 値/カーネル中立 (どのカーネルにも寄与しない)。 */
+enum pigModule { MODULE_NONE = 0 };
+
+/* ★ カーネル名 (2026-07-29 メモ 1.): 継続 pair の car に載せる文字列。**MODULE_NONE の名前 =
+ * "delayed"** (従来の見え方を保つ)。カーネルタグを pigData から追い出し、car の文字列そのもので
+ * カーネルを運ぶ。判定側は pig_is_delayed 1 本に集約 → 第 3 のカーネルは pig_register_module_name
+ * で名前を登録するだけで pigData も判定側も無改変 (ひさ回答 a・2026-07-29)。 */
+const char *pig_module_name(int k);                 /* id → 名前 (範囲外は "delayed") */
+int         pig_module_from_name(const char *s);    /* 名前 → id。未登録 = -1 */
+int         pig_register_module_name(const char *s);/* 追加登録 (既存名は既存 id)。id を返す */
+/* ★ P2e: 旧 pig_module_from_type_list (型リストスタンプ→module id) は撤去 (module_of_tag 依存)。
+ *   継続スタンプ→executor の解決は pigfModuleAgent の型軸 routing (arg_type_set→decide_executor /
+ *   module_of_type) が担う。is_delayed は「型スタンプか否か」の判定だけ残す (型メンバシップ)。 */
+int         pig_is_delayed(sPtr<pigData> v);        /* v が遅延継続 pair か (car が型名スタンプ/カーネル名) */
 
 /* ソース位置(エラー報告用)。軽パスでは省略可(thNULL 許容) */
 class pigInfo : public stdObject {
@@ -53,12 +91,23 @@ protected:
  * 正常な連鎖(varref→束縛→sequence 最終文→lambda 値…)は数段なので余裕の既定値。 */
 #define PIG_COMPACT_MAX 1000
 
+class pigDataArray;   /* obt_array() の戻り型 (前方宣言。実体は下で定義) */
+class pigDataHash;    /* obt_hash()  の戻り型 */
+
 class pigData : public stdObject {
 public:
   pigData(sPtr<pigInfo> _info = thNULL) : info(_info) {}
   virtual ~pigData() {}
 
   virtual int is_error() { return 0; }
+  /* 致命エラーか (planner が in-flight agent を即撤収するか drain するかの判断)。
+   * is_error と対の多態述語 (pigDataError が override)。 */
+  virtual int is_fatal() { return 0; }
+  /* エラーの **生メッセージ** (前置なし)。ワイヤ/表示の整形をしない素の本文で、pigDataError が
+   * override して msg を返す。既定は get_str()。d_cast を使わず多態で取るための述語対
+   * (is_cache と同じ流儀。#3406 / 2026-07-30 メモ L651: Mediator が符号化に使う)。
+   * NB: pigDataError::get_str() は "ERROR: " を前置するのでワイヤには使えない。 */
+  virtual sPtr<stdString> error_message() { return get_str(); }
   /* 制御フロー信号(return/break/continue)の種別。-1=制御でない。pigDataControl が override。
    * while/関数の評価器が「エラーチェック時に」これを見て分岐する(その他の文脈では is_error で
    * 通常エラーとして伝播=ループ/関数の外に出ると "outside loop/function" エラーになる)。 */
@@ -151,10 +200,34 @@ public:
    * 遅延ノード(pigDataDelay)は compact() ゲート、pigDataCache のみ真。 */
   virtual int is_cache() { return 0; }
 
+  /* ★ rev4 型ディスパッチ (§9・Phase A): この値の **cacheable 本体型名** (実装型・タグと 1:1)。
+   *   ★ P2e: 旧 get_module_tag (カーネル軸: 値の所属 module を返す) は撤去。routing は型軸 (type_name)。
+   *   既定 = **0 (untyped 番兵)**: 値 (TEXT)・不透明参照 (D_REF) 等の「型を持たない/変換不能」な
+   *   pigData は 0 を返し、decide_executor のディスパッチ対象から外れる (§9.7 Q-D)。
+   *   非 0 を返すのは WireCacheStream 表現を持つ本体 (pigDataWireTyped の具象 leaf) のみ。 */
+  virtual const char* type_name() { return 0; }
+
   /* compact(depth): 遅延ノードの不動点解決。depth は再帰上限(循環束縛 var a=a; 等で
    * 無限再帰=スタックオーバーフローするのを防ぐ)。既定値で通常用途は十分。値ノードは thThis。 */
   virtual sPtr<pigData> compact(int depth = PIG_COMPACT_MAX) { return thThis; }
   virtual int           is_compact() { return 1; }
+
+  /* ★ 型取得ゲートウェイ (2026-08-13 ひさ設計): 「配列/ハッシュならそれ自身、違えば thNULL」。
+   *   **`sPtr<pigDataArray>::d_cast(v)` (素の RTTI) の代わりにこれを使う**。d_cast は
+   *   遅延ノード (pigDataDelay) を渡されると中身が配列でも null になる — 配列/ハッシュは
+   *   要素を eager 解決しない設計なので、map/lambda 由来の要素は遅延ノードのまま来る。
+   *   process 経路は値がテキスト化 → pig_value_parse で素の値になるので気づかず、
+   *   **in-proc でだけ嘘のエラーになる**穴だった (2026-08-12 に mfaTube/mfaPolygon/pipe_proximity で発覚)。
+   *   get_int/get_flt/is_error と同じくゲートウェイにしておけば、呼び側が compact を忘れられない。 */
+  virtual sPtr<pigDataArray> obt_array();
+  virtual sPtr<pigDataHash>  obt_hash();
+
+  /* ★ destroy(): 「この遅延はもう要らない」を **上流へ伝える** (2026-08-11 ひさ設計)。
+   * 値ノードは何もしない。pigDataDelay だけが helper を destroy し、委譲先(result)へ再帰する。
+   * ★動機: `ptsApp->set_agentError` は **pigfAgent の登録簿しか起こさない** (pigfAgent.cpp:331 の
+   *   SHOULD_ABORT)。pigfApply / pigfWhile / pigfSequence 等 **agent 以外の helper を止める経路が
+   *   無かった**。map が exit で他要素を畳むときのように、要らなくなった枝を名指しで止めるのに使う。 */
+  virtual void          destroy() {}
 
   /* AST テンプレートの新鮮複製。lambda apply / while / for で body を再評価する際、
    * 遅延ノードはメモ(result/start_flag)を持つので clone で未評価の新ノードに作り直す。
@@ -187,6 +260,16 @@ protected:
   sPtr<pigInfo> info;
 };
 
+/* ★ rev4 型ディスパッチ (§9.6・Phase A): cacheable 本体型の marker 基底。
+ *   pigData と各具象本体 (cgMesh/mfGeom…) の間に挟む。弁別条件 = **WireCacheStream 表現を持つ本体**
+ *   (codec でシリアライズされ wire/cache に乗る)。具象 leaf が type_name() を実装型名で override する
+ *   (cgMesh3D="cg-mesh3d" 等)。ここ自体は追加メンバを持たない純 marker (型軸の共通祖先を与えるだけ)。
+ *   Phase B で pigTypeRegistry / decide_executor がこの型を第一級の routing キーとして使う。 */
+class pigDataWireTyped : public pigData {
+public:
+  pigDataWireTyped(sPtr<pigInfo> i = thNULL) : pigData(i) {}
+};
+
 class pigDataNull : public pigData {
 public:
   pigDataNull(sPtr<pigInfo> i = thNULL) : pigData(i) {}
@@ -203,9 +286,10 @@ public:
   pigDataError(const char *msg, sPtr<pigInfo> i = thNULL, int fatal = 0);
   pigDataError(sPtr<stdString> msg, sPtr<pigInfo> i = thNULL, int fatal = 0);
   virtual int is_error() { return 1; }
-  int is_fatal() { return fatal_; }
+  virtual int is_fatal() { return fatal_; }
   virtual sPtr<stdString> get_str();
   sPtr<stdString> message() { return msg; }
+  virtual sPtr<stdString> error_message() { return msg; }   /* 生メッセージ(前置なし) */
 
 #define PE1(n)   virtual sPtr<pigData> n(sPtr<pigData>) { return thThis; }
 #define PE0(n)   virtual sPtr<pigData> n() { return thThis; }
@@ -345,7 +429,9 @@ public:
   virtual sPtr<pigData> car() { return _car; }
   virtual sPtr<pigData> cdr() { return _cdr; }
   virtual sPtr<stdString> get_str();   /* "(car . …)" 風 repr(cdr が未解決でもブロックしない) */
-  virtual sPtr<stdString> print();     /* 継続("delayed".promise)なら cdr を辿って実値まで解決 */
+  virtual sPtr<stdString> print();     /* 継続(カーネル名.promise)なら cdr を辿って実値まで解決 */
+  /* NB(2026-07-29 メモ 1.): 旧 set_module_tag/get_module_tag は廃止。カーネルは car の
+   *   カーネル名文字列そのものが運ぶ (pig_module_from_name(car) で読む・pigData 無改変)。 */
 protected:
   sPtr<pigData> _car;
   sPtr<pigData> _cdr;
@@ -363,15 +449,102 @@ public:
   virtual pHashKeyType    get_hashkey()   { return hashkey; }
   virtual int             is_cache()      { return 1; }
   sPtr<stdString>         get_path()      { return path; }
-protected:
+  /* ★ rev4 Phase B: キャッシュ本文の **実装型名** (in-memory body / D_META 4CC → type_of_tag)。mesh でない/
+   *   未登録タグは 0。plan 時の型ディスパッチ (decide_executor) が HIT 入力の型を非ブロッキングに知るのに使う。
+   *   ★ P2e: 旧 get_module_tag (カーネル軸: cache の所属 module) は撤去。routing は型軸 (type_name) のみ。 */
+  virtual const char*     type_name();
+
+  /* ★ in-memory body(#3406, 2026-0727 メモ §2 / 2026-07-29 メモ 3. で抽象化完成):
+   *   ディスク上のキャッシュ本文と等価なデータ(mesh/値)をメモリ上に持ち回る。
+   *   同一キャッシュ = 同一データの前提(ファイル名 = 演算+引数ハッシュ)。
+   *   **public はこの 3 つだけ** (ディスク I/O は専用 helper ptsDataCache が内包し、reader/writer
+   *   の選択は pigCacheCodec テーブル。詳細は docs/mediator_design.md §3.2):
+   *   - set_body : 計算結果をセットし保存 helper を即起動。呼んだ caller は暗黙 listener になり
+   *                TSE_ASSERT (メタ書込済 = valid 成立・下流 attach 可) と TSE_DESTROY (完了) が届く。
+   *                二重セットは無視 (同一キャッシュ = 同一データ)。
+   *   - get_body : body 有→返す / helper 走行中→listen+sException (TSE_DESTROY で再評価) /
+   *                未着手→読み出し helper を起動して listen+sException / CV_INVALID→thNULL
+   *                (呼び元は is_valid で判定してエラー化)。
+   *   - is_valid : ディスク上にキャッシュが存在しメタデータ保存済みか (本体書込中でも真)。
+   *                未検査なら ::access で即検査。書込時は writer の TSE_ASSERT で成立。 */
+  void          set_body(sPtr<pigData> d);
+  /* ★ get_body は「欲しい型の候補リスト」1 実装のみ (2026-08-12 統一・docs/cross_module_conversion_design.md)。
+   *   消費者は自分が扱える型の候補を宣言し、cache は ① converted に居る候補を即返す (走行中は
+   *   相乗り = 型ごと single-flight/dedup) ② 無ければ file 形式 (D_META 4CC / 値) × codec 表
+   *   (reader_for) で**読める候補**を選んで reader を起動 ③ 読める候補が無ければ thNULL。
+   *   「mesh cache に value は無い」等も特殊ケースでなくこの規則の帰結。
+   *   単型版 = 候補 1 個・無引数版 = 候補 {"value"} (A_SAVE_BEGIN payload 判定用) の退化形。 */
+  sPtr<pigData> get_body();
+  sPtr<pigData> get_body(const char* type);
+  sPtr<pigData> get_body(const char* const* wantTypes, int n);
+  int           is_valid();
+  /* ★ A_SAVE_BEGIN 受信 (= 生産者の「メタ書込済」宣言) を planner 側ハンドルへ反映する。
+   *   External 生産者は planner 側に writer helper がいないため、これが唯一の valid 成立経路
+   *   (Internal は ptsDataCache SAVE の TSE_ASSERT が validState を直接立てるのと対)。
+   *   ★leaf 生産者では ACT_START の HIT 判定 (is_valid) が MISS 時に CV_INVALID を焼き込み、
+   *   その同一インスタンスが promise 経由で消費者へ渡る — ここで上書きしないと消費者の
+   *   get_body が「cache not valid and no writer」で panic する (2026-08-12 leaf-gating)。 */
+  void          mark_valid();
+  /* ★ 保存/読み出しの helper が走り終えたか (2026-08-02 メモ §5.3)。
+   *   is_valid : メタ書込済 = 下流が attach してよい (本体はまだ書込中でもよい)
+   *   is_complete : **本体の書込/読込まで完了**。A_SAVE_DONE を出してよい条件。
+   * 保存を始めていない (CV_UNKNOWN かつ helper 無し) 場合は完了とはみなさない。 */
+  int           is_complete();
+  /* ★ P4 (conv リスト化): 変換 helper (ptsDataCache_) が完了時に **自分の target_type のエントリ**へ
+   *   結果を書き戻す口。共有の単一スロットを持たないので、異型の helper が並走しても互いに干渉しない。
+   *   friend の ptsDataCache_ だけが呼ぶ (型名で該当エントリを引く・無ければ無視)。 */
+  void          conv_set_body(const char* type, sPtr<pigData> b);   /* 変換 body を該当エントリへ */
+  void          conv_finish(const char* type);                      /* 該当エントリの done=1・helper=null */
+private:
+  friend class ptsDataCache_;   /* 専用 helper (実装クラス) だけが body/validState を直接操作する */
+  enum { CV_UNKNOWN = 0, CV_VALID = 1, CV_INVALID = 2 };
   pHashKeyType    hashkey;
   sPtr<stdString> path;
+  int             validState = CV_UNKNOWN;   /* CV_VALID = メタ書込済 (下流 attach 可)。CV_INVALID = 不在/破損。 */
+  /* ★ 2026-08-12 再設計 (ひさ): canonical/foreign の区別と `body` 単独変数を廃止し、**型ごとの
+   *   body-list `converted[]` だけ**で持つ。エントリは一様で**位置に意味はない** (writer は isWriter
+   *   フラグで引く。set_body は読みより先に来る運用なので writer_index() は常に 0 か -1 になるだけ)。
+   *   「set_body で書かれた」か「file から読んだ」かは区別しない (streaming の原理)。
+   *   writer 起動中は is_valid が「メタ書込済」を待つ。型ごとに single-flight。
+   *   push_back のみ (erase しない) なので index は安定。value 本文 (type_name()==0) は type="value"。 */
+  struct ConvEntry {
+    sPtr<stdString> type;         /* 型名 ("value" / "cg-mesh3d" / ...) */
+    sPtr<pigData>   body;         /* 本文。thNULL=未/失敗 */
+    sPtr<tinyState> helper;       /* 走行中の reader/writer helper (待ち手の listen 先)。完了で thNULL */
+    int             done = 0;     /* helper 終了印 (型ごと) */
+    int             isWriter = 0; /* 1 = set_body の writer helper (is_valid/is_complete が参照) */
+  };
+  std::vector<ConvEntry> converted;
+  int  conv_index(const char* type);    /* converted 中の型名一致エントリ index (無ければ -1) */
+  int  conv_ensure(const char* type);   /* 無ければ push_back して index を返す (以後 index 不変) */
+  int  writer_index();                  /* isWriter エントリの index (無ければ -1) */
+  int  peek_tag(unsigned char out[4]);  /* file 先頭 D_META の 4CC を同期で覗く (1=あり/0=無し。
+                                           値キャッシュも D_META "TEXT" — 判別は wire_tag_is_text)。
+                                           ★成功のみメモ化 (同一 hash = 同一データなので 4CC は不変。
+                                           失敗は「メタ未書込かも」なので焼き込まない = 毎回再読) */
+  unsigned char tagMemo[4];             /* peek_tag の成功メモ (tagKnown=1 のとき有効) */
+  int  tagKnown = 0;
 };
 
 class pigDataArray : public pigData {
 public:
   pigDataArray(sPtr<pigInfo> i = thNULL) : pigData(i) {}
-  void push(sPtr<pigData> v) { d.push(v); }
+  virtual sPtr<pigDataArray> obt_array() { return thThis; }   /* 型取得ゲートウェイ (自分が配列) */
+  /* ★ push は **エラー検査版**(2026-08-11 ひさ設計)。v がエラーなら配列に積まず v を返す。
+   * pigDataControl(exit/return/break/continue)は pigDataError 派生なので、これで制御値も
+   * 「配列に埋もれる」ことなく呼び元へ伝播する。正常時は thNULL を返す。
+   * ★ 注意: v が未解決の遅延ノードだと is_error() が compact() ゲートで **yield(sException)** する。
+   *   呼び元は compact 地点まで冪等(再入耐性)であること。
+   * ★ **未起動の AST ノード**を積む場所(parser の arglist/vlist/文列・clone/capture_copy)は
+   *   is_error() が compact()→start() を呼んでパース時/捕捉時に式を走らせてしまうので
+   *   push_nocheck() を使う。 */
+  sPtr<pigData> push(sPtr<pigData> v) {
+    if (v->is_error()) return v;
+    d.push(v);
+    return thNULL;
+  }
+  /* 無検査 push: 上記のとおり「まだ起動してはいけないノード」専用。 */
+  void push_nocheck(sPtr<pigData> v) { d.push(v); }
   int  length() { return d.length(); }
   virtual int get_bool() { return d.length() > 0; }   /* 非空=真 */
   virtual sPtr<stdString> get_str();
@@ -379,12 +552,12 @@ public:
   virtual sPtr<stdString> serialize();   /* "[e1,e2,...]"(各要素 serialize) */
   virtual sPtr<pigData> clone() {        /* 要素を deep clone(要素が AST 式のことがある) */
     sPtr<pigDataArray> n = thNEW(pigDataArray,());
-    for ( int i = 0 ; i < d.length() ; ++i ) n->push(d[i]->clone());
+    for ( int i = 0 ; i < d.length() ; ++i ) n->push_nocheck(d[i]->clone());   /* AST 複製=起動しない */
     return n;
   }
   virtual sPtr<pigData> capture_copy() {  /* spine を deep copy・葉は共有(要素を再帰 capture_copy) */
     sPtr<pigDataArray> n = thNEW(pigDataArray,());
-    for ( int i = 0 ; i < d.length() ; ++i ) n->push(d[i]->capture_copy());
+    for ( int i = 0 ; i < d.length() ; ++i ) n->push_nocheck(d[i]->capture_copy());   /* 同上 */
     return n;
   }
   virtual sPtr<pigData> get_ix(sPtr<pigData> key);   /* 要素はそのまま返す(観測で解決) */
@@ -402,6 +575,7 @@ protected:
 class pigDataHash : public pigData {
 public:
   pigDataHash(sPtr<pigInfo> i = thNULL) : pigData(i) {}
+  virtual sPtr<pigDataHash> obt_hash() { return thThis; }   /* 型取得ゲートウェイ (自分がハッシュ) */
   int length() { return keys.length(); }                 /* 要素(キー)数。length() ビルトイン用 */
   virtual int get_bool() { return keys.length() > 0; }   /* 非空=真 */
   virtual sPtr<stdString> get_str();                 /* キーソートの正規形 */
@@ -477,6 +651,8 @@ public:
   virtual sPtr<stdString> print()  { return compact()->print(); }          /* ゲートウェイ(未解決は yield) */
   virtual sPtr<stdString> serialize(){ return compact()->serialize(); }   /* ゲートウェイ */
   virtual pHashKeyType get_hashkey(){ return compact()->get_hashkey(); }
+  virtual sPtr<pigDataArray> obt_array() { return compact()->obt_array(); }   /* 型取得もゲートウェイ */
+  virtual sPtr<pigDataHash>  obt_hash()  { return compact()->obt_hash(); }
 
 #define PG1(n)   virtual sPtr<pigData> n(sPtr<pigData> o) { return compact()->n(o); }
 #define PG0(n)   virtual sPtr<pigData> n() { return compact()->n(); }
@@ -504,6 +680,10 @@ public:
   virtual sPtr<pigData> car()             { return compact()->car(); }
   virtual sPtr<pigData> cdr()             { return compact()->cdr(); }
   virtual int           is_cache()        { return compact()->is_cache(); }
+  /* ★ rev4: 解決済み下位 (pigDataCache 等) へ型を委譲 (is_cache と対称)。これが無いと cache に解決した
+   *   遅延ノードが is_cache=1 なのに type_name が基底に落ちて typeless になる (arg_type_set が取りこぼす)。
+   *   ★ P2e: get_module_tag の委譲は撤去 (カーネル軸 API 廃止・型軸 type_name のみ)。 */
+  virtual const char*   type_name()       { return compact()->type_name(); }
 
   using pigData::p_cmp;
   virtual int cmp(sPtr<pigData> o)        { return compact()->cmp(o); }
@@ -519,6 +699,10 @@ public:
 
   virtual sPtr<pigData> compact(int depth = PIG_COMPACT_MAX);   /* 不動点解決(depth で上限) */
   virtual int           is_compact();
+  /* ★ 上流を止める(基底 pigData::destroy の実装)。helper を destroy し、委譲先(result: varref→
+   * 束縛ノード、sequence→最終文ノード等)へ再帰する = compact() が辿るのと同じ連鎖。
+   * result が値ノード(継続 pigDataPair 等)なら基底の no-op で止まる。 */
+  virtual void          destroy();
   /* 並列 spark: 起動だけ蹴る(result は待たない)。start() は冪等(start_flag)なので二度押し安全。 */
   virtual void          trigger() { start(); }
 protected:
@@ -746,6 +930,28 @@ class pigDataOperatorPrint : public pigDataOperator {
 public:
   pigDataOperatorPrint(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorPrint,())); }
+protected:
+  virtual void _start();
+};
+
+/* load(so) — カーネル/プラグイン .so を探索路 (docs §1.3) からロードする planner 側 op (agent 不要・
+ * .so 化 Phase 4b)。冪等 (dlopen refcount + registry 後勝ち)。結果 = モジュール名 (文字列)。 */
+class pigDataOperatorLoad : public pigDataOperator {
+public:
+  pigDataOperatorLoad(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorLoad,())); }
+protected:
+  virtual void _start();
+};
+
+/* module(so[, {exec_default, priority}]) — .so をロードし設定を上書きする planner 側 op (docs §2.4)。
+ *   exec_default: "thread" / "process" (このモジュールの起動方式)
+ *   priority:     既定カーネル選択順 (大=優先・「今ロードした扱い」で後勝ち)
+ * 結果 = モジュール名。DEFAULT_OUTPUT 変数 / SRAVA_INPROC env の置換 (.so 化 Phase 4)。 */
+class pigDataOperatorModule : public pigDataOperator {
+public:
+  pigDataOperatorModule(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModule,())); }
 protected:
   virtual void _start();
 };

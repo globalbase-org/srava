@@ -38,8 +38,21 @@ function(tinystate_codegen CODEGEN_TARGET)
   foreach(_src ${ARGN})
     string(REPLACE "/" "_" _nm "${_src}")
     set(_stamp ${_stampdir}/${_nm}.t)
+    # tscpp2 は各ソースにつき ${CMAKE_BINARY_DIR}/_ts2/c++/<basename>_.h (private) と
+    #   <basename>_pb.h (public base) を生成する (genOutputName: <baseheader>/<header>/c++/<basename>)。
+    # ★ これらの生成ヘッダを **stamp だけでなく本物の OUTPUT として宣言**する (tinyState 上流 #3393 の修正を移植)。
+    #   stamp-only OUTPUT だと生成ヘッダはビルドグラフに「見えない生成物」になり:
+    #     ① クリーン並列ビルドで、生成ヘッダを include する TU が codegen 完了前にコンパイルされて
+    #        "No such file or directory" で落ちる (要 add_dependencies での順序付け・下記も併用)。
+    #     ② 基底クラスのメンバ変更が派生 TU を再ビルドせず silent wrong-layout バイナリを生む (#3393)。
+    #   OUTPUT として宣言すると、コンパイラ depfile が記録する「どの _.h を include したか」を通じて
+    #   基底変更が 1 パスで全派生を再ビルドする。★basename は全 codegen 呼び出しで一意なので
+    #   (共有 pts* は pigts_codegen のみ・各カーネルは自分のクラスのみ) 重複 OUTPUT 衝突は起きない。
+    get_filename_component(_base ${_src} NAME_WLE)
+    set(_gen_priv ${CMAKE_BINARY_DIR}/_ts2/c++/${_base}_.h)
+    set(_gen_pub  ${CMAKE_BINARY_DIR}/_ts2/c++/${_base}_pb.h)
     add_custom_command(
-      OUTPUT ${_stamp}
+      OUTPUT ${_stamp} ${_gen_priv} ${_gen_pub}
       COMMAND ${STLCPP_CMD} file ${_src} --baseheader=${CMAKE_BINARY_DIR} --header=_ts2
       COMMAND ${CMAKE_COMMAND} -E touch ${_stamp}
       DEPENDS ${_src}

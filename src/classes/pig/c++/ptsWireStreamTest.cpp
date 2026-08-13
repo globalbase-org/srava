@@ -9,6 +9,7 @@
  * 子の TSE_RETURN は ev->source で判別(rDO 遷移時の stale event を弾くため。tsCallList と同手法)。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/ptsWireCacheStreamWriterText.h"
 #include	"pig/c++/ptsWireCacheStreamReaderText.h"
 #include	"ts2/c++/stdEvent.h"

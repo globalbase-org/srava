@@ -5,6 +5,7 @@
  * これは状態機械ではない普通の C++ 定義(CLASS_TINYSTATE 無し → tscpp2 不要)。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	<stdio.h>
 

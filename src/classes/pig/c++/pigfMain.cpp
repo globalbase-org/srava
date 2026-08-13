@@ -6,6 +6,7 @@
  *   - x を参照(get_int)した時に初めて 2+3=5 が評価される
  */
 #include	"ts2/c++/tinyState.h"
+#include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigfAssign.h"     // pigDataFunction<pigfAssign> のインスタンス化
 #include	"_ts2/c++/pigfMain_.h"

@@ -3,9 +3,9 @@
 CGAL ベースの Lisp 風ポリゴン DSL。表面文法は C/JS/Perl 風だが、パーズ後の内部表現は
 S 式相当の `pigData` DAG。キャッシュ・正規化はこの DAG レベルで効くため surface 文法から独立。
 
-- 文法定義: `src/classes/pig/c++/ns_sravaParser.y` (lemon_cpp 生成)
-- レキサ/ドライバ: `src/classes/pig/c++/cgptsLemonParser.cpp`
-- 組み込み形状/演算: `src/classes/pig/c++/cga*.cpp`、ディスパッチ表は `cgatsAgent.cpp` の `OPS[]`
+- 文法定義: `src/classes/cg/c++/ns_sravaParser.y` (lemon_cpp 生成)
+- レキサ/ドライバ: `src/classes/cg/c++/cgptsLemonParser.cpp`
+- 組み込み形状/演算: 幾何 op は**各モジュール(.so)側** (`modules/<name>/` → `<name>.so`)、ディスパッチ表は `src/h/pig/c++/pigModule.h` / `ptsGenericAgent.cpp`
 - 実行例: `test/srava_parse.sh`
 
 実装の確定意味論の経緯は引き継ぎメモ (NEXT_handoff) の step33-42 を参照。
@@ -55,6 +55,8 @@ async { stmt; … sync: stmt }   // sync: は最終文に 1 つ。その出力�
 return expr;  return;          // 関数(lambda)から値を返す。return; は null
 break;                         // 最も内側の while/for を抜ける
 continue;                      // 次の周回へ(for は step を実行してから)
+exit;                          // プログラム全体を安全に終了 (制御値)。既定終了コード 0
+exit expr;                     // メッセージ付き終了。expr を stderr へ表示してから終了
 ```
 
 **実行モデル**: 制御文(`{}`/`if`/`while`/`for`)は**直列**、関数引数と配列リテラル `[..]` は**並列**、並列な制御は **`async`**。`async` ブロックは互いに並列に走り、内部は直列・スコープ共有。`sync:`(最終文・省略可)はその文の**出力だけ**を全 `async` 跨ぎで出現順に整列する(計算は並列のまま)。エラーは中断せず末尾でまとめて報告(continue-and-collect)。`print_async`/`export_async` は `async` のシュガー、`par` は `[..]` に統合(撤去)。詳細は [関数リファレンス](srava_function_reference.html) の `async` / 設計メモ `docs/srava_async_design.md`。
@@ -93,6 +95,12 @@ continue;                      // 次の周回へ(for は step を実行して�
   剥がして返す)を捕捉する。捕捉されずループ/関数の外に出ると `break outside loop` 等のエラー。`for` の `continue`
   は **step を実行してから**次周へ(`{body; step}` の body を `catch_continue` で包む desugar)。`return expr` は
   expr を評価地点で確定(ループ変数も捕捉)。`return` で関数の途中終了、`break`/`continue` で早期離脱ができる。
+- **`exit` / `exit expr`**: **プログラム全体を安全に終了する制御値**(`pigDataControl` / `CTRL_EXIT`)。エラーと
+  同じく評価チェーンを上方伝播し、**planner が捕捉**して全体を畳む(`return`/`break`/`continue` のようにループ/関数で
+  止まらず最上位まで抜ける)。**メッセージ式は省略可**(あれば stderr へ `[srava] exit: <msg>`)。先行して起動した
+  `export_async` は **drain(完了待ち)される**ので途中の出力は失われない。**既定の終了コードは 0**、予約変数
+  **`EXIT_CODE`** で上書きできる(→ [§9 `EXIT_CODE`](#組み込み変数-exit_code))。使い方例は [§9 `ARGV`](#組み込み変数-argv) の
+  引数バリデーション(`if (n < 1) exit("使い方: …");`)。
 
 ---
 
@@ -194,7 +202,8 @@ export(f(2));
 
 ## 5. 組み込み関数
 
-`OPS[]` (cgatsAgent.cpp) と `mk_call` (文法) でディスパッチ。形状はすべて原点基準で生成。
+組込関数は `mk_call`(文法)でノード化され、幾何 op は**型に応じて各モジュール(.so)へディスパッチ**される
+(ディスパッチ表は `src/h/pig/c++/pigModule.h` / `ptsGenericAgent.cpp`)。形状はすべて原点基準で生成。
 
 ### 形状生成 (3D mesh)
 
@@ -204,9 +213,12 @@ export(f(2));
 | `boxa([w, h, d])` | 寸法配列 1 個 | `box` と同じ。寸法を構造 (配列 inline) で渡す形 | |
 | `prism(n, h, r)` | 角数・高さ・半径 | 正 n 角柱。**高さは Z 軸**(底面 n 角形は z=0 の XY 平面・頂面 z=h) | n=3, h=1, r=1。n<3 は 3 に切上げ |
 | `pyramid(n, h, r)` | 角数・高さ・半径 | 正 n 角錐。**高さは Z 軸**(底面 z=0・頂点 z=h) | n=3, h=1, r=1。n<3 は 3 |
-| `sphere(r[, subdiv])` | 半径・細分化 | 球の多面体近似 (icosphere)。`subdiv` で精度ピッチ | r=1, subdiv=0(正二十面体 20 面)。1=80 面 / 2=320 面… 上限 4 |
+| `sphere(r[, seg])` | 半径・円周分割数 | 測地球(正八面体を分割し球面投影)。`seg`=円周分割数(連続値) | r=1, seg=32 相当(258 頂点 512 面)。面数 8·n²・n=(seg+3)/4 |
+| `icosphere(r[, subdiv])` | 半径・細分回数 | 測地球(正二十面体を 2^subdiv 分割)。旧 `sphere(r,subdiv)` の意味論を継ぐ | r=1, subdiv=0(20 面)。1=80 / 2=320 / 3=1280 …(4 倍刻み・上限 6) |
 
 **軸の規約**: `box`(d=Z)/`prism`/`pyramid`/`extrude` はすべて **Z 軸を高さ(上方向)**に統一。
+
+★`sphere`/`icosphere` は cgal / manifold で頂点・面が一致する(共通生成器 `src/h/common/geodesic.h`)。詳細・面数・例は[関数リファレンス](srava_function_reference.html#kernel-conv)の該当項を参照。
 `prism(n,h,r)` は `extrude(ngon(n,r), h)` と**完全に等価**(断面 n 角形は XY 平面・z=0..h)。`revolve` のみ Y 軸まわりの回転。
 
 **スイープ(パスに沿った掃引・2D/3D 次元ディスパッチ)**
@@ -513,6 +525,9 @@ transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])  // 3x4 行列で +x 平行�
   `map([box(1,1,1),box(2,2,2)], \(m){ volume(m); })`=`[1,8]`、`map([10,20,30], \(p,i){ p+i*100; })`=`[10,120,230]`。
   幾何の一括処理の土台: インスタンス化 `map(positions, \(p){ box(1,1,1) >>> p; })`、整列なども map+index+`bbox` で書ける。
   返す各要素は遅延ノードなので、`fn` が mesh op を作る場合は**要素どうしが並列**に走る(`union(map(…))` で並列計算→畳み込み)。
+  **並列セマンティクス**: 各要素は**並列に評価**され(**完了順**は不定)、結果配列は必ず**入力順に整列**して返る。
+  要素のひとつが**エラー / `exit` 等の制御値**を返すと、その**最初のもの**が map 全体の結果となり(上方伝播)、
+  残りの未完了要素は **cancel** される。
 - **初等関数(プランナ側・ベクトル化・角度ラジアン)**: `sin cos tan asin acos atan sqrt exp log abs floor ceil round sign`(1引数)、
   `atan2(y,x) pow(b,e) mod(a,b) min(a,b) max(a,b)`(2引数)。**配列もOK(要素ごと)**: `sqrt([1,4,9])`=`[1,2,3]`、
   `atan2([1,1],[1,0])`=`[π/4, π/2]`(配列同士は zip・スカラはブロードキャスト)。結果は浮動小数。
@@ -661,6 +676,8 @@ chmod +x model.sra
 
 ### エラー表示と終了コード
 
+- **終了コード**: **正常終了は常に `0`**(POSIX)。明示したいときは予約変数 **`EXIT_CODE`**(→ [§9](#組み込み変数-exit_code))
+  または **`exit` 文**(→ §2)で上書きする。**エラー終了は `1`・シグナル終了は `128+signum`** が優先(こちらが `EXIT_CODE` を上書く)。
 - エラーは `ERROR[ファイル名,行番号] メッセージ` 形式で **stderr** に出る。例:
   `ERROR[model.sra,3] volume: 2D has no volume (use area)` / `ERROR[model.sra,2] parse error`。
   行番号はパース時に各ノードへ刻む(`pigInfo`)。agent が計算したエラー(次元不一致など)も、
@@ -691,10 +708,15 @@ hash は `{"k":v,…}` (キーソート)。
 
 ## 8. 未実装 / 非対応 (現時点)
 
-- **2D**: `Polygon_2`・SVG/DXF・`revolve`/`extrude` は未実装 (設計方針のみ)。
-- **変換**: `translate`/`rotate`/`mirror`/`scale`/`transform` は実装済 (上記)。任意軸回転・任意法線
+- **2D は実装済み**(§5「2D(スケッチ層)」参照)。`rect`/`ngon`/`circle`/`polygon`・`extrude`/`revolve`・
+  3D→2D `section`・SVG/DXF I/O まで稼働する(かつて「設計方針のみ」だったが現行版で実装)。
+- **変換も実装済み**(§5)。`translate`/`rotate`/`mirror`/`scale`/`transform` — 任意軸回転・任意法線
   ミラー・軸別スケールに対応。剪断など更に一般のアフィンは `transform(m, matrix)` で書ける。
 - **string/hash 操作関数**: 拡充未了。
+- **3D `repair` のソリッド再構成**(重なる立体からの内壁除去・防水化)は未実装(Nef が要る・将来。
+  §5「計測・検査・修復」参照)。自己交差の実エッジ化(`autorefine`)までは対応。
+- **Manifold カーネルの一部 op**(3D `offset`・任意平面 `section`・肉厚 SDF・SVG/DXF export 等)は
+  設計上非対応で、CGAL へ自動フォールバックする(→ §10)。
 - **非対応確定** (蒸し返さない): source-hash 文頭 `{` (JS 同様)、content-hash サイドカー、
   中置結合の正準化。
 
@@ -711,7 +733,10 @@ hash は `{"k":v,…}` (キーソート)。
 | `SRAVA_VALUE` | VALUE モードで parse → serialize 表示 |
 | `SRAVA_CACHE_DIR` | キャッシュ出力先 |
 | `SRAVA_CACHE_RETAIN` | 終了時の未使用キャッシュ掃除方針。未設定/`0`=即削除(既定) / `7d`等の期間 or `2026-06-10`等の期日=古い完了のみ削除 / `all`=全保持。下記 |
-| `SRAVA_AGENT` | agent 実行体パス |
+| `SRAVA_AGENT` | **幾何カーネル非依存の agent host 実行体パス**(既定 `/usr/local/bin/srava_agent`)。この単一 host が `cgal.so`/`manifold.so` 等のモジュールを dlopen する(旧 `srava_agent`/`srava_agent_mf` の 2 バイナリ体制は廃止) |
+| `SRAVA_DIRECT_EXEC` | agent 起動方式。既定(未設定/`0` 以外)は `'#'` 直接 `execvp`(sh 孫を挟まずプロセス半減・teardown が実 agent に直達)、`=0` で従来の `sh -c` に戻す(race 切り分け用) |
+| `SRAVA_MODULE_PATH` | モジュール(`.so`)の**追加**探索パス(`:` 区切り)。既定探索路(実行体同居 dir → install SYSDIR → `~/.config/srava/modules`)に足す。→ [モジュールリファレンス](srava_module_reference.html) |
+| `SRAVA_PATH` | `include` の探索パス(`:` 区切り)。取り込み元 dir の次に探す(§5 の include を参照) |
 | `PIG_MAX_WORKERS` | **ワーカーゲート**の同時 agent プロセス上限(**固定** soft cap)。既定 `ncpu*4`。`failed to launch agent`(fork 上限超過)や OOM を防ぐ。**limit は固定**で、設定が実機の fork 上限を超え fork が EAGAIN で失敗すると、バックオフも再試行もせず**即座に致命エラーで終了**する(`fork failed (process limit): PIG_MAX_WORKERS=N exceeds this machine's fork/process limit. Lower PIG_MAX_WORKERS and re-run.`)。理由: 既に fork 済みの agent は殺せず、後から limit を縮めてもデッドロックは解けない／物理上限が増えるわけでもないため。大きすぎたら**手で下げて再実行**する |
 | `PIG_MEM_MARGIN_MB` | (**現状無効・インタフェースのみ残置**) 空きメモリがこの MB を切ったら新規 agent 起動を保留する OOM 保険の設定値。既定 1024・`0` で無効・空きは `/proc/meminfo`(Linux のみ)。**ただし現在この入場制限は呼び出しを外してあり効かない**(メモリ容量チェックもデッドロック要因になり得るため当面無効化。env のパースと判定関数 `gate_mem_wait()` は将来の整理用に残置)。実効の入場制御は `PIG_MAX_WORKERS`(プロセス数)のみ |
 | `PIG_MAX_FILES` | srava が起動時に自前で上げる open-files(RLIMIT_NOFILE)ソフト上限の目標。既定 16384。シェルの低い既定(macOS は 256)に縛られず多数 agent を並列に回すため。ハード上限/カーネル上限(`kern.maxfilesperproc`)を超える分は段階的に下げて設定 |
@@ -719,7 +744,20 @@ hash は `{"k":v,…}` (キーソート)。
 | `PIG_TEST_SLOW` | agent を 200ms 遅延 (レース検証) |
 | `PIG_TEST_FORKLIMIT` | 生存 agent 数が N を超えた fork を擬似 EAGAIN 失敗させる (ワーカーゲートの**fork 失敗→即致命エラー終了**パスの検証) |
 | `PIG_TEST_RAISE_SIGINT` | SIGINT 注入 |
+| `PIG_TEST_RAISE_SIGNAL` | 指定シグナルを注入(`PIG_TEST_RAISE_SIGINT` の一般化) |
 | `PIG_TEST_ERR_AFTER_SAVE` | 保存後エラーのフォールトインジェクション |
+
+### 診断・トレース用 env
+
+開発・障害解析用のトレース切替。通常運用では未設定でよい(未設定=無効)。
+
+| 変数 | 役割 |
+|------|------|
+| `PIG_TIMING` | op ごとの計測を指定パスへ記録(値=出力ファイルパス) |
+| `PIG_DBG_TD` | teardown(destroy 転送・MEDWAIT/AGENTWAIT)のトレースを stderr `[td] …` に出す |
+| `SRAVA_DBG_CONV` | 型変換(`[CONV]`)のトレースを出す |
+| `PIG_DEBUG` | キャッシュ掃除(sweep)の verbose 出力 |
+| `PIG_POLISH_LOG` / `PIG_SEP_LOG` | pipe_proximity の polish / 分離ソルバのデバッグログ(値=出力パス) |
 
 ### 組み込み変数 `CACHE_DIR`
 
@@ -735,6 +773,23 @@ srava プログラムから読み書きできる**事前定義変数**。キャ�
 CACHE_DIR = "/dev/shm/srava-cache";   // この実行のキャッシュは tmpfs へ
 var part = box(10,10,10) ||| sphere(6);
 export(part, "part.off");
+```
+
+### 組み込み変数 `EXIT_CODE`
+
+**planner 成功時の終了コード**を明示指定する予約変数。既定は **0**(POSIX の成功)。`CACHE_DIR` と同型の
+事前定義変数で、srava プログラムから代入して読み書きできる。
+
+- **範囲は 0–255 にクランプ**する(範囲外は警告して丸める)。
+- **エラー / シグナル終了時はそちらのコードが優先**(エラー=`1`、シグナル=`128+signum`)。`EXIT_CODE` が
+  効くのは**正常終了時**のみ。
+- **⚠ `var` を付けない**: `EXIT_CODE = n;`(代入)で書く。`var EXIT_CODE = n;` は**別のローカル変数を新規作成**
+  してしまい、planner が見る事前定義変数(env チェーン)を上書きしないので**効かない**(`CACHE_DIR`/`CACHE_RETAIN` と同じ)。
+- `exit` 文(→ §2)と組み合わせて途中終了のコードも指定できる(`EXIT_CODE = 2; exit "中断";`)。
+
+```
+EXIT_CODE = 3;                 // このプログラムは正常終了でも終了コード 3 を返す
+export("part.off", box(10,10,10) ||| sphere(6));
 ```
 
 ### キャッシュ保持 `SRAVA_CACHE_RETAIN`
@@ -768,3 +823,111 @@ export("part.off", part);
 - 各要素は**文字列**（数値が欲しいときは `float(x)` で変換する。例 `float(ARGV[0])`。→ [関数リファレンス](srava_function_reference.html)）。`ARGV[0]`/`length(ARGV)` で参照。
 - 用途: 同じスクリプトをパラメータ違いで回す（出力名・寸法・段数などを引数で受ける）。
 - 例: `var n = length(ARGV); if (n < 1) exit("使い方: srava gen.sra <出力名>"); export(ARGV[0], part);`
+
+## 10. 幾何カーネル (CGAL / Manifold) — 型ディスパッチと型変換 {#kernel}
+
+srava は幾何演算を**外部 agent プロセス**(または in-proc スレッド)に委ねる。**言語/プランナは幾何ライブラリ
+非依存**で、幾何を計算するコアを知っているのは**モジュール(.so)の側**だ。3 つの語を厳密に使い分ける:
+
+- **幾何カーネル** = 幾何構造を計算するコア/表現(CGAL の EPECK+Nef / Manifold のエンジン)。CAD の
+  geometric kernel と同義。**モジュールが知っていて、planner は知らない**。
+- **型** = mesh の型(cache タグ。`MESH`/`PLY2`/`MFM3`/`MFC2`)。
+- **モジュール** = ダイナミックリンクの単位(`.so`)。`modules/<name>/` → `<name>.so`。単一 host 実行体
+  (`srava_agent`)がこれらを dlopen する。
+
+**モジュール↔幾何カーネルは 1:1 ではない**: 複数の幾何カーネルに関心を持つモジュールもあり、幾何カーネルに
+まったく対応しないモジュール(`pipe_proximity`)もある。現在 2 つの幾何カーネルを持ち、**同じプログラムを
+どちらでも走らせられる**:
+
+| 幾何カーネル | モジュール(.so) | 性質 | 型(cache タグ) |
+|---|---|---|---|
+| **CGAL**(既定) | `cgal.so` | **厳密**(EPECK 有理数)。corefinement ブール。堅牢だが重い。全 op 対応 | 3D=`MESH` / 2D=`PLY2` |
+| **Manifold** | `manifold.so` | **高速**(double)。watertight 前提。2D は CrossSection。ライセンス寛容(Apache-2.0) | 3D=`MFM3` / 2D=`MFC2` |
+
+いずれのモジュールも単一 host 実行体 `srava_agent`(env `SRAVA_AGENT`)が dlopen する(旧 `srava_agent_mf` の
+別バイナリ体制は廃止)。Manifold は opt-in ビルド（`cmake -DSRAVA_MODULE_MANIFOLD=ON`）で `manifold.so` が
+入るときのみ使える。
+
+⚠ 同じ `.sra` を両カーネルで走らせたとき、**`combine`(`+++`) だけは結果が違う**: cgal は重なりを
+そのまま残すが、manifold は解消する(実質 `union`)。Manifold の値は常に妥当な 2-manifold 立体である
+ことが型の不変条件なので、原理的に埋められない差。詳細は
+[関数リファレンスの `combine`](srava_function_reference.html#combine)。
+
+### モジュールの選び方(型ディスパッチ)
+
+**planner は op の引数・出力の「型」を見て、その型をサポートする「モジュール」へディスパッチする。planner は
+幾何カーネルを知らない**(どの幾何カーネルで計算するかはモジュールの内部)。ユーザが毎回書く必要はない:
+
+1. **mesh 入力を持つ op**（`union`/`difference`/`volume`/`export`/…）: 入力の**型を伝播**する。
+   - 入力が**すべて Manifold 型**（`MFM3`/`MFC2`）→ Manifold モジュール。
+   - **一つでも CGAL(厳密)型が混ざる** → CGAL モジュール（厳密側に寄せる。安全側）。
+2. **mesh 入力を持たない leaf**（`box`/`sphere`/`polygon`/`rect`/…）: **既定の幾何カーネル**で作る。
+   既定 = **モジュールレジストリの priority 最大**（既定 CGAL）。切替は `module("manifold.so", {priority:N})`、
+   個別 op は `cast(...)`（下記）。
+3. **Manifold モジュールが実装しない op**（`offset` の 3D・任意平面 `section`・肉厚 SDF・SVG/DXF `export` 等）は、
+   既定が Manifold でも**自動的に CGAL モジュールにフォールバック**する（後述の無損失昇格で入力を吸い上げる）。
+
+→ 結果として既定を Manifold にすると「**Manifold でできる所は Manifold・できない所は CGAL**」の
+ハイブリッドで動く（利用者は意識しなくてよい）。
+
+### 幾何カーネル / 実行方式の切替 — `module(so[, {…}])` / `load(so)`
+
+`DEFAULT_OUTPUT` 変数・`SRAVA_DEFAULT_OUTPUT` env は撤去された(Phase 4c)。既定の幾何カーネルの切替や
+実行方式の指定は、その**代替となる planner 側組込 `module` / `load`** で行う(ソース先頭に書くのが定石):
+
+| 組込 | 意味 |
+|------|------|
+| `module("manifold.so", {priority:10})` | `.so` をロードし **priority を上書き** → **既定の幾何カーネルを切替**(priority 最大が既定・同値は後勝ち)。ベンチで同一 `.sra` を無改変で両カーネルへ振るのはこれ |
+| `module("so", {exec_default:"process"})` | 実行方式を上書き。**重い op をプロセス実行**(`"thread"`=in-proc スレッド)。CGAL は常に process、Manifold は既定 in-proc |
+| `load("manifold.so")` | **設定上書きなし**の軽量ロード(codec/descriptor だけ登録)。既存の Manifold 型 cache を読むために積むだけ、等 |
+
+- `module(so, opts)` の第 2 引数ハッシュは `priority`(整数) / `exec_default`(`"thread"` / `"process"`)を取る。
+  `module("manifold.so",{priority:99});` の 1 行で Manifold を既定に押し上げられる(旧 `DEFAULT_OUTPUT=manifold` の代替)。
+
+### 型変換ポリシー(無損失は暗黙・損失は明示)
+
+カーネルをまたぐと mesh 表現の変換が要る。方針は **損失の有無で非対称**：
+
+- **無損失方向(double → 厳密有理数)は暗黙・自動**。double は 2 進有理数なので EPECK へ厳密に載る。
+  よって **CGAL agent は Manifold の cache（`MFM3`/`MFC2`）をそのまま読み込める**（読む時点で厳密昇格）。
+  → 上記フォールバック（Manifold 入力を CGAL op が処理）はこれで成立する。
+- **損失方向(厳密有理数 → double)は `cast` で明示**のときだけ。暗黙には起きない（厳密さを勝手に捨てない）。
+
+### `cast(target_type, mesh)` — 目標型への明示変換(型変換)
+
+mesh を明示的に**目標型**へ移す（rev4 型ディスパッチ）。**これは「型変換」**であって、幾何カーネルそのものを
+指名する「カーネル変換」ではない(目標は mesh の型名で、対応する幾何カーネルはモジュールが決める)。
+→ [関数リファレンス](srava_function_reference.html#cast)
+
+```
+cast("cg-mesh3d", m)    // → CGAL 厳密 3D。m が Manifold(mf-mesh3d) なら無損失で厳密化
+cast("mf-mesh3d", m)    // → Manifold double 3D。m が CGAL なら double 化(損失)
+cast("cg-cross2d", m)   // → CGAL 厳密 2D 断面
+cast("mf-cross2d", m)   // → Manifold 2D 断面
+```
+
+- 目標型は実装型名（`cg-mesh3d` = CGAL 厳密 3D / `mf-mesh3d` = Manifold 3D / `cg-cross2d` = CGAL 2D /
+  `mf-cross2d` = Manifold 2D）。型が**次元も含む**ので、旧 `cast("exact")`（次元非依存）と違い曖昧さがない。
+- **`cast("cg-…", …)`（float→厳密・無損失）**: 以降を厳密ブールで通したいときに。既定 Manifold で作った
+  部品を要所だけ厳密化する用途。
+- **`cast("mf-…", …)`（厳密→float・損失）**: CGAL で作った厳密結果を、以降の高速な Manifold 経路に
+  意図的に載せるときに。座標は double へ丸められる。
+- 既に目標型なら実質 no-op（再エンコードのみ）。
+- ⚠ 旧 `cast("exact")` / `cast("manifold")`（カーネル名指し）は**廃止**（後方互換なし・rev4）。
+
+### ベンチ / 使い分けの実際
+
+`SRAVA_DEFAULT_OUTPUT` env は撤去されたので、既定の幾何カーネルの切替はソース先頭の `module()` 1 行で行う:
+
+```
+// 既定 = CGAL(厳密・全 op)。この 1 行が無ければ CGAL
+export("model.stl", box(40,40,40) --- sphere(26,64));
+
+// 既定を Manifold に押し上げる(できる所は高速・残りは自動 CGAL)
+module("manifold.so", {priority:99});
+export("model.stl", box(40,40,40) --- sphere(26,64));
+```
+
+- **既定は CGAL**（厳密・全 op・後方互換）。まず正しく作ってから `manifold` で速度を狙うのが安全。
+- **Manifold はサイレント破綻し得る**（非 watertight・レンジ外）。結果の妥当性は `valid(m)` で確認できる。
+- 2D ベクタ出力（SVG/DXF）・寸法線 `line`・肉厚 SDF は Manifold の設計上できないため、常に CGAL 側で処理される。

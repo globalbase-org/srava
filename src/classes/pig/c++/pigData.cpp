@@ -8,11 +8,20 @@
 #include "ts2/c++/sCallSection.h"
 #include "ts2/c++/stdEvent.h"
 #include <stdio.h>
+#include <stdlib.h>     /* getenv (SRAVA_DBG_CONV 計装) */
 #include <string.h>
-#include <string>       /* serialize の O(N) アキュムレータ(stdArray の addIn は幾何成長でないため) */
+#include <string>
 #include <typeinfo>
 #include <math.h>       /* 初等関数(sin/cos/sqrt/...) */
 #include <sys/stat.h>   /* pigDataFileRef::get_hashkey の (size,mtime) ゲート */
+#include <unistd.h>     /* access (pigDataCache::is_valid) */
+#include "pig/c++/pigwire.h"   /* pigDataCache::get_module_tag の D_META オフセット/定数 */
+#include "pig/c++/pigModuleRegistry.h"   /* カーネル名↔id・4CC→id はレジストリへ集約 (Phase 1) */
+#include "pig/c++/pigTypeRegistry.h"     /* rev4 Phase B-2: 型名↔tag (継続スタンプの型リスト解釈) */
+#include "pig/c++/pigCacheCodec.h"       /* P3: get_body(wantTypes) の reader_for (4CC×型で変換可否) */
+#include "pig/c++/pigModuleLoader.h"
+#include "pig/c++/osglue.h"   /* OSGLUE_MODULE_SUFFIX: module("x.so") の拡張子正規化 */     /* load()/agent() op が .so をロード (Phase 4b) */
+#include "pig/c++/pigModule.h"           /* srava_module_descriptor / EXEC_THREAD・EXEC_PROCESS */
 
 /* ------------------------------------------------------------------ */
 /* pigData 基底                                                        */
@@ -284,18 +293,308 @@ sPtr<stdString> pigDataPair::get_str() {
  * 実値(cache 等)まで解決して表示する。cdr->print() は遅延ノードなら compact ゲートで未解決時に
  * yield(呼び元 _start 再走)。それ以外の素の pair は cons 表記。 */
 sPtr<stdString> pigDataPair::print() {
-  if (_car->get_str()->cmp("delayed") == 0 || _car->get_str()->cmp("begin") == 0)
-    return _cdr->print();   /* "delayed"→("begin".実値)、"begin"→実値、と辿る */
+  if (pig_module_from_name(_car->get_str()->get_str()) >= 0 || _car->get_str()->cmp("begin") == 0)
+    return _cdr->print();   /* カーネル名(継続)→("begin".実値)、"begin"→実値、と辿る */
   sPtr<stdString> r = thNEW(stdString, ("("));
   return r->add(_car->print())->add(" . ")->add(_cdr->print())->add(")");
 }
+/* ★ P2e (⑤ 型軸化): 旧 pigDataCache::get_module_tag (キャッシュの「サポートするカーネル」を 4CC→module で
+ *   引く #3404 の API) を撤去した。routing はキャッシュの **型** (type_name) を読み、そこから型軸で
+ *   executor を決める (arg_type_set→decide_executor / module_of_type)。「値に module が属す」概念は消えた。 */
+
+/* キャッシュ本文の実装型名 = **file 先頭 D_META の 4CC → type_of_tag**。routing (arg_type_set) の
+ *   一次キー。非ブロッキング (peek_tag は同期 read。file 不在/未メタなら fopen 失敗で 0)。
+ *   ★ converted[] は見ない: converted[0] は「最初に載ったエントリ」で file の native 型とは限らず
+ *   (downgrade で先に foreign 型を読むと不一致)、routing が誤った型を見る。型は 4CC が唯一の真実。
+ *   値キャッシュ (D_META でない) は型なし = 0。 */
+const char *pigDataCache::type_name() {
+  unsigned char tag[4];
+  if (!peek_tag(tag)) return 0;
+  sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③ */
+  return ( reg != thNULL ) ? reg->types.type_of_tag(tag) : 0;
+}
+
+/* ★ in-memory body(#3406, 2026-0727 メモ §2 / 2026-07-29 メモ 3. で抽象化完成)。
+ * ディスク I/O は専用 helper ptsDataCache が内包 (生成はフック経由 = pig 静的ライブラリから
+ * codegen クラスへ直依存しないため)。待ち合わせは TSE_DESTROY 統一 (helper の ZOM 時に
+ * tinyState が listener へ自動配布)。呼び出し規約: set_body/get_body は **TS_STATE から呼ぶ**
+ * (大域 mtx 下でシリアライズ)。TS_THREAD 内から触らない(WSM-FgT)。 */
+
+/* ★ カーネル名 API (2026-07-29 メモ 1.)。実体は pigModuleRegistry へ委譲 (K2・Phase 1)。
+ * 公開シグネチャ (pigData.h) は互換のため残し、名前↔id の一元管理だけレジストリへ移した。
+ * MODULE_NONE = id 0 = "delayed"。第 3 カーネルは pig_register_module_name (= register_module)。 */
+/* ★ #3427 ③: レジストリは app 所有 (pig_current_registry = sCallSection TLS 経由)。
+ * app の無い文脈 (単体テスト等) は「未登録」フォールバック ("delayed" / -1)。 */
+const char *pig_module_name(int k) {
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  return ( reg != thNULL ) ? reg->name_of_id(k) : "delayed";
+}
+int pig_module_from_name(const char *s) {
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  return ( reg != thNULL ) ? reg->id_of_name(s) : -1;
+}
+int pig_register_module_name(const char *s) {
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  return ( reg != thNULL ) ? reg->register_module(s) : -1;
+}
+/* 遅延継続の共有述語: car が継続マーカー文字列なら継続 pair (旧 car=="delayed" 固定判定の一般化)。
+ * マーカーは **型名リスト** (新・pigfAgent が stamp) または **カーネル名** (旧・coexistence)。
+ * ★ P2e (⑤ 型軸化): 型名リスト判定を「先頭トークンが **登録済み型名** か」(tag_of_type) に。旧実装は
+ *   pig_module_from_type_list (型→tag→module_of_tag) で module id まで引いていたが、is_delayed に必要なのは
+ *   「型スタンプか否か」= 型メンバシップだけ。これで module_of_tag 依存が消える。
+ * 非 pair は car() がエラー値を返し get_str が安全に流れる = 従来判定と同じ素通り。 */
+int pig_is_delayed(sPtr<pigData> v) {
+  const char *car = v->car()->get_str()->get_str();
+  char tok[64]; int n = 0;                        /* 先頭トークン (CSV 型名リストの先頭型) */
+  while (car[n] != '\0' && car[n] != ',' && n < 63) { tok[n] = car[n]; ++n; }
+  tok[n] = '\0';
+  unsigned char tag[4];
+  sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
+  if ( reg == thNULL ) return 0;                  /* app 無し (単体テスト) = 型スタンプ概念なし */
+  return reg->types.tag_of_type(tok, tag)         /* 新: 先頭が登録済み型名 (型スタンプ) */
+      || reg->id_of_name(car) >= 0;               /* 旧: カーネル名スタンプ (coexistence) */
+}
+
+/* ★ #3427 ③: 旧グローバルフック (プロセス唯一の可変 static) は撤去。helper 生成子は
+ * app 所有レジストリ (module_registry->pdc_helper()) が持ち、TLS で引く。
+ * 未登録 (app 無し = 単体テスト) は 0 = 素の入れ物として振る舞う (従来フォールバックと同じ)。 */
+static pigDataCacheHelperFn pdc_helper_fn() {
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  return ( reg != thNULL ) ? reg->pdc_helper() : 0;
+}
+
+/* ★ 2026-08-12 再設計 (ひさ): pigDataCache の body は **型ごとの converted[] 一本**。canonical/foreign
+ *   の区別は無い。get_body(type) は converted に該当型があれば即返し、無ければ is_valid を確認して
+ *   type 指定の reader を起動する (writer 走行中は is_valid が「メタ書込済」を待つ)。value 本文
+ *   (type_name()==0) は型名 "value"。設計: docs/cross_module_conversion_design.md。 */
+
+/* value 本文 (type_name()==0) は型名 "value" として扱う (get_body("value") と対)。 */
+static const char* pdc_type_of(sPtr<pigData> d) {
+  const char* t = (d != thNULL) ? d->type_name() : 0;
+  return (t != 0 && t[0] != '\0') ? t : "value";
+}
+
+/* converted 中の型名一致エントリ index (無ければ -1)。push_back のみ・erase しないので index は安定。 */
+int pigDataCache::conv_index(const char* type) {
+  for (size_t k = 0; k < converted.size(); ++k)
+    if (converted[k].type != thNULL && ::strcmp(converted[k].type->get_str(), type) == 0)
+      return (int)k;
+  return -1;
+}
+/* 無ければ新規 push して index を返す (以後 index 不変)。 */
+int pigDataCache::conv_ensure(const char* type) {
+  int i = conv_index(type);
+  if (i >= 0) return i;
+  converted.push_back(ConvEntry());
+  i = (int)converted.size() - 1;
+  converted[i].type = thNEW(stdString,(type));
+  return i;
+}
+/* set_body で作られた writer エントリの index (is_valid/is_complete 用)。無ければ -1。 */
+int pigDataCache::writer_index() {
+  for (size_t k = 0; k < converted.size(); ++k)
+    if (converted[k].isWriter) return (int)k;
+  return -1;
+}
+
+/* helper (ptsDataCache) が結果本文/完了を書き戻す口 (型名で該当エントリを引く)。 */
+void pigDataCache::conv_set_body(const char* type, sPtr<pigData> b) {
+  int i = conv_index(type);
+  if (i >= 0) converted[i].body = b;
+}
+void pigDataCache::conv_finish(const char* type) {
+  int i = conv_index(type);
+  if (i >= 0) { converted[i].done = 1; converted[i].helper = thNULL; }
+}
+
+/* file 先頭の D_META 4CC を同期で覗く (get_body の候補選定 / type_name 用)。1=D_META(out に 4CC 充填)・
+ * 0=D_META 無し (短小/破損)。★値キャッシュも D_META (4CC "TEXT") で始まる — 値か型付きかの判別は
+ * wire_tag_is_text で行う。file は is_valid でメタ済が保証された後に呼ぶこと。
+ * ★成功のみメモ化: 同一 hash = 同一データなので 4CC は一度書かれたら不変 → 2 回目以降は file を
+ * 触らない。失敗 (file 不在/メタ未書込) はメモ化しない — writer 進行中に後で成功へ変わるので、
+ * 焼き込むと CV_INVALID スティッキーと同種の病気になる。 */
+int pigDataCache::peek_tag(unsigned char out[4]) {
+  if (tagKnown) {
+    out[0]=tagMemo[0]; out[1]=tagMemo[1]; out[2]=tagMemo[2]; out[3]=tagMemo[3];
+    return 1;
+  }
+  if (path == thNULL) return 0;
+  unsigned char h[WIRE_STREAMHDR_SIZE + WIRE_RECHDR_SIZE + 4];
+  size_t n = 0;
+  FILE *fp = ::fopen(path->get_str(), "rb");
+  if (fp != 0) { n = ::fread(h, 1, sizeof h, fp); ::fclose(fp); }
+  if (n < sizeof h) return 0;
+  uint16_t rtype = (uint16_t)(h[WIRE_STREAMHDR_SIZE + 4] | (h[WIRE_STREAMHDR_SIZE + 5] << 8));
+  if (rtype != D_META) return 0;
+  const unsigned char *tag = h + WIRE_STREAMHDR_SIZE + WIRE_RECHDR_SIZE;
+  tagMemo[0]=tag[0]; tagMemo[1]=tag[1]; tagMemo[2]=tag[2]; tagMemo[3]=tag[3];
+  tagKnown = 1;
+  out[0]=tag[0]; out[1]=tag[1]; out[2]=tag[2]; out[3]=tag[3];
+  return 1;
+}
+
+/* ★ get_body 統一実装 (2026-08-12 ひさ設計)。実体は「欲しい型の候補リスト」1 本だけで、
+ *   単型版・無引数版は n=1 の退化形。converted[] は一様なリスト (位置に意味なし)。
+ *   ① 候補が converted に居れば: body 有 → 即返す / helper 走行中 → listen+yield (single-flight
+ *      dedup) / done で body 無し → その型は読み失敗 (再起動しない)。
+ *   ② 候補が無ければ is_valid (メタ書込済) を確認。writer 走行中は待つ・不在は設計違反 panic。
+ *   ③ file 形式 (D_META 4CC / 値) × codec 表 (reader_for) で **読める候補**を選ぶ。読める候補が
+ *      無ければ thNULL — reader は起動しない。「mesh cache に value は無い」「値キャッシュから
+ *      mesh 型は作れない」も特殊ケースではなくこの一般規則の帰結。
+ *   ④ 選ばれた型の reader helper を起動して listen+yield。 */
+sPtr<pigData> pigDataCache::get_body(const char* const* wantTypes, int n) {
+  static const char* const kValue = "value";
+  if (wantTypes == 0 || n <= 0) { wantTypes = &kValue; n = 1; }
+  sPtr<tinyState> caller = sCallSection::key->caller();
+  /* ① converted 走査。出来上がりが最優先・次に走行中 (待つ)・失敗済みは候補から外す。 */
+  int pending = -1, untried = 0;
+  for (int i = 0; i < n; ++i) {
+    if (wantTypes[i] == 0) continue;
+    int j = conv_index(wantTypes[i]);
+    if (j >= 0 && converted[j].body != thNULL) return converted[j].body;
+    if (j >= 0 && converted[j].helper.is_notNull()) { if (pending < 0) pending = j; continue; }
+    if (j >= 0 && converted[j].done) continue;       /* 完了・body 無し = 読み失敗 */
+    ++untried;
+  }
+  if (pending >= 0) {                                /* 誰かが読み/変換中 → 相乗り */
+    converted[pending].helper->listen(caller, TSE_DESTROY);
+    throw sException([](sPtr<tinyState> caller) { return 1; });
+  }
+  if (untried == 0) return thNULL;                   /* 全候補が読み失敗済み */
+  /* ② valid (メタ書込済) を確認。
+   * (a) writer 走行中でメタ未書込 → is_valid が TSE_ASSERT を購読済 → 待つ。
+   * (b) writer 無し & ::access 不在 (CV_INVALID) → 存在し得ないキャッシュ = 設計違反。 */
+  if (!is_valid()) {
+    if (writer_index() >= 0)
+      throw sException([](sPtr<tinyState> caller) { return 1; });
+    stdObject::panic("pigDataCache::get_body: cache not valid and no writer (nonexistent cache)");
+  }
+  /* ③ 読める候補を選ぶ。★値キャッシュも D_META で始まる (WriterText が 4CC "TEXT" を書く) —
+   *   値か型付きかは **4CC == "TEXT"** で判別する (wire_tag_is_text・ReaderText の gate と対)。
+   *   「D_META = mesh」も「型レジストリに登録済みか」も誤り: 前者は 2026-08-12 の値読み全滅、
+   *   後者はレジストリが per-binary (agent process は他 module の型を登録しないが codec は
+   *   file を読める) で kernel_mix を壊した。型付き file の読み可否は codec 表 (reader_for)
+   *   が唯一の真実。 */
+  unsigned char tag[4];
+  int isText = peek_tag(tag) ? wire_tag_is_text(tag) : 1;   /* D_META 無し (短小/破損) も値扱い */
+  const char* pick = 0;
+  for (int i = 0; i < n && pick == 0; ++i) {
+    if (wantTypes[i] == 0) continue;
+    int j = conv_index(wantTypes[i]);
+    if (j >= 0 && converted[j].done) continue;       /* 失敗済みは再起動しない */
+    sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③ */
+    if (isText ? (::strcmp(wantTypes[i], "value") == 0)
+               : (reg != thNULL && reg->codecs.reader_for(tag, wantTypes[i]) != 0))
+      pick = wantTypes[i];
+  }
+  pigDataCacheHelperFn pdcFn = pdc_helper_fn();
+  if (pick == 0 || pdcFn == 0 || path == thNULL)
+    return thNULL;                                   /* この file から候補のどれも作れない */
+  /* ④ reader helper 起動。[CONV] は **genuine な変換 (src != target) のときだけ** 出す
+   *   (native 読みは出さない・旧仕様互換)。 */
+  const char* src = "value";
+  if (!isText) {
+    sPtr<pigModuleRegistry> reg = pig_current_registry();
+    src = ( reg != thNULL ) ? reg->types.type_of_tag(tag) : 0;
+  }
+  if (::getenv("SRAVA_DBG_CONV") != 0 && src != 0 && ::strcmp(src, pick) != 0)
+    ::fprintf(stderr, "[CONV] %s -> %s\n", src, pick);
+  int i = conv_ensure(pick);
+  converted[i].body = thNULL;
+  converted[i].done = 0;
+  converted[i].isWriter = 0;
+  converted[i].helper = pdcFn(caller, sPtr<pigDataCache>(this), PDC_MODE_LOAD,
+                                      thNEW(stdString,(pick)));
+  if (converted[i].done) converted[i].helper = thNULL;   /* 同期完走の取りこぼし防止 */
+  if (converted[i].body != thNULL) return converted[i].body;
+  if (converted[i].helper.is_notNull()) {
+    converted[i].helper->listen(caller, TSE_DESTROY);
+    throw sException([](sPtr<tinyState> caller) { return 1; });
+  }
+  return converted[i].body;   /* done・body 無し = 失敗 */
+}
+
+/* 単型版 = 候補 1 個の退化形。 */
+sPtr<pigData> pigDataCache::get_body(const char* type) {
+  if (type == 0 || type[0] == '\0') type = "value";
+  return get_body(&type, 1);
+}
+
+void pigDataCache::set_body(sPtr<pigData> d) {
+  /* writer は 1 つだけ (isWriter フラグで引く。位置に意味はないが、set_body は読みより先に
+   * 来る運用なので実質先頭に載る = writer_index() は常に 0 か -1)。二重 set_body は
+   * 「同一キャッシュ=同一データ」の破れ = 設計違反 (上流 inflight dedup で単一化されているはず)。 */
+  if (writer_index() >= 0)
+    stdObject::panic("pigDataCache::set_body: body already set (double set_body)");
+  const char* ty = pdc_type_of(d);
+  int i = conv_ensure(ty);
+  converted[i].body = d;              /* in-memory で即利用可 (同型消費者は待たない) */
+  converted[i].isWriter = 1;
+  /* writer helper (ptsDataCache MODE_SAVE) を起動して file へ永続化。メタ書込で CV_VALID・
+   * 完了 (ZOM) で done。フック未登録 (単体テスト) は素の入れ物として done 扱い。 */
+  pigDataCacheHelperFn pdcFn = pdc_helper_fn();
+  if (pdcFn != 0 && path != thNULL) {
+    converted[i].done = 0;
+    converted[i].helper = pdcFn(sCallSection::key->caller(), sPtr<pigDataCache>(this),
+                                        PDC_MODE_SAVE, thNEW(stdString,(ty)));
+    if (converted[i].done) converted[i].helper = thNULL;   /* 掲示より先に完走 → 取消 */
+  } else {
+    converted[i].done = 1;
+  }
+}
+
+/* 無引数 = 候補 {"value"} の退化形 (A_SAVE_BEGIN payload 判定 / 値本文の取得)。mesh cache に
+ * 対しては「D_META から value は作れない」の一般規則で thNULL = インライン値ではない、が返る。 */
+sPtr<pigData> pigDataCache::get_body() { return get_body((const char* const*)0, 0); }
+
+/* SAVE (writer) が走り終えたか。writer エントリの done で判定・走行中は購読して 0。
+ * writer が無い (process 生産者/reader) 場合は validState 確定で完了扱い。 */
+int pigDataCache::is_complete() {
+  int wi = writer_index();
+  if (wi >= 0) {
+    if (converted[wi].done) return 1;
+    if (converted[wi].helper.is_notNull()) {
+      converted[wi].helper->listen(sCallSection::key->caller(), TSE_DESTROY);
+      return 0;
+    }
+    return 1;   /* helper が掲示より先に完走 (done 未反映のレース) → 完了扱い */
+  }
+  return (validState != CV_UNKNOWN);
+}
+
+/* A_SAVE_BEGIN の反映 (宣言的 valid 成立)。CV_INVALID からの上書きは意図: leaf 生産者の
+ * ACT_START HIT 判定が焼き込んだ MISS 時の CV_INVALID を、生産者の実書込宣言で癒す。 */
+void pigDataCache::mark_valid() {
+  validState = CV_VALID;
+}
+
+int pigDataCache::is_valid() {
+  if (validState == CV_VALID) return 1;
+  if (validState == CV_INVALID) return 0;
+  /* UNKNOWN: writer 走行中なら「メタ書込済 (TSE_ASSERT)」を購読して 0 (呼び手は待つ)。
+   *          writer 無しなら ::access で存在検査して bit 確定 (process 生産者 = メタ済み後に来る)。 */
+  int wi = writer_index();
+  if (wi >= 0 && converted[wi].helper.is_notNull()) {
+    converted[wi].helper->listen(sCallSection::key->caller(), TSE_ASSERT);
+    return 0;
+  }
+  if (path != thNULL)
+    validState = ( ::access(path->get_str(), F_OK) == 0 ) ? CV_VALID : CV_INVALID;
+  return validState == CV_VALID;
+}
+
 sPtr<pigData> pigDataArray::get_ix(sPtr<pigData> key) {
+  /* ★ 引数のエラーチェック (2026-08-11 修正)。無いとエラーを握り潰す。
+   * pigDataControl は pigDataError 派生なので、これで exit も伝播するようになる。 */
+  if (key->is_error()) return key;
   int ix = (int)key->get_int();
   if (ix < 0 || ix >= d.length())
     return thNEW(pigDataError, ("array index out of range", info));
   return d[ix];                        /* 観測されるまで解決しない */
 }
 sPtr<pigData> pigDataArray::set_ix(sPtr<pigData> key, sPtr<pigData> val) {
+  if (key->is_error()) return key;     /* ★ 引数のエラーチェック (同上) */
+  if (val->is_error()) return val;
   int ix = (int)key->get_int();
   if (ix < 0) return thNEW(pigDataError, ("array index out of range", info));
   if (ix >= d.length()) {
@@ -314,7 +613,7 @@ static sPtr<pigData> arr_elemop(pigDataArray *self, sPtr<pigData> o, int op,
                                 sPtr<pigInfo> info) {
   sPtr<pigData> ov = o->compact();
   if (ov->is_error()) return ov;
-  sPtr<pigDataArray> oa = sPtr<pigDataArray>::d_cast(ov);
+  sPtr<pigDataArray> oa = ov->obt_array();
   int n = self->length();
   if (oa.is_notNull() && oa->length() != n)
     return thNEW(pigDataError, ("array arithmetic: size mismatch", info));
@@ -346,6 +645,7 @@ int pigDataHash::find(sPtr<stdString> key) {
   return -1;
 }
 sPtr<pigData> pigDataHash::get_ix(sPtr<pigData> key) {
+  if (key->is_error()) return key;     /* ★ 引数のエラーチェック (pigDataArray::get_ix と同じ) */
   int i = find(key->get_str());
   if (i < 0) {
     /* どのキーが無いか + 存在するキー一覧を出す(キャッシュの hash key と紛らわしいので具体名を出す)。 */
@@ -361,6 +661,8 @@ sPtr<pigData> pigDataHash::get_ix(sPtr<pigData> key) {
   return vals[i];
 }
 sPtr<pigData> pigDataHash::set_ix(sPtr<pigData> key, sPtr<pigData> val) {
+  if (key->is_error()) return key;     /* ★ 引数のエラーチェック (同上) */
+  if (val->is_error()) return val;
   sPtr<stdString> k = key->get_str();
   int i = find(k);
   if (i >= 0) { vals[i] = val; return val; }
@@ -454,6 +756,16 @@ void pigDataDelay::set_result(sPtr<pigData> r, int flag) {
   result = r;
   if (helper.is_notNull())
     helper->invoke_listen(thNEW(stdEvent,(TSE_UPDATED, helper, thNULL)));
+}
+
+/* ★ 上流を止める (ひさ設計 2026-08-11)。helper を destroy し、委譲先(result)へ再帰する。
+ * PIG_DBG_TD=1 で到達をトレースできる (teardown 調査と同じスイッチ)。 */
+void pigDataDelay::destroy() {
+  if (::getenv("PIG_DBG_TD"))
+    ::fprintf(stderr, "[td] pigData destroy: helper=%d result=%d\n",
+              helper.is_notNull() ? 1 : 0, (result != thNULL) ? 1 : 0);
+  if (helper.is_notNull()) helper->destroy();
+  if (result != thNULL)    result->destroy();
 }
 
 void pigDataDelay::preprocess() {
@@ -573,9 +885,9 @@ void pigDataOperatorLength::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError, ("length needs one argument", info)); return; }
   sPtr<pigData> v = args[0]->compact();
   if (v->is_error()) { result = v; return; }
-  sPtr<pigDataArray> a = sPtr<pigDataArray>::d_cast(v);
+  sPtr<pigDataArray> a = v->obt_array();
   if (a.is_notNull()) { result = thNEW(pigDataInteger, ((INTEGER64)a->length(), info)); return; }
-  sPtr<pigDataHash> h = sPtr<pigDataHash>::d_cast(v);
+  sPtr<pigDataHash> h = v->obt_hash();
   if (h.is_notNull()) { result = thNEW(pigDataInteger, ((INTEGER64)h->length(), info)); return; }
   result = thNEW(pigDataError, ("length: argument is not an array or hash", info));
 }
@@ -585,8 +897,8 @@ void pigDataOperatorToFloat::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError, ("float needs one argument", info)); return; }
   sPtr<pigData> v = args[0]->compact();
   if (v->is_error()) { result = v; return; }
-  if (sPtr<pigDataArray>::d_cast(v).is_notNull()) { result = thNEW(pigDataError, ("float: argument is an array (scalar expected)", info)); return; }
-  if (sPtr<pigDataHash>::d_cast(v).is_notNull())  { result = thNEW(pigDataError, ("float: argument is a hash (scalar expected)", info)); return; }
+  if (v->obt_array().is_notNull()) { result = thNEW(pigDataError, ("float: argument is an array (scalar expected)", info)); return; }
+  if (v->obt_hash().is_notNull())  { result = thNEW(pigDataError, ("float: argument is a hash (scalar expected)", info)); return; }
   result = thNEW(pigDataFloat, (v->get_flt(), info));
 }
 /* int(x): 値を整数へ変換。文字列は数値としてパース、浮動小数は 0 方向へ切り捨て、整数はそのまま。
@@ -595,8 +907,8 @@ void pigDataOperatorToInt::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError, ("int needs one argument", info)); return; }
   sPtr<pigData> v = args[0]->compact();
   if (v->is_error()) { result = v; return; }
-  if (sPtr<pigDataArray>::d_cast(v).is_notNull()) { result = thNEW(pigDataError, ("int: argument is an array (scalar expected)", info)); return; }
-  if (sPtr<pigDataHash>::d_cast(v).is_notNull())  { result = thNEW(pigDataError, ("int: argument is a hash (scalar expected)", info)); return; }
+  if (v->obt_array().is_notNull()) { result = thNEW(pigDataError, ("int: argument is an array (scalar expected)", info)); return; }
+  if (v->obt_hash().is_notNull())  { result = thNEW(pigDataError, ("int: argument is a hash (scalar expected)", info)); return; }
   result = thNEW(pigDataInteger, (v->get_int(), info));
 }
 /* return expr: 引数式を compact(評価地点 env で値確定=ループ変数等を捕捉)→ CTRL_RETURN に包む。 */
@@ -625,7 +937,7 @@ void pigDataOperatorConcat::_start() {
   for (int i = 0; i < args.length(); ++i) {
     sPtr<pigData> v = args[i]->compact();
     if (v->is_error()) { result = v; return; }
-    sPtr<pigDataArray> a = sPtr<pigDataArray>::d_cast(v);
+    sPtr<pigDataArray> a = v->obt_array();
     if (a.is_notNull())
       for (int j = 0; j < a->length(); ++j)
         r->push(a->get_ix(thNEW(pigDataInteger, ((INTEGER64)j))));
@@ -639,7 +951,7 @@ void pigDataOperatorTranspose::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError,("transpose: needs an array", info)); return; }
   sPtr<pigData> v = args[0]->compact();
   if (v->is_error()) { result = v; return; }
-  sPtr<pigDataArray> outer = sPtr<pigDataArray>::d_cast(v);
+  sPtr<pigDataArray> outer = v->obt_array();
   if (!outer.is_notNull()) { result = thNEW(pigDataError,("transpose: argument must be an array", info)); return; }
   int n = outer->length();
   if (n == 0) { result = thNEW(pigDataArray,()); return; }
@@ -649,7 +961,7 @@ void pigDataOperatorTranspose::_start() {
   for (int i = 0; i < n; ++i) {
     sPtr<pigData> rv = outer->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->compact();
     if (rv->is_error()) { result = rv; return; }
-    sPtr<pigDataArray> r = sPtr<pigDataArray>::d_cast(rv);
+    sPtr<pigDataArray> r = rv->obt_array();
     if (!r.is_notNull()) { result = thNEW(pigDataError,("transpose: argument must be an array of arrays", info)); return; }
     if (m < 0) m = r->length();
     else if (m != r->length()) { result = thNEW(pigDataError,("transpose: rows must have equal length", info)); return; }
@@ -669,7 +981,7 @@ void pigDataOperatorCumsum::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError,("cumsum: needs an array", info)); return; }
   sPtr<pigData> v = args[0]->compact();
   if (v->is_error()) { result = v; return; }
-  sPtr<pigDataArray> a = sPtr<pigDataArray>::d_cast(v);
+  sPtr<pigDataArray> a = v->obt_array();
   if (!a.is_notNull()) { result = thNEW(pigDataError,("cumsum: argument must be a numeric array", info)); return; }
   sPtr<pigDataArray> out = thNEW(pigDataArray,());
   double acc = 0.0;
@@ -686,7 +998,7 @@ void pigDataOperatorSum::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError,("sum: needs an array", info)); return; }
   sPtr<pigData> v = args[0]->compact();
   if (v->is_error()) { result = v; return; }
-  sPtr<pigDataArray> a = sPtr<pigDataArray>::d_cast(v);
+  sPtr<pigDataArray> a = v->obt_array();
   if (!a.is_notNull()) { result = thNEW(pigDataError,("sum: argument must be a numeric array", info)); return; }
   double acc = 0.0;
   for (int i = 0; i < a->length(); ++i) {
@@ -727,7 +1039,7 @@ static sPtr<pigData> math_eval(const char *fn, sArray<sPtr<pigData> >& a, int n)
   for (int i = 0; i < n && i < 4; ++i) {
     v[i] = a[i]->compact();
     if (v[i]->is_error()) return v[i];
-    arr[i] = sPtr<pigDataArray>::d_cast(v[i]);
+    arr[i] = v[i]->obt_array();
     if (arr[i].is_notNull()) {
       int L = arr[i]->length();
       if (N < 0) N = L;
@@ -758,6 +1070,15 @@ void pigDataOperatorMath::_start() {
  * 全引数解決済み(もう yield しない)なので二重表示しない。result は最後の引数の値(passthrough)。
  * 引数が無ければ空行を表示し null を返す。エラー引数はそのまま表示(エラー文字列)。 */
 void pigDataOperatorPrint::_start() {
+  /* ★ 引数のエラーチェック (2026-08-11 修正)。他の op (load 等) は入口で見ているのに print だけ
+   * 抜けており、**エラーや制御値をそのまま文字列化して出力**していた。
+   * 実害: 関数内 exit が `print("r", f(5))` の引数に来ると "ERROR: exit" と表示されてしまう
+   * (pigDataControl は pigDataError 派生なので is_error()=1 で伝播すべき値)。
+   * エラー/制御値はそのまま結果として返し、上方へ伝播させる (exit はトップで捕捉される)。 */
+  for (int i = 0; i < args.length(); ++i) {
+    sPtr<pigData> a = args[i]->compact();
+    if (a->is_error()) { result = a; clean(); return; }
+  }
   sPtr<stdString> out = thNEW(stdString, (""));
   for (int i = 0; i < args.length(); ++i) {
     if (i > 0) out = out->add(" ");
@@ -769,6 +1090,96 @@ void pigDataOperatorPrint::_start() {
                                : sPtr<pigData>(thNEW(pigDataNull, ()));
   clean();
 }
+
+/* load(so) — .so をロードして registry へ配線 (planner 側・agent 不要)。冪等。結果 = モジュール名。 */
+void pigDataOperatorLoad::_start() {
+  if (args.length() < 1) { result = thNEW(pigDataError, ("load needs a .so path", info)); return; }
+  sPtr<pigData> pv = args[0]->compact();
+  if (pv->is_error()) { result = pv; return; }
+  const char* path = pv->get_str()->get_str();
+  sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
+  if (reg == thNULL) { result = thNEW(pigDataError, ("load: no module registry (no app)", info)); return; }
+  std::string err;
+  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true);
+  if (d == 0) {
+    char buf[600]; ::snprintf(buf, sizeof buf, "load: %s: %s", path, err.c_str());
+    result = thNEW(pigDataError, (buf, info));
+    return;
+  }
+  result = thNEW(pigDataString, (d->name ? d->name : ""));
+}
+
+/* agent(so[, {exec_default, priority}]) — .so をロードし設定を上書き (docs §2.4)。結果 = モジュール名。 */
+/* module("cgal.so") の拡張子をこの OS のものへ正規化する (2026-08-12)。
+ * モジュールの実ファイル名は OS で違う (Linux/macOS=.so / MinGW・Cygwin=.dll) が、**スクリプトを
+ * 書き換えずに済ませたい** ので、既知のモジュール拡張子はここで差し替える。
+ * 例: Windows で module("cgal.so") → "cgal.dll" を読む。それ以外の文字列は素通し。 */
+static std::string
+normalize_module_path(const char* path) {
+  std::string p(path ? path : "");
+  static const char* known[] = { ".so", ".dll", ".dylib", 0 };
+  for (int i = 0; known[i] != 0; ++i) {
+    size_t L = ::strlen(known[i]);
+    if (p.size() > L && p.compare(p.size() - L, L, known[i]) == 0) {
+      if (::strcmp(known[i], OSGLUE_MODULE_SUFFIX) != 0)
+        p.replace(p.size() - L, L, OSGLUE_MODULE_SUFFIX);
+      break;
+    }
+  }
+  return p;
+}
+
+void pigDataOperatorModule::_start() {
+  if (args.length() < 1) { result = thNEW(pigDataError, ("module needs a .so path", info)); return; }
+  sPtr<pigData> pv = args[0]->compact();
+  if (pv->is_error()) { result = pv; return; }
+  std::string npath = normalize_module_path(pv->get_str()->get_str());
+  const char* path = npath.c_str();
+  sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
+  if (reg == thNULL) { result = thNEW(pigDataError, ("module: no module registry (no app)", info)); return; }
+  std::string err;
+  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true);
+  if (d == 0) {
+    char buf[600]; ::snprintf(buf, sizeof buf, "module: %s: %s", path, err.c_str());
+    result = thNEW(pigDataError, (buf, info));
+    return;
+  }
+  int id = reg->id_of_name(d->name);
+
+  if (args.length() >= 2) {
+    sPtr<pigData> ov = args[1]->compact();
+    if (ov->is_error()) { result = ov; return; }
+    /* ★ 文字列 "off"/"on" = 実行時無効化/有効化 (routing 候補からの出し入れ・2026-08-10)。
+     *   例: module("cgal.so","off"); box(2,2,2) → cgal 無効で manifold (既定次点) へ。
+     *   ロードは済ませたまま (codec は生きる) なので、無効カーネルが既に作った mesh の読みは可能。 */
+    sPtr<pigDataString> sv = sPtr<pigDataString>::d_cast(ov);
+    if (sv.is_notNull()) {
+      const char* s = sv->get_str()->get_str();
+      if      (::strcmp(s, "off") == 0) reg->set_enabled(id, false);
+      else if (::strcmp(s, "on")  == 0) reg->set_enabled(id, true);
+      else { result = thNEW(pigDataError, ("module: string option must be \"off\" or \"on\"", info)); return; }
+      result = thNEW(pigDataString, (d->name ? d->name : ""));
+      return;
+    }
+    sPtr<pigDataHash> opts = ov->obt_hash();
+    if (opts.is_notNull()) {
+      /* exec_default: "thread" / "process" */
+      sPtr<pigData> ed = opts->get_ix(thNEW(pigDataString, ("exec_default")));
+      if (ed.is_notNull() && !ed->is_error()) {
+        const char* s = ed->get_str()->get_str();
+        if      (::strcmp(s, "thread")  == 0) reg->set_exec_default(id, EXEC_THREAD);
+        else if (::strcmp(s, "process") == 0) reg->set_exec_default(id, EXEC_PROCESS);
+        else { result = thNEW(pigDataError, ("module: exec_default must be \"thread\" or \"process\"", info)); return; }
+      }
+      /* priority: 整数 (「今ロードした扱い」で後勝ち) */
+      sPtr<pigData> pr = opts->get_ix(thNEW(pigDataString, ("priority")));
+      if (pr.is_notNull() && !pr->is_error())
+        reg->set_priority(id, (int)pr->get_int());
+    }
+  }
+  result = thNEW(pigDataString, (d->name ? d->name : ""));
+}
+
 /* 配列構築: 各要素式を **この地点の env で compact**(評価)して値配列を作る。
  * 要素に varref が含まれても、評価が起きた地点(代入/式評価)の env で解決される。
  * 要素が遅延(mesh agent op の継続 pair 等)でも、その node をそのまま入れる(値として配列化。
@@ -806,6 +1217,11 @@ void pigDataOperatorHash::_start() {
 /* ------------------------------------------------------------------ */
 /* serialize() — round-trip 可能な値リテラル直列形(VALUE モードで読み戻せる)  */
 /* ------------------------------------------------------------------ */
+
+/* 型取得ゲートウェイの既定 = 「配列でもハッシュでもない」。pigDataArray/pigDataHash が自分を返し、
+ * pigDataDelay が compact() へ委譲する (宣言は pigData.h)。 */
+sPtr<pigDataArray> pigData::obt_array() { return sPtr<pigDataArray>(); }
+sPtr<pigDataHash>  pigData::obt_hash()  { return sPtr<pigDataHash>(); }
 
 sPtr<stdString> pigData::serialize() { return get_str(); }   /* 既定: 表示形(Error/Cache 等の保険) */
 

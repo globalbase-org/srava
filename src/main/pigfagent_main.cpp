@@ -10,7 +10,6 @@
 #include	<string.h>
 #include	<stdio.h>
 
-extern int pigfAgentTest_exitCode;
 
 int
 main(int argc, char** argv)
@@ -23,8 +22,11 @@ main(int argc, char** argv)
 	osglue_setenv("SRAVA_CACHE_DIR", dir);
 	osglue_rmrf(dir);   /* portable 再帰削除(Windows の cmd.exe に rm が無いため system 不可) */
 
-	thNEW(tsApplication, (thNULL, [](sPtr<tsApplication> app) {
-		thNEW(pigfAgentTest, (app));
+	/* ★ #3427 ③: fixture 登録はテスト app (pigfAgentTest) の INI へ移動 (app 所有レジストリ)。
+	 * 終了コードは app のメンバから (旧 file-global pigfAgentTest_exitCode は撤去)。 */
+	sPtr<pigfAgentTest> t;
+	thNEW(tsApplication, (thNULL, [&t](sPtr<tsApplication> app) {
+		t = thNEW(pigfAgentTest, (app));
 	}));
-	return pigfAgentTest_exitCode;
+	return ( t != thNULL ) ? t->exit_code() : 1;
 }
