@@ -82,8 +82,16 @@ void make_geodesic(int seed, int n, double r, Sink& sink) {
 	}
 	(void)nv;
 
-	/* 座標キーで頂点を重複排除 (共有辺の格子点は bit 一致するので確実に統合される)。 */
-	typedef std::pair<double, std::pair<double, double> > Key;
+	/* 座標キーで頂点を重複排除。
+	 * ★ キーは double を **float へ落として**量子化する (2026-08-14)。旧実装は「共有辺の格子点は
+	 *   隣接面でも同一式で計算されるので bit 一致する」前提で double をそのままキーにしていたが、
+	 *   Apple clang (arm64) は既定 -ffp-contract=on で FMA 縮約するため同値のはずの格子点が
+	 *   1ulp ずれ、溶接漏れが起きた (icosphere(1,2) が 162v のはずが 170v・非多様体になり
+	 *   manifold が volume=0 を返す。x86 gcc では bit 一致していたので露見しなかった)。
+	 *   格子点の間隔は O(r/n) で float の相対精度 (~6e-8) より桁違いに大きいので、float 量子化は
+	 *   1ulp ジッタだけを吸収し、異なる格子点を誤って併合することはない。頂点の**値**は double の
+	 *   まま (キーだけ量子化 = 出力座標は不変)。 */
+	typedef std::pair<float, std::pair<float, float> > Key;
 	std::map<Key, int> dedup;
 
 	/* 単位球へ投影して r 倍 → Sink に追加 (既出なら既存 index)。 */
@@ -92,7 +100,7 @@ void make_geodesic(int seed, int n, double r, Sink& sink) {
 		double _L = std::sqrt((px)*(px) + (py)*(py) + (pz)*(pz));           \
 		double _s = (_L > 0) ? (r / _L) : 0;                                \
 		double _x = (px)*_s, _y = (py)*_s, _z = (pz)*_s;                    \
-		Key _k(_x, std::pair<double,double>(_y, _z));                       \
+		Key _k((float)_x, std::pair<float,float>((float)_y, (float)_z));    \
 		std::map<Key,int>::iterator _it = dedup.find(_k);                   \
 		if (_it != dedup.end()) { (outid) = _it->second; }                  \
 		else { (outid) = sink.add_vertex(_x, _y, _z); dedup[_k] = (outid); }\
