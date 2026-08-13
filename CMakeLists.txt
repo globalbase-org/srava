@@ -172,6 +172,13 @@ add_library(pig SHARED
 #   (rc7 まではやむなく OS 分岐していた: ELF は「足りない分だけ静的補充」ができるが、PE は import lib と
 #    静的 .a が衝突するのでそれができず、Windows で srava.exe が ts2Parallel 未解決で落ちていた。)
 target_link_libraries(pig PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${TINYSTATE_LIB}>")
+if(APPLE)
+  # ★ whole-archive は tinyState の Darwin glue (cDarwin_oc.m.o = darwin_getDirectory* /
+  #   NSBundle 等の Objective-C 実装) も全部取り込むため Foundation が要る。静的世界では
+  #   未参照オブジェクトとしてアーカイブから引かれず露見しなかった (tinyStateConfig は
+  #   APPLE のフレームワーク依存を export していない)。
+  target_link_libraries(pig PRIVATE "-framework Foundation")
+endif()
 target_link_libraries(pig PUBLIC Threads::Threads m ${CMAKE_DL_LIBS})
 # 共有ライブラリなので install が要る (host / モジュールが実行時に参照する)。
 install(TARGETS pig LIBRARY DESTINATION lib)
