@@ -140,6 +140,10 @@ cmake --install build --prefix /usr/local
 
 - **PowerShell から直接ではなく MINGW64 シェル**でビルドする(`C:\msys64\usr\bin\bash.exe -lc` +
   `export MSYSTEM=MINGW64; source /etc/profile`)。多段クォートが要る操作はスクリプトファイルにして実行。
+- Windows ではモジュールの拡張子は **`.dll`**(`cgal.dll` / `manifold.dll` / …)。ソース中の
+  `module("cgal.so")` は実行 OS の拡張子へ自動で正規化されるので、スクリプトはそのまま可搬。
+- 検証実績: Windows 11 + MSYS2/MINGW64(gcc 15)/ Ninja で **ビルド全通・ctest 230/230 green**
+  (2026-08-13。共有 libpig.dll + 全モジュール .dll 構成)。
 
 ## 6. Windows — Cygwin
 
@@ -152,6 +156,9 @@ Boost 差し替え・`-DSRAVA_ENABLE_HDF5` の扱い)。要点:
 - HDF5 は Cygwin の cmake config が壊れているため**既定で無効**。使うなら config を直して
   `-DSRAVA_ENABLE_HDF5=ON`。
 - Manifold を使うなら Cygwin の `git` が要る(`-DSRAVA_MODULE_MANIFOLD=ON`)。
+- ⚠ **現世代(モジュール .dll 化・共有 libpig 化後)の Cygwin ビルドは未検証**。上記は前世代で
+  確立した環境手当てで、依存の入手方法としては現在も有効。MinGW(§5)は検証済みなので、
+  Windows では MinGW を推奨する。
 
 ## 7. configure オプション早見表
 
@@ -194,11 +201,17 @@ ctest --test-dir build -j
   ハイブリッド動作になる(→ [言語リファレンス §10](srava_language_reference.html#kernel))。
 - インストール後は `srava` が `/usr/local/bin/srava_agent` を自動で使う(env `SRAVA_AGENT` で差し替え可)。
 - 幾何モジュール(`cgal.so` / `manifold.so` / `pipe_proximity.so`)は host が次の**探索路**を順に走査して
-  `*.so` を dlopen する(後勝ち = 後の path が優先):
-  1. 実行体と同居する dir(**ビルドツリーではここで解決される**),
-  2. `/usr/local/lib/srava/modules`(install 既定),
-  3. `~/.config/srava/modules`,
-  4. `$SRAVA_MODULE_PATH`(`:` 区切り・最後にロードで最優先)。
+  dlopen する(**後勝ち** = 下に行くほど優先。「より具体的な場所が勝つ」):
+  1. `/usr/local/lib/srava/modules`(install 既定・最弱),
+  2. `~/.config/srava/modules`(ユーザ個人の上書き),
+  3. 実行体と同居する dir(**ビルドツリーではここで解決される**),
+  4. `$SRAVA_MODULE_PATH`(`:` 区切り・Windows は `;`・最優先)。
+
+  **同名(同ファイル名)のモジュールは勝者 1 つだけが dlopen される**(負けた候補は読まれない)。
+  install 済みとビルドツリーが混ざって新旧が取り違わるのを防ぐため。
+- **`srava --modules`** で診断ダンプが出る: 走査した探索路(存在しない dir も表示)・ロード済み
+  モジュール(priority / 実行方式 / op 数 / パス)・同名で読まれなかった候補(shadowed)・
+  ロード失敗(理由付き)。モジュールが効かないときはまずこれを見る。
 - `cmake --install` は幾何モジュールも SYSDIR(`/usr/local/lib/srava/modules`)へ配置する:
-  `cgal.so` / `manifold.so` / `pipe_proximity.so`(有効化したもの)が探索路 ② に載る。開発中は build ツリー
-  の `.so` が実行体と同居する(探索路 ①)ので install なしでも動く。
+  `cgal.so` / `manifold.so` / `pipe_proximity.so`(有効化したもの)が探索路 ① に載る。開発中は build ツリー
+  の `.so` が実行体と同居する(探索路 ③ = install より強い)ので install なしでも動く。
