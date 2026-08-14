@@ -451,6 +451,11 @@ TS_STATE(ACT_START)
 	sendIdx = 0;
 	par = thNEW(ts2Parallel,(ifThis, 0,
 		[this, idx=-1, phase=0](sPtr<ts2Parallel> me, sPtr<stdEvent> wev) mutable -> int {
+			/* ★ worker スレッドの「今の app」宣言 (#3427 続報)。親チェーン遡りは FIN 済み
+			 * worker で切れうるため、pigData 層 (pig_is_delayed / pigDataCache / vparser gate)
+			 * が app 所有レジストリへ確実に届くよう TLS スコープを張る。this(=pts) の
+			 * ptsApp は確定済み・_fn キャプチャが寿命を保証。 */
+			pigAppScope _appScope(ptsApp);
 			if ( phase == 0 ) {
 				if ( sendIdx >= args.length() )
 					return 1;
@@ -690,6 +695,11 @@ TS_STATE(ACT_pigfAgent_SENDOP)   /* event 非依存: C_OP を 1 回送り、引�
 	 * (= 無駄な二重 spawn を防ぐ。pigData 操作は全て phase1 = spawn 後に置く)。 */
 	par = thNEW(ts2Parallel,(ifThis, 0,
 		[this, idx=-1, phase=0](sPtr<ts2Parallel> me, sPtr<stdEvent> wev) mutable -> int {
+			/* ★ worker スレッドの「今の app」宣言 (#3427 続報)。親チェーン遡りは FIN 済み
+			 * worker で切れうるため、pigData 層 (pig_is_delayed / pigDataCache / vparser gate)
+			 * が app 所有レジストリへ確実に届くよう TLS スコープを張る。this(=pts) の
+			 * ptsApp は確定済み・_fn キャプチャが寿命を保証。 */
+			pigAppScope _appScope(ptsApp);
 			if ( phase == 0 ) {
 				if ( sendIdx >= args.length() )
 					return 1;                  /* 送る引数なし */

@@ -357,30 +357,49 @@ ptsApplication_::module_load_failed()
 	return moduleLoadFailed;
 }
 
-/* ★ #3427 ③: 「今の caller が属す app のレジストリ」を TLS (sCallSection) 経由で引く。
- * 素の pigData 層 (pigDataCache / pigDataOperatorModule / パーサ helper 等) は ptsApp を
- * 持たないが、それらは必ず TS_STATE の実行中 (大域 mtx 下) に呼ばれるので、sCallSection の
- * caller() → ptsObject::ptsApp → module_registry で app 所有のレジストリへ届く。
- * TLS なのでリエントラント安全 (tinyState 側の公認非静的機構・pigData.h:1022 と同パターン)。
- * caller が pts 系でない / app 未設定 / registry 未生成なら thNULL (呼び側は未登録フォールバック)。 */
-sPtr<pigModuleRegistry>
-pig_current_registry()
+/* ★ #3427 ③改 (2026-08-14): 「今の app」の解決。
+ * ① pigAppScope の TLS 上書き (worker _fn 用): ts2Parallel の親チェーンは途中の worker が
+ *    FIN 済みだと parent を手放していて鎖が切れるため、遡りだけでは信頼できない
+ *    (BLH2 cold cache の export_vox 障害の真因)。_fn を張る側が冒頭で宣言する。
+ * ② sCallSection caller の parent 遡り: TS_STATE 文脈は eventHandler 全体が call section で
+ *    包まれる (tinyState.cpp:665) ので caller() は常に有効。caller が ptsObject でなくても
+ *    (生きている) 親を遡って最初の ptsObject の ptsApp を使う。
+ * TLS なのでリエントラント安全 (sCallSection と同類)。 */
+static thread_local ptsApplication *t_pigCurrentApp = 0;   /* pigAppScope の TLS スロット (per-thread) */
+
+pigAppScope::pigAppScope(const sPtr<ptsApplication>& app)
 {
-	/* ★ caller が ptsObject とは限らない: pigfAgent は _fn を ts2Parallel worker で回すため、
-	 * worker 文脈の caller() は ts2Parallel (素の tinyState 派生)。tinyState::parent を遡れば
-	 * 生成主 (pigfAgent 等 = ptsObject) に届くので、最初に見つかった ptsObject の ptsApp を使う。
-	 * parent/ptsApp は worker 起動前に確定し変化しない (worker から読むのは安全)。 */
+	prev_ = t_pigCurrentApp;
+	t_pigCurrentApp = app.__get();   /* 生ポインタ: スコープ寿命中は呼び手の sPtr が app を保持 */
+}
+
+pigAppScope::~pigAppScope()
+{
+	t_pigCurrentApp = prev_;
+}
+
+sPtr<ptsApplication>
+pig_current_app()
+{
+	if ( t_pigCurrentApp != 0 )
+		return sPtr<ptsApplication>(t_pigCurrentApp);
 	sPtr<tinyState> c = sCallSection::key->caller();
 	for ( int depth = 0 ; c != thNULL && depth < 64 ; ++depth ) {
 		sPtr<ptsObject> po = sPtr<ptsObject>::d_cast(c);
-		if ( po != thNULL ) {
-			if ( po->ptsApp == thNULL )
-				return sPtr<pigModuleRegistry>(thNULL);
-			return po->ptsApp->module_registry;
-		}
+		if ( po != thNULL )
+			return po->ptsApp;
 		c = c->parent;
 	}
-	return sPtr<pigModuleRegistry>(thNULL);
+	return sPtr<ptsApplication>(thNULL);
+}
+
+sPtr<pigModuleRegistry>
+pig_current_registry()
+{
+	sPtr<ptsApplication> app = pig_current_app();
+	if ( app == thNULL )
+		return sPtr<pigModuleRegistry>(thNULL);
+	return app->module_registry;
 }
 
 /*******************************************

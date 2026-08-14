@@ -163,9 +163,29 @@ private:
 	              std::vector<std::pair<std::string,std::string> > *out);
 };
 
-/* ★ 「今の caller が属す app のレジストリ」を TLS (sCallSection) 経由で引く。
- *   素の pigData 層 (pigDataCache / pigDataOperatorModule / パーサ helper 等) が TS_STATE の
- *   実行中に呼ぶ。caller が pts 系でない / app 未設定 / registry 未生成なら thNULL
+class ptsApplication;
+
+/* ★ worker スレッド用の app スコープ (TLS・RAII)。
+ *   ts2Parallel の _fn は「親チェーンを遡れば app に届く」保証がない (途中の worker が FIN 済みで
+ *   parent を手放していると鎖が切れる — BLH2 cold cache の export_vox 障害の真因)。そこで
+ *   **_fn を張る側 (pigfAgent / pigfMap = ptsApp を持つ)** が _fn 冒頭でこのスコープを張り、
+ *   スレッドローカルに「今の app」を宣言する。sCallSection と同類の TLS = リエントラント安全。
+ *   スコープ寿命中のみ有効 (app の生存は _fn キャプチャの sPtr が保証する)。 */
+class pigAppScope {
+public:
+	pigAppScope(const sPtr<ptsApplication>& app);
+	~pigAppScope();
+private:
+	ptsApplication *prev_;
+};
+
+/* 「今の app」: ①pigAppScope の TLS 上書き → ②sCallSection caller の parent 遡り、の順で解決。
+ *   無ければ thNULL。実装は ptsApplication.cpp。 */
+sPtr<ptsApplication> pig_current_app();
+
+/* ★ 「今の caller が属す app のレジストリ」= pig_current_app()->module_registry。
+ *   素の pigData 層 (pigDataCache / pigDataOperatorModule / パーサ helper 等) が TS_STATE /
+ *   worker _fn の実行中に呼ぶ。app 未解決 / registry 未生成なら thNULL
  *   (呼び側は「未登録」フォールバックへ)。実装は ptsApplication.cpp (完全型が要るため)。 */
 sPtr<pigModuleRegistry> pig_current_registry();
 

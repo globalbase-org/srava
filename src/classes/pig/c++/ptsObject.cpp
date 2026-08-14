@@ -7,6 +7,7 @@
 #include	"pig/c++/ptsObject.h"
 #include	"_ts2/c++/ptsObject_.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsApp の ptsApplication(完全型)。ssObject の流儀 */
+#include	"pig/c++/pigModuleRegistry.h"   /* pig_current_app (TLS フォールバック・#3427 続報) */
 
 CLASS_TINYSTATE(pig/c++/ptsObject,ts2/c++/tinyState)
 
@@ -66,12 +67,29 @@ ptsObject_::get_env()
 
 TS_STATE(INI_START)
 {
-	// 実態親が ptsObject なら ptsApp を継承(= 実態元祖ハンドルの伝播)。
+	// 実態親から ptsApp を継承(= 実態元祖ハンドルの伝播)。
 	// ptsApplication は実態親が tsApplication で継承されないので、
 	// 自身の INI_ptsObject_START 上書きで ptsApp=自分 を立てる。
-	sPtr<ptsObject> p = sPtr<ptsObject>::d_cast(parent);
-	if ( p.is_notNull() )
-		ptsApp = p->ptsApp;
+	// ★ #3427 続報 (2026-08-14): 直接の親が ptsObject とは限らない。pigfAgent は _fn を
+	//   ts2Parallel worker で回すため、worker 文脈で thNEW された pts 系 (ptsDataCache 等) の
+	//   親は ts2Parallel (素の tinyState 派生) になる。旧実装 (直親の d_cast のみ) では
+	//   ptsApp が null に落ち、app 所有レジストリ (vparser/codecs) が引けず「値キャッシュの
+	//   読取が pig 層同期パーサへフォールバック → 厳密有理数入り VALUE で malformed value」
+	//   という cold cache 限定の実障害になった (BLH2 の export_vox・sim 報告)。
+	//   pig_current_registry() と同じ原理で tinyState::parent を遡り、最初に見つかった
+	//   ptsObject の ptsApp を継承する (parent/ptsApp は生成時点で確定済 = 読み取り安全)。
+	{
+		sPtr<tinyState> c = parent;
+		for ( int depth = 0 ; c != thNULL && depth < 64 ; ++depth ) {
+			sPtr<ptsObject> p = sPtr<ptsObject>::d_cast(c);
+			if ( p.is_notNull() ) { ptsApp = p->ptsApp; break; }
+			c = c->parent;
+		}
+		/* 遡りでも届かない (FIN 済み worker で鎖が切れている) 場合は pigAppScope の TLS
+		 * (worker _fn を張った pigfAgent 等が宣言した「今の app」) から継承する。 */
+		if ( ptsApp == thNULL )
+			ptsApp = pig_current_app();
+	}
 	return rDO|INI_ptsObject_START;
 }
 TS_STATE(INI_ptsObject_START)   // 派生がここを上書きして初期化を挿入する
