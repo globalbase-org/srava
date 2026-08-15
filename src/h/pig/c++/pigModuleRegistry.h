@@ -86,6 +86,11 @@ public:
 	void        register_descriptor(const srava_module_descriptor *d);
 	/* module id の記述子 (未登録 = 0)。 */
 	const srava_module_descriptor* descriptor(int module_id) const;
+	/* ★ その記述子を**実際に供給した .so のパス**(組込登録など由来が無ければ "")。
+	 * `srava --modules` の「有効なパス」表示はこれを使う。以前はロード記録を名前で後ろから
+	 * 検索していたが、それは「同名を供給するファイルが複数あると、どれが有効か推測になる」
+	 * (Redmine #3425 ①)。登録した瞬間に出所を控えておけば推測が要らない。 */
+	const char*                    descriptor_path(int module_id) const;
 
 	/* module id がその op を持つか。ops 未登録 (= 万能フォールバック扱い) は **-1 (不明)**。 */
 	int         supports_op(int module_id, const char *op) const;
@@ -140,6 +145,8 @@ private:
 	std::vector<std::string>  names_v;     /* id → 名前 ({"delayed"} 起点) */
 	std::vector<std::string>  salts_v;     /* id → キャッシュキーソルト (K4) */
 	std::vector<const srava_module_descriptor*> descs_v;   /* id → 記述子 (疎) */
+	std::vector<std::string>  descPath_v;   /* id → その記述子を供給した .so のパス (#3425 ①) */
+	std::string               loadingPath_; /* load_file が register_descriptor に渡す出所 (内部) */
 	/* agent(so,{...}) 上書き (descriptor は .so 内 const で変更できない)。
 	 * sentinel: prio=INT_MIN / exec=-1 (=未設定)。seq = 登録/上書きの通し番号 (後勝ち tie-break)。 */
 	std::vector<int>          prioOvr_v;

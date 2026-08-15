@@ -25,6 +25,9 @@ title: srava ドキュメント
   2D/3D ディスパッチ・キャッシュ・エラー表示・環境変数。まず全体像を掴むならこちら。
 - [**関数リファレンス**](srava_function_reference.html) — 全関数・演算子を統一形式で一覧した逆引き
   カタログ。「この関数のシグネチャと使い方をすぐ知りたい」ときに。
+- [**螺旋巻きつけライブラリ**](srava_roll_reference.html) — 標準ライブラリ `std/roll.sra`（芯パイプに
+  太さ可変パイプを密接に巻きつけて螺旋ホーンを生成する継続法）の関数リファレンス。**要 pipe_proximity
+  モジュール**。ドライバ例は `examples/roll_sample.sra`。
 - [**モジュールリファレンス**](srava_module_reference.html) — モジュール機構（`.so`）の概要と、同梱
   モジュール **cgal.so** / **manifold.so**（幾何カーネル）・**pipe_proximity**（可変太さ配管の自己接近
   検出・距離調整）の依存・対応型・op 一覧。

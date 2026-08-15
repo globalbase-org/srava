@@ -107,17 +107,23 @@ print_module_report(const sPtr<pigModuleRegistry> &reg)
 		const srava_module_descriptor *d = reg->descriptor(id);
 		if ( d == 0 )
 			continue;   /* "delayed"(id 0) 等の記述子を持たない予約枠 */
-		/* 同名が複数の dir から読まれた場合、**後にロードした方が有効** (docs §1.3 の後勝ち)。
-		 * 有効なパス = 最後の一致。それ以外は下の shadowed 節に出す。 */
-		const char *path = "(不明)";
+		/* ★ #3425 ①: 有効なパスは **レジストリが登録時に控えた出所**をそのまま出す。
+		 * 以前はロード記録を名前で後ろから検索していたが、同名を供給するファイルが複数ある場合に
+		 * 「どれが効いているか」が推測になり、実際に効いているものと表示がずれ得た
+		 * (しかも表示は正しく見えるので気づけない)。登録の瞬間に控えれば推測が要らない。 */
+		const char *path = reg->descriptor_path(id);
+		if ( path == 0 || path[0] == '\0' ) path = "(組込)";
+		/* 同名を **別のファイル** が供給していたら注記する (有効なのは上の path 1 本だけ)。
+		 * 同じファイルが複数の探索路から候補に挙がるのは普通 (exe dir と $SRAVA_MODULE_PATH が
+		 * 同じ dir を指す等) なので、パスが一致するものは数えない。 */
 		int ndup = 0;
 		for ( size_t i = 0 ; i < log.size() ; ++i )
-			if ( log[i].ok && log[i].name == d->name ) { path = log[i].path.c_str(); ++ndup; }
+			if ( log[i].ok && log[i].name == d->name && log[i].path != path ) ++ndup;
 		const char *ex = ( d->exec_default & EXEC_THREAD ) ? "thread"
 		               : ( d->exec_default & EXEC_PROCESS ) ? "process" : "-";
 		::printf("  %-16s %5d %-8s %5d  %s%s\n",
 		         d->name ? d->name : "(null)", d->priority, ex, d->n_ops, path,
-		         ( ndup > 1 ) ? "   ★他を上書き" : "");
+		         ( ndup > 1 ) ? "   ★同名が他にもロードされている (有効なのはこのパス)" : "");
 		++nload;
 	}
 	if ( nload == 0 )

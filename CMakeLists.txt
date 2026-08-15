@@ -2663,6 +2663,7 @@ target_link_libraries(repro_teardown PRIVATE pig Threads::Threads m)   # ★ #34
 #   依存方向は一方向(cgal-processor → pipe_proximity)。アダプタ + 登録は host 側。
 # ------------------------------------------------------------------
 # option(SRAVA_MODULE_PIPEPROX) と旧名の後方互換はファイル冒頭 (§option 集約) で宣言済み。
+option(SRAVA_SLOW_TESTS "時間のかかる回帰テスト (std/roll.sra など) も登録する" OFF)
 if(SRAVA_MODULE_PIPEPROX)
   # ---- pipeprox コアライブラリ: 取り込み済みソースから直接ビルド (FetchContent 廃止・2026-08-12)。
   #      upstream=v0.1.6・MIT・GLOBALBASE UMUT。取り込み内容は vendor/pipeProximity/VENDORED.md 参照。
@@ -2684,6 +2685,25 @@ if(SRAVA_MODULE_PIPEPROX)
   # 取り込んだ pipeprox の単体回帰テスト (upstream tests/test_pipe.cpp・失敗数=exit code)。
   add_executable(pipeprox_test_pipe ${PIPEPROX_DIR}/tests/test_pipe.cpp)
   target_link_libraries(pipeprox_test_pipe PRIVATE pipeprox)
+  # ---- std/roll.sra (螺旋巻きつけライブラリ・Redmine #3409) の回帰。縮小ドライバで約 80 秒かかる
+  #      (通常の全 ctest が 24 秒なので既定に入れると 4 倍になる)。**opt-in**: configure で
+  #      -DSRAVA_SLOW_TESTS=ON にしたときだけ登録する。ラベル slow も付けるので、有効化した
+  #      ビルドでは `ctest -L slow` で単体指定・`ctest -LE slow` で除外ができる。
+  #      (examples/roll_sample.sra のフル版は 8m48s なのでテストには一切入れない。)
+  if(SRAVA_SLOW_TESTS)
+  add_test(NAME srava_roll_min
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/roll_min.sh $<TARGET_FILE:srava>
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/roll_min.sra
+            ${CMAKE_CURRENT_SOURCE_DIR}/lib
+            ${CMAKE_CURRENT_BINARY_DIR}/roll_min_work)
+  set_tests_properties(srava_roll_min PROPERTIES
+    LABELS "slow"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/roll_min_work/cache"
+    PASS_REGULAR_EXPRESSION "ROLLMIN=OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|ERROR"
+    TIMEOUT 600)
+  endif()
+
   add_test(NAME srava_pipeprox_vendored_test COMMAND pipeprox_test_pipe)
   set_tests_properties(srava_pipeprox_vendored_test PROPERTIES
     FAIL_REGULAR_EXPRESSION "FAIL:" TIMEOUT 30)

@@ -114,6 +114,8 @@ pigModuleRegistry::register_descriptor(const srava_module_descriptor *d)
   int id = register_module(d->name);       /* name→id (既存名は既存 id・後勝ちでメタ上書き) */
   if ((size_t)id >= descs_v.size()) descs_v.resize(id + 1, 0);
   descs_v[(size_t)id] = d;
+  if ((size_t)id >= descPath_v.size()) descPath_v.resize(id + 1);
+  descPath_v[(size_t)id] = loadingPath_;   /* この登録の出所 (.so パス)。組込登録なら空 */
   ensure_ovr(id);
   seq_v[(size_t)id] = ++seqN_;             /* ロード順 (後勝ちの tie-break) */
 
@@ -153,6 +155,14 @@ pigModuleRegistry::descriptor(int module_id) const
 {
   if (module_id < 0 || (size_t)module_id >= descs_v.size()) return 0;
   return descs_v[(size_t)module_id];
+}
+
+/* その記述子を実際に供給した .so のパス (#3425 ①)。組込登録など由来が無ければ ""。 */
+const char*
+pigModuleRegistry::descriptor_path(int module_id) const
+{
+  if (module_id < 0 || (size_t)module_id >= descPath_v.size()) return "";
+  return descPath_v[(size_t)module_id].c_str();
 }
 
 int

@@ -99,7 +99,9 @@ pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy,
 	/* 記述子から agent/型/codec/salt を **このレジストリへ** 一括登録 (#3427 ①: 登録経路 1 本)。
 	 * .so は「記述子を返すだけ」の受け身 — 静的自己登録は全廃済みなので、dlopen が
 	 * プロセス全体の状態を書き換えることはない (per-registry = per-app・リエントラント)。 */
+	loadingPath_ = ( path != 0 ) ? path : "";   /* この記述子の出所を控える (#3425 ①) */
 	register_descriptor(d);
+	loadingPath_.clear();
 
 	/* 成功: ハンドルは意図的にリークさせる (登録した実行体・記述子が生き続ける必要がある)。 */
 	return d;

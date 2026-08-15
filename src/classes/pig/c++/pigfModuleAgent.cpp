@@ -267,6 +267,24 @@ pigfModuleAgent_::try_shortcircuit()
 	const char *op = ( opn != thNULL ) ? opn->get_str() : "";
 	int isbool = ( ::strcmp(op,"union")==0 || ::strcmp(op,"intersection")==0
 	            || ::strcmp(op,"difference")==0 || ::strcmp(op,"combine")==0 );
+	/* ★ mesh を取る op に **配列**が来たら、その場で読めるエラーにする (2026-08-15 bench 提案)。
+	 * section(m,P,N) が 3 要素配列を返すようになったので、移行し忘れた `a +++ section(...)` が
+	 * 「配列を mesh 演算に渡す」形になる。従来はそのまま agent へ送られて
+	 * "pig_value_parse: malformed value" になり、行番号以外に手掛かりが無かった。 */
+	if ( ( isbool || ::strcmp(op,"export")==0 || ::strcmp(op,"volume")==0
+	    || ::strcmp(op,"area")==0 || ::strcmp(op,"perimeter")==0 || ::strcmp(op,"valid")==0 ) ) {
+		for ( int i = 0 ; i < args.length() ; ++i ) {
+			if ( pig_is_delayed(args[i]) ) continue;          /* mesh 継続 = 正常 */
+			sPtr<pigDataArray> av = args[i]->obt_array();
+			if ( av == thNULL ) continue;
+			char buf[200];
+			::snprintf(buf, sizeof buf,
+			    "%s: 配列が来ました (mesh が必要)。section() は 3 要素配列を返します。"
+			    "断面 1 枚なら section(m,P,N,0)", op);
+			err = thNEW(pigDataError,(buf, front->get_info()));
+			return 2;
+		}
+	}
 	if ( isbool && args.length() == 2 ) {
 		if ( srava_is_identity(args[1]) ) {            /* a op {} = a ({} op {} = {}) */
 			front->set_result(args[0]);
