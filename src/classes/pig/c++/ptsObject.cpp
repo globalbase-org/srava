@@ -7,7 +7,6 @@
 #include	"pig/c++/ptsObject.h"
 #include	"_ts2/c++/ptsObject_.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsApp の ptsApplication(完全型)。ssObject の流儀 */
-#include	"pig/c++/pigModuleRegistry.h"   /* pig_current_app (TLS フォールバック・#3427 続報) */
 
 CLASS_TINYSTATE(pig/c++/ptsObject,ts2/c++/tinyState)
 
@@ -85,10 +84,6 @@ TS_STATE(INI_START)
 			if ( p.is_notNull() ) { ptsApp = p->ptsApp; break; }
 			c = c->parent;
 		}
-		/* 遡りでも届かない (FIN 済み worker で鎖が切れている) 場合は pigAppScope の TLS
-		 * (worker _fn を張った pigfAgent 等が宣言した「今の app」) から継承する。 */
-		if ( ptsApp == thNULL )
-			ptsApp = pig_current_app();
 	}
 	return rDO|INI_ptsObject_START;
 }

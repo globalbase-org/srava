@@ -15,7 +15,6 @@
  */
 #include	"pig/c++/pigfFunction.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
-#include	"pig/c++/pigModuleRegistry.h"   /* pigAppScope (worker _fn の app TLS・#3427 続報) */
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigfApply.h"
 #include	"ts2/c++/ts2Parallel.h"
@@ -129,11 +128,6 @@ TS_STATE(ACT_START)
 	mapIdx = 0;
 	par = thNEW(ts2Parallel,(ifThis, 0,
 		[this, idx=-1, phase=0](sPtr<ts2Parallel> me, sPtr<stdEvent> wev) mutable -> int {
-			/* ★ worker スレッドの「今の app」宣言 (#3427 続報)。親チェーン遡りは FIN 済み
-			 * worker で切れうるため、pigData 層 (pig_is_delayed / pigDataCache / vparser gate)
-			 * が app 所有レジストリへ確実に届くよう TLS スコープを張る。this(=pts) の
-			 * ptsApp は確定済み・_fn キャプチャが寿命を保証。 */
-			pigAppScope _appScope(ptsApp);
 			if ( phase == 0 ) {
 				if ( mapIdx >= apps.length() )
 					return 1;                    /* 解決する要素なし */

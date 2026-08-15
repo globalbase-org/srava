@@ -165,22 +165,11 @@ private:
 
 class ptsApplication;
 
-/* ★ worker スレッド用の app スコープ (TLS・RAII)。
- *   ts2Parallel の _fn は「親チェーンを遡れば app に届く」保証がない (途中の worker が FIN 済みで
- *   parent を手放していると鎖が切れる — BLH2 cold cache の export_vox 障害の真因)。そこで
- *   **_fn を張る側 (pigfAgent / pigfMap = ptsApp を持つ)** が _fn 冒頭でこのスコープを張り、
- *   スレッドローカルに「今の app」を宣言する。sCallSection と同類の TLS = リエントラント安全。
- *   スコープ寿命中のみ有効 (app の生存は _fn キャプチャの sPtr が保証する)。 */
-class pigAppScope {
-public:
-	pigAppScope(const sPtr<ptsApplication>& app);
-	~pigAppScope();
-private:
-	ptsApplication *prev_;
-};
-
-/* 「今の app」: ①pigAppScope の TLS 上書き → ②sCallSection caller の parent 遡り、の順で解決。
- *   無ければ thNULL。実装は ptsApplication.cpp。 */
+/* 「今の app」: sCallSection caller の parent 遡りで解決 (caller が ptsObject でなくても
+ *   生きている親を遡って最初の ptsObject の ptsApp)。無ければ thNULL。実装は ptsApplication.cpp。
+ *   ※ ts2Parallel worker からも有効: tinyState 側修正 (develop-v2 b601451) で spawn worker の
+ *   親は常に _root (全 worker 終了まで生存保証) になり、FIN 済み worker で鎖が切れることは
+ *   なくなった (旧 pigAppScope TLS 回避は撤去済)。 */
 sPtr<ptsApplication> pig_current_app();
 
 /* ★ 「今の caller が属す app のレジストリ」= pig_current_app()->module_registry。

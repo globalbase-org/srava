@@ -357,32 +357,15 @@ ptsApplication_::module_load_failed()
 	return moduleLoadFailed;
 }
 
-/* ★ #3427 ③改 (2026-08-14): 「今の app」の解決。
- * ① pigAppScope の TLS 上書き (worker _fn 用): ts2Parallel の親チェーンは途中の worker が
- *    FIN 済みだと parent を手放していて鎖が切れるため、遡りだけでは信頼できない
- *    (BLH2 cold cache の export_vox 障害の真因)。_fn を張る側が冒頭で宣言する。
- * ② sCallSection caller の parent 遡り: TS_STATE 文脈は eventHandler 全体が call section で
- *    包まれる (tinyState.cpp:665) ので caller() は常に有効。caller が ptsObject でなくても
- *    (生きている) 親を遡って最初の ptsObject の ptsApp を使う。
- * TLS なのでリエントラント安全 (sCallSection と同類)。 */
-static thread_local ptsApplication *t_pigCurrentApp = 0;   /* pigAppScope の TLS スロット (per-thread) */
-
-pigAppScope::pigAppScope(const sPtr<ptsApplication>& app)
-{
-	prev_ = t_pigCurrentApp;
-	t_pigCurrentApp = app.__get();   /* 生ポインタ: スコープ寿命中は呼び手の sPtr が app を保持 */
-}
-
-pigAppScope::~pigAppScope()
-{
-	t_pigCurrentApp = prev_;
-}
-
+/* ★ #3427 ③改 (2026-08-14): 「今の app」= sCallSection caller の parent 遡り。
+ * TS_STATE 文脈は eventHandler 全体が call section で包まれる (tinyState.cpp:665) ので
+ * caller() は常に有効。caller が ptsObject でなくても親を遡って最初の ptsObject の
+ * ptsApp を使う。ts2Parallel worker 文脈でも安全: spawn worker の親は常に _root
+ * (tinyState develop-v2 b601451。全 worker 終了まで生存保証) なので、FIN 済み worker で
+ * 鎖が切れることはない (旧 pigAppScope TLS 回避はこの修正を受けて撤去)。 */
 sPtr<ptsApplication>
 pig_current_app()
 {
-	if ( t_pigCurrentApp != 0 )
-		return sPtr<ptsApplication>(t_pigCurrentApp);
 	sPtr<tinyState> c = sCallSection::key->caller();
 	for ( int depth = 0 ; c != thNULL && depth < 64 ; ++depth ) {
 		sPtr<ptsObject> po = sPtr<ptsObject>::d_cast(c);
