@@ -45,6 +45,8 @@
 #include	"mf/c++/mfaExtrude.h"
 #include	"mf/c++/mfaCombine.h"
 #include	"mf/c++/mfaSection.h"
+#include	"mf/c++/mfaEmpty2D.h"
+#include	"mf/c++/mfaEmpty3D.h"
 #include	"mf/c++/mfaOffset.h"
 #include	"mf/c++/mfaTube.h"
 #include	"mf/c++/mfaColor.h"
@@ -67,6 +69,7 @@ static const pigArgKind BINMESH_IN[] = { AK_CACHE, AK_CACHE };  /* 2 mesh 入力
 static const pigArgKind CAST_IN[] = { AK_INLINE, AK_CACHE };  /* cast(type_string, mesh): type=inline, mesh=cache(reader) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };  /* 計測(値返し): mesh 1 個入力 */
 static const pigArgKind REVOLVE_IN[] = { AK_CACHE, AK_INLINE, AK_INLINE };  /* revolve(cross, angle, segs) / rotate(m,axis,deg) */
+static const pigArgKind SECTION_IN[] = { AK_CACHE, AK_INLINE, AK_INLINE, AK_INLINE };  /* section(m,P,N,mode) */
 static const pigArgKind MESH1ARG_IN[] = { AK_CACHE, AK_INLINE };  /* translate/scale/mirror/transform(m, param) */
 /* transform 系: 入力 mesh(cache)1 個 + スカラ/構造(inline)。mesh は reader、残りは value-parse。 */
 static const pigOpEntry OPS[] = {
@@ -98,7 +101,9 @@ static const pigOpEntry OPS[] = {
 	{ "ngon",         SHAPE2_IN, 2, AK_CACHE, &mkCalcT<mfaNgon>, 0, "->mf-cross2d" },  /* ngon(n,r): 2D */
 	{ "extrude",      MESH1ARG_IN,2, AK_CACHE,&mkCalcT<mfaExtrude>,      0, "(mf-cross2d)->mf-mesh3d" },  /* 2D→3D */
 	{ "combine",      BINMESH_IN,2, AK_CACHE, &mkCalcT<mfaCombine>, 0, "(mf-mesh3d,mf-mesh3d)->mf-mesh3d;(mf-cross2d,mf-cross2d)->mf-cross2d" },  /* combine(a,b) */
-	{ "section",      REVOLVE_IN,3, AK_CACHE, &mkCalcT<mfaSection>, 0, "(mf-mesh3d)->mf-cross2d" },  /* section(mesh,P,N): 3D→2D(Z) */
+	{ "section",      SECTION_IN,4, AK_CACHE, &mkCalcT<mfaSection>, 0, "(mf-mesh3d)->mf-cross2d" },  /* section(mesh,P,N,mode): 3D→2D(Z) */
+	{ "empty2d",      0,         0, AK_CACHE, &mkCalcT<mfaEmpty2D>, 0, "->mf-cross2d" },  /* 空集合(2D)。{} は中立元なので別物 */
+	{ "empty3d",      0,         0, AK_CACHE, &mkCalcT<mfaEmpty3D>, 0, "->mf-mesh3d" },   /* 空集合(3D) */
 	{ "offset",       REVOLVE_IN,3, AK_CACHE, &mkCalcT<mfaOffset>,       0, "(mf-cross2d)->mf-cross2d" },  /* ★2D 専用 */
 	{ "tube",         SHAPE2_IN, 2, AK_CACHE, &mkCalcT<mfaTube>,        0, "->mf-mesh3d;->mf-cross2d" },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (#3415・掃引は cgal と共通の common/tube.h) */
 	{ "color",        MESH1ARG_IN,2, AK_CACHE,&mkCalcT<mfaColor>,       0, "(mf-mesh3d)->mf-mesh3d" },  /* color(m, c): 頂点プロパティ ch3..5 に RGB。3D 専用 (2D は cgal 同様エラー)。色つき export は 3MF/AMF */

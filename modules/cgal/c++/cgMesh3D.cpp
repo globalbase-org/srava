@@ -662,55 +662,165 @@ cgMesh3D::op_repair()
 }
 
 /* ---- 断面: 点 P を通り法線 N の平面で切り、2D 断面(cgMesh2D)を返す。
- * Polygon_mesh_slicer で平面との交差ポリラインを得て、面内の正規直交基底(u,v)で 2D に射影し、
- * even-odd repair で塗り領域(穴つき)に組み立てる。基底は double(任意法線は正規化に sqrt が要る=
- * 任意角回転と同じ精度方針)。退化法線/空断面は null/空。 ---- */
+ *
+ * ★2026-08-15 改: Polygon_mesh_slicer をやめ、**厳密符号 + 記号的摂動(SoS)の自前カット**にした。
+ * 旧実装は「平面が面と共面」のとき slicer が閉ループでなく辺の断片群を返すのに、糊コードが
+ *   ① 開ポリラインを暗黙に弦で閉じる ② 3 点未満の断片を黙って捨てる
+ * ため、キメラ断面(面積が非整数・ループ数が上下の極限のどちらとも違う)が valid=1 のまま出ていた。
+ *
+ * 新方式:
+ *   - 各頂点の平面からの高さ h = N·(v-P) を **厳密有理数**で持ち、符号で分類する。
+ *   - h=0(平面上)の頂点は mode で一貫して倒す = 記号的摂動:
+ *       mode=+1 … 平面の直上 h+ε で切る → h=0 の頂点は「下」
+ *       mode=-1 … 平面の直下 h-ε で切る → h=0 の頂点は「上」
+ *       mode= 0 … +1 と同じ規則で倒す(共面が在れば coplanarOut で呼び側に知らせる)
+ *     こうすると **共面の面は 3 頂点が同符号になり自動的に除外**され、旧実装の破綻要因が消える。
+ *   - 交点は厳密に解き、**3D の厳密座標のままループに綴じる**(端点の一致は厳密比較)。閉多様体 ×
+ *     一般位置なので各交点はちょうど 2 本の線分に現れ、**断面は必ず閉ループになる**(開いたら実装バグ)。
+ *   - 2D 射影は最後に 1 回だけ。**軸平行法線なら座標を落とすだけで厳密**、一般法線のみ double 基底
+ *     (任意角回転と同じ精度方針)。トポロジーは射影前に確定しているので、丸めでループが壊れない。
+ *   - 穴の入れ子整理は従来どおり even-odd repair。 ---- */
+namespace {
+
+typedef cgMesh::K   SecK;
+typedef SecK::FT    SecFT;
+
+struct SecPtLess {   /* 厳密辞書式(交点の同一性判定に使う) */
+	bool operator()(const SecK::Point_3& a, const SecK::Point_3& b) const {
+		if ( a.x() != b.x() ) return a.x() < b.x();
+		if ( a.y() != b.y() ) return a.y() < b.y();
+		return a.z() < b.z();
+	}
+};
+
+} // namespace
+
 sPtr<cgMesh>
-cgMesh3D::op_section(const double P[3], const double N[3])
+cgMesh3D::op_section(const double P[3], const double N[3], int mode, int *coplanarOut)
 {
-	double nx = N[0], ny = N[1], nz = N[2];
-	double nl = std::sqrt(nx*nx + ny*ny + nz*nz);
-	if ( nl < 1e-12 ) return sPtr<cgMesh>();   /* 退化法線 */
-	nx /= nl; ny /= nl; nz /= nl;
-	/* 面内の正規直交基底 u,v(u = n に直交な軸, v = n×u)。 */
-	double ax = ( std::fabs(nx) < 0.9 ) ? 1.0 : 0.0;
-	double ay = ( std::fabs(nx) < 0.9 ) ? 0.0 : 1.0;
-	double an = ax*nx + ay*ny;                 /* a=(ax,ay,0) */
-	double ux = ax - an*nx, uy = ay - an*ny, uz = -an*nz;
-	double ul = std::sqrt(ux*ux + uy*uy + uz*uz);
-	ux /= ul; uy /= ul; uz /= ul;
-	double vx = ny*uz - nz*uy, vy = nz*ux - nx*uz, vz = nx*uy - ny*ux;
+	if ( coplanarOut ) *coplanarOut = 0;
+	SecFT nx(N[0]), ny(N[1]), nz(N[2]);
+	if ( nx == 0 && ny == 0 && nz == 0 ) return sPtr<cgMesh>();   /* 退化法線 */
+	SecFT px(P[0]), py(P[1]), pz(P[2]);
 
-	/* 名前付き中間変数で most vexing parse を回避(handoff の affine と同じ罠)。 */
-	K::FT fp[3] = { K::FT(P[0]), K::FT(P[1]), K::FT(P[2]) };
-	K::FT fn[3] = { K::FT(N[0]), K::FT(N[1]), K::FT(N[2]) };
-	K::Point_3  pOnPlane(fp[0], fp[1], fp[2]);
-	K::Vector_3 planeN(fn[0], fn[1], fn[2]);
-	K::Plane_3  plane(pOnPlane, planeN);
-	CGAL::Polygon_mesh_slicer<Mesh, K> slicer(m_);
-	std::vector<std::vector<K::Point_3> > polylines;
-	slicer(plane, std::back_inserter(polylines));
+	/* ---- 頂点の高さと符号(SoS で 0 を倒す)---- */
+	std::map<Mesh::Vertex_index, SecFT> hmap;
+	std::map<Mesh::Vertex_index, int>   smap;
+	const int tie = ( mode < 0 ) ? +1 : -1;   /* h=0 を上(-ε)/下(+ε・mode 0 も同じ)へ倒す */
+	for ( Mesh::Vertex_index v : m_.vertices() ) {
+		const Mesh::Point& q = m_.point(v);
+		SecFT h = nx*(q.x()-px) + ny*(q.y()-py) + nz*(q.z()-pz);
+		hmap[v] = h;
+		int sg = (int)CGAL::sign(h);
+		smap[v] = ( sg != 0 ) ? sg : tie;
+	}
 
-	CGAL::Multipolygon_with_holes_2<K> mp;
-	for ( std::size_t k = 0 ; k < polylines.size() ; ++k ) {
-		std::vector<K::Point_3>& pl = polylines[k];
-		std::size_t n = pl.size();
-		if ( n > 1 && pl.front() == pl.back() ) --n;   /* 閉ポリラインの重複終点を落とす */
-		if ( n < 3 ) continue;                          /* 開いた断片はスキップ(塗りにならない) */
-		CGAL::Polygon_2<K> poly;
-		for ( std::size_t i = 0 ; i < n ; ++i ) {
-			double qx = CGAL::to_double(pl[i].x()), qy = CGAL::to_double(pl[i].y()), qz = CGAL::to_double(pl[i].z());
-			double dx = qx - P[0], dy = qy - P[1], dz = qz - P[2];
-			double uu = dx*ux + dy*uy + dz*uz;
-			double vv = dx*vx + dy*vy + dz*vz;
-			poly.push_back(K::Point_2(K::FT(uu), K::FT(vv)));
+	/* ---- 面ごとに交差線分を作る(共面検出も同時に)---- */
+	std::vector<std::pair<SecK::Point_3, SecK::Point_3> > segs;
+	for ( Mesh::Face_index f : m_.faces() ) {
+		std::vector<Mesh::Vertex_index> vs;
+		Mesh::Halfedge_index h0 = m_.halfedge(f), hh = h0;
+		do { vs.push_back(m_.target(hh)); hh = m_.next(hh); } while ( hh != h0 );
+		int allzero = 1;
+		for ( size_t i = 0 ; i < vs.size() ; ++i )
+			if ( hmap[vs[i]] != 0 ) { allzero = 0; break; }
+		if ( allzero ) {                       /* 共面の面: 摂動後はどちらか片側に寄るので断面に出ない */
+			if ( coplanarOut ) *coplanarOut = 1;
+			continue;
+		}
+		for ( size_t t = 1 ; t + 1 < vs.size() ; ++t ) {   /* 扇分割(三角形単位で処理) */
+			Mesh::Vertex_index iv[3] = { vs[0], vs[t], vs[t+1] };
+			SecK::Point_3 xp[2];
+			int nx_ = 0;
+			for ( int e = 0 ; e < 3 && nx_ < 2 ; ++e ) {
+				Mesh::Vertex_index a = iv[e], b = iv[(e+1)%3];
+				int sa = smap[a], sb = smap[b];
+				if ( sa == sb ) continue;                   /* 同側 = 横断しない */
+				const SecFT &ha = hmap[a], &hb = hmap[b];
+				const Mesh::Point &pa = m_.point(a), &pb = m_.point(b);
+				SecFT den = ha - hb;
+				if ( den == 0 ) continue;                   /* 起きない(sa!=sb なら h も異なる) */
+				SecFT tt = ha / den;                        /* 厳密な交点パラメータ */
+				xp[nx_++] = SecK::Point_3(pa.x() + tt*(pb.x()-pa.x()),
+				                          pa.y() + tt*(pb.y()-pa.y()),
+				                          pa.z() + tt*(pb.z()-pa.z()));
+			}
+			if ( nx_ == 2 && xp[0] != xp[1] ) segs.push_back(std::make_pair(xp[0], xp[1]));
+		}
+	}
+	sPtr<cgMesh2D> out = thNEW(cgMesh2D,());
+	if ( segs.empty() ) return out;   /* 交差なし = 空断面(空の cgMesh2D) */
+
+	/* ---- 線分を厳密な端点一致で閉ループに綴じる ---- */
+	std::map<SecK::Point_3, std::vector<size_t>, SecPtLess> inc;
+	for ( size_t i = 0 ; i < segs.size() ; ++i ) {
+		inc[segs[i].first].push_back(i);
+		inc[segs[i].second].push_back(i);
+	}
+	std::vector<char> used(segs.size(), 0);
+	std::vector<std::vector<SecK::Point_3> > loops;
+	for ( size_t i = 0 ; i < segs.size() ; ++i ) {
+		if ( used[i] ) continue;
+		std::vector<SecK::Point_3> loop;
+		SecK::Point_3 start = segs[i].first, cur = segs[i].second;
+		used[i] = 1;
+		loop.push_back(start);
+		for (;;) {
+			loop.push_back(cur);
+			if ( cur == start ) break;                  /* 閉じた */
+			const std::vector<size_t>& cand = inc[cur];
+			size_t nxt = (size_t)-1;
+			for ( size_t k = 0 ; k < cand.size() ; ++k )
+				if ( ! used[cand[k]] ) { nxt = cand[k]; break; }
+			if ( nxt == (size_t)-1 ) break;             /* 行き止まり(非閉入力) */
+			used[nxt] = 1;
+			cur = ( segs[nxt].first == cur ) ? segs[nxt].second : segs[nxt].first;
+		}
+		if ( loop.size() > 1 && loop.front() == loop.back() ) loop.pop_back();
+		if ( loop.size() >= 3 ) loops.push_back(loop);
+	}
+	if ( loops.empty() ) return out;
+
+	/* ---- 2D へ射影(軸平行なら厳密・一般法線は double 基底)---- */
+	int ax = -1;                        /* 落とす軸 */
+	int flip = 0;
+	if ( ny == 0 && nz == 0 )      { ax = 0; flip = ( nx < 0 ); }
+	else if ( nx == 0 && nz == 0 ) { ax = 1; flip = ( ny > 0 ); }   /* y 軸は (z,x) 順で右手系 */
+	else if ( nx == 0 && ny == 0 ) { ax = 2; flip = ( nz < 0 ); }
+	double ux=0, uy=0, uz=0, vx=0, vy=0, vz=0;
+	if ( ax < 0 ) {
+		double dnx = N[0], dny = N[1], dnz = N[2];
+		double nl = std::sqrt(dnx*dnx + dny*dny + dnz*dnz);
+		dnx /= nl; dny /= nl; dnz /= nl;
+		double a0 = ( std::fabs(dnx) < 0.9 ) ? 1.0 : 0.0;
+		double a1 = ( std::fabs(dnx) < 0.9 ) ? 0.0 : 1.0;
+		double an = a0*dnx + a1*dny;
+		ux = a0 - an*dnx; uy = a1 - an*dny; uz = -an*dnz;
+		double ul = std::sqrt(ux*ux + uy*uy + uz*uz);
+		ux /= ul; uy /= ul; uz /= ul;
+		vx = dny*uz - dnz*uy; vy = dnz*ux - dnx*uz; vz = dnx*uy - dny*ux;
+	}
+	CGAL::Multipolygon_with_holes_2<SecK> mp;
+	for ( size_t k = 0 ; k < loops.size() ; ++k ) {
+		CGAL::Polygon_2<SecK> poly;
+		for ( size_t i = 0 ; i < loops[k].size() ; ++i ) {
+			const SecK::Point_3& q = loops[k][i];
+			if ( ax == 0 )      poly.push_back(SecK::Point_2(flip ? -q.y() : q.y(), q.z()));
+			else if ( ax == 1 ) poly.push_back(SecK::Point_2(flip ? -q.z() : q.z(), q.x()));
+			else if ( ax == 2 ) poly.push_back(SecK::Point_2(flip ? -q.x() : q.x(), q.y()));
+			else {
+				double dx = CGAL::to_double(q.x()) - P[0];
+				double dy = CGAL::to_double(q.y()) - P[1];
+				double dz = CGAL::to_double(q.z()) - P[2];
+				poly.push_back(SecK::Point_2(SecFT(dx*ux + dy*uy + dz*uz),
+				                             SecFT(dx*vx + dy*vy + dz*vz)));
+			}
 		}
 		if ( poly.size() >= 3 )
-			mp.add_polygon_with_holes(CGAL::Polygon_with_holes_2<K>(poly));
+			mp.add_polygon_with_holes(CGAL::Polygon_with_holes_2<SecK>(poly));
 	}
 	/* even-odd repair: 入れ子ループを外周/穴に整理(断面の内壁=穴)。 */
 	auto repaired = CGAL::Polygon_repair::repair(mp);
-	sPtr<cgMesh2D> out = thNEW(cgMesh2D,());
 	for ( const auto& pwh : repaired.polygons_with_holes() )
 		out->regions().push_back(pwh);
 	return out;

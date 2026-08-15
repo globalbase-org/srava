@@ -82,7 +82,10 @@ public:
 
 	/* ---- 断面: 点 P を通り法線 N の平面でメッシュを切り、2D 断面(cgMesh2D)を返す。
 	 *      3D 専用(2D は null=エラー)。面内の正規直交基底で 2D に射影 → even-odd 充填。失敗/退化 N は null。 ---- */
-	virtual sPtr<cgMesh> op_section(const double P[3], const double N[3]) = 0;
+	/* mode: 0 = 平面ちょうど / -1 = 平面の直下(h-ε)/ +1 = 平面の直上(h+ε)。
+	 * coplanarOut != 0 なら「平面と共面の面が在ったか」を 1/0 で返す(呼び側が仕様判定に使う)。 */
+	virtual sPtr<cgMesh> op_section(const double P[3], const double N[3],
+	                                int mode = 0, int *coplanarOut = 0) = 0;
 
 	/* ---- ファイル書き出し(拡張子で形式判定。3D=OFF/STL/.. / 2D=SVG/DXF)。成否を返す。
 	 *      unit = 単位文字列("mm"/"cm"/"in"/...)。SVG=width/height に付与、DXF=$INSUNITS、
@@ -137,7 +140,8 @@ public:
 	virtual int          op_valid();   /* is_closed ∧ ¬does_self_intersect */
 	virtual sPtr<cgMesh> op_repair();  /* PMP::autorefine(自己交差を幾何解消) */
 	virtual sPtr<cgMesh> op_color(int r, int g, int b);   /* 全面に f:color を付けた新 mesh */
-	virtual sPtr<cgMesh> op_section(const double P[3], const double N[3]);   /* 平面で切った 2D 断面 */
+	virtual sPtr<cgMesh> op_section(const double P[3], const double N[3],
+	                                int mode = 0, int *coplanarOut = 0);   /* 平面で切った 2D 断面 */
 	virtual bool write_to(const char *path, const char *unit);   /* OFF/STL/OBJ/PLY(unit 無視) */
 protected:
 	void	decode_mfm3(cgChunkSource&);   /* MFM3 raw-double framing → EPECK Surface_mesh(無損失昇格) */
@@ -185,7 +189,8 @@ public:
 	virtual int          op_valid();   /* 全 region の外周/穴が is_simple */
 	virtual sPtr<cgMesh> op_repair();  /* Polygon_repair::repair(even-odd) */
 	virtual sPtr<cgMesh> op_color(int r, int g, int b);   /* 2D は非対応(null=エラー) */
-	virtual sPtr<cgMesh> op_section(const double[3], const double[3]) { return sPtr<cgMesh>(); }   /* 2D は断面なし */
+	virtual sPtr<cgMesh> op_section(const double[3], const double[3],
+	                                int = 0, int * = 0) { return sPtr<cgMesh>(); }   /* 2D は断面なし */
 	virtual bool write_to(const char *path, const char *unit);   /* SVG(width/height)/DXF($INSUNITS) */
 protected:
 	void	decode_mfc2(cgChunkSource&);   /* MFC2 raw-double リング列 → Pwh_2(無損失昇格) */

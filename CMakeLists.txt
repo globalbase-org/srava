@@ -251,6 +251,8 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPrism.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPyramid.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaSphere.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaEmpty2D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaEmpty3D.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaIcosphere.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaUnion.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCombine.cpp
@@ -524,6 +526,8 @@ set(CGAL_KERNEL_SRC
   modules/cgal/c++/cgaPrism.cpp
   modules/cgal/c++/cgaPyramid.cpp
   modules/cgal/c++/cgaSphere.cpp
+  modules/cgal/c++/cgaEmpty2D.cpp
+  modules/cgal/c++/cgaEmpty3D.cpp
   modules/cgal/c++/cgaIcosphere.cpp
   modules/cgal/c++/cgaUnion.cpp
   modules/cgal/c++/cgaCombine.cpp
@@ -1108,6 +1112,24 @@ add_test(NAME srava_section
 set_tests_properties(srava_section PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-section"
   PASS_REGULAR_EXPRESSION "SECAREA= 64"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
+  TIMEOUT 30)
+
+# section: 平面が面と共面のとき [0]=空 / [1]=直下 / [2]=直上 (旧実装はここでキメラ断面を返していた)
+add_test(NAME srava_section_coplanar
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> section_coplanar)
+set_tests_properties(srava_section_coplanar PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-section-copl"
+  PASS_REGULAR_EXPRESSION "COPL= 40"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
+  TIMEOUT 30)
+
+# empty2d()/empty3d() = 値としての空集合。{} (fold の中立元) と区別されることを見る
+add_test(NAME srava_empty_set
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> empty_set)
+set_tests_properties(srava_empty_set PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-emptyset"
+  PASS_REGULAR_EXPRESSION "EMPTY= 88"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
   TIMEOUT 30)
 
@@ -2875,6 +2897,8 @@ if(SRAVA_MODULE_MANIFOLD)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaImport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaRect.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCircle.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaEmpty2D.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaEmpty3D.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaNgon.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaExtrude.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCombine.cpp
@@ -2919,6 +2943,8 @@ if(SRAVA_MODULE_MANIFOLD)
     modules/manifold/c++/mfaImport.cpp
     modules/manifold/c++/mfaRect.cpp
     modules/manifold/c++/mfaCircle.cpp
+    modules/manifold/c++/mfaEmpty2D.cpp
+    modules/manifold/c++/mfaEmpty3D.cpp
     modules/manifold/c++/mfaNgon.cpp
     modules/manifold/c++/mfaExtrude.cpp
     modules/manifold/c++/mfaCombine.cpp

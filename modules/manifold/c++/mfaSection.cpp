@@ -94,7 +94,34 @@ mfaSection_::compute()
 		    "section: Manifold kernel supports only Z-normal planes ([0,0,1]); use exact kernel for arbitrary planes"))));
 		return;
 	}
-	manifold::Polygons ps = in->manifold().Slice(P[2]);
+	/* ★ 3 要素配列仕様(ひさ設計 2026-08-15)の mf 版。mode: 0=平面ちょうど / -1=直下 / +1=直上。
+	 *   cgal は厳密有理数 + 記号的摂動で ε を扱うが、mf は double カーネルなので **表現可能な最小の
+	 *   ε = nextafter** で代用する(z にちょうど乗る面は nextafter(z,±∞) には乗らないので、
+	 *   「直上/直下」の意味は保たれる)。共面判定は頂点 z の厳密一致(double 比較)で行う。 */
+	int mode = ( na > 3 ) ? (int)(*args)[3]->get_int() : 0;
+	if ( mode > 0 ) mode = 1; else if ( mode < 0 ) mode = -1;
+
+	int coplanar = 0;
+	{
+		manifold::MeshGL m = in->manifold().GetMeshGL();
+		const uint32_t np = m.numProp;
+		for ( size_t t = 0 ; t + 2 < m.triVerts.size() && ! coplanar ; t += 3 ) {
+			int on = 0;
+			for ( int k = 0 ; k < 3 ; ++k ) {
+				double z = (double)m.vertProperties[(size_t)m.triVerts[t+k]*np + 2];
+				if ( z == P[2] ) ++on;
+			}
+			if ( on == 3 ) coplanar = 1;
+		}
+	}
+	if ( ( coplanar && mode == 0 ) || ( ! coplanar && mode != 0 ) ) {
+		cross = thNEW(mfCross,(manifold::CrossSection()));   /* 出番でない要素 = 空集合 */
+		return;
+	}
+	double zcut = P[2];
+	if ( mode > 0 )      zcut = ::nextafter(P[2],  1e308);
+	else if ( mode < 0 ) zcut = ::nextafter(P[2], -1e308);
+	manifold::Polygons ps = in->manifold().Slice(zcut);
 	cross = thNEW(mfCross,(manifold::CrossSection(ps, manifold::CrossSection::FillRule::NonZero)));
 }
 

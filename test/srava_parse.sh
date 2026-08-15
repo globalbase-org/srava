@@ -671,8 +671,26 @@ prism_axis)
 	SRAVA_SOURCE='print("PEQ=", volume(prism(6,8,2)) == volume(extrude(ngon(6,2),8)));' exec "$SRAVA" ;;
 section)
 	# 3D→2D 断面: 中空箱を z=5 で水平に切る → 外周 10x10 − 穴 6x6 = area 64(even-odd で穴検出)。
+	# section(m,P,N) は 3 要素配列 [ε=0, ε−, ε+]。共面でないので [0] が答え・[1][2] は空集合。
+	# 4 引数形 section(m,P,N,0) は単一の断面(移行と使い分け用)。両方が 64 で一致することも見る。
 	SRAVA_SOURCE='var hollow = box(10,10,10) --- (box(6,6,12) >>> [2,2,-1]);
-	print("SECAREA=", area(section(hollow, [0,0,5], [0,0,1])));' exec "$SRAVA" ;;
+	var s = section(hollow, [0,0,5], [0,0,1]);
+	print("SECAREA=", area(s[0]) + area(s[1])*1000 + area(s[2])*1000
+	                + (area(section(hollow, [0,0,5], [0,0,1], 0)) - 64)*1000);' exec "$SRAVA" ;;
+section_coplanar)
+	# 共面(平面が面にちょうど乗る)ケース: 箱の上面 z=2 で切る。
+	#   [0] = 空(平面ちょうどは退化=定義できない・共面ありの合図)
+	#   [1] = 直下の極限 = 2x2 の断面 = 4
+	#   [2] = 直上の極限 = 何もない = 0
+	# 旧実装(slicer + 弦で閉じる)はここでキメラ断面を返していた。
+	SRAVA_SOURCE='var t = section(box(2,2,2), [1,1,2], [0,0,1]);
+	print("COPL=", area(t[0])*100 + area(t[1])*10 + area(t[2]));' exec "$SRAVA" ;;
+empty_set)
+	# empty2d()/empty3d() = 値としての空集合。{}(fold の中立元)とは別物であることを見る:
+	#   intersection(a, empty3d()) = 空(0) / intersection(a, {}) = a(8)
+	SRAVA_SOURCE='var B = box(2,2,2);
+	print("EMPTY=", volume(intersection(B, empty3d()))*100 + volume(union(B, empty3d()))*10
+	              + volume(intersection(B, {})) + area(empty2d())*1000);' exec "$SRAVA" ;;
 control_flow)
 	# return / break / continue。f(5)=1(return)、s=12(for+continue で step が走る)、
 	# t=10(while+break)。合計検証 f(5)*100 + s + t = 122。continue が step を飛ばすと TIMEOUT。

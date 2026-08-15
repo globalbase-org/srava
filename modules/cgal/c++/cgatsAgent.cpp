@@ -69,6 +69,8 @@
 #include	"cg/c++/cgaPolygon.h"
 #include	"cg/c++/cgaLine.h"
 #include	"cg/c++/cgaSection.h"
+#include	"cg/c++/cgaEmpty2D.h"
+#include	"cg/c++/cgaEmpty3D.h"
 #include	"cg/c++/cgaExtrude.h"     /* 2D→3D */
 #include	"cg/c++/cgaTube.h"        /* 3D 折れ線まわりの掃引管 */
 #include	"cg/c++/cgaRevolve.h"
@@ -115,6 +117,7 @@ static const ArgKind EXPORTVOX_IN[] = { AK_INLINE, AK_INLINE };  /* export_vox(p
 static const ArgKind BINMESH_IN[] = { AK_CACHE, AK_CACHE };  /* 2 mesh 入力(cache ハンドル→reader 読み) */
 /* transform 系: 入力 mesh(cache)1 個 + スカラ/構造(inline)。mesh は reader、残りは value-parse。 */
 static const ArgKind ROTATE_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };             /* rotate(m,axis,deg) */
+static const ArgKind SECTION_IN[] = { AK_CACHE, AK_INLINE, AK_INLINE, AK_INLINE };  /* section(m,P,N,mode) */
 static const ArgKind MESH1ARG_IN[] = { AK_CACHE, AK_INLINE };  /* translate(m,vec) / mirror(m,axis) / transform(m,matrix) */
 static const ArgKind MEASURE_IN[] = { AK_CACHE };  /* 計測(値返し): mesh 1 個入力 → 値(AK_INLINE)出力 */
 static const ArgKind THIN_IN[] = { AK_CACHE, AK_INLINE, AK_INLINE, AK_INLINE };  /* thin_spots(m, t, rays, cone) */
@@ -155,7 +158,9 @@ static const cgaOpEntry OPS[] = {
 	{ "area",         MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaArea>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* area(m): 値返し(2D 面積 / 3D 表面積) */
 	{ "valid",        MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaValid>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* valid(m): 値返し(1=正常/0=問題) */
 	{ "repair",       MEASURE_IN,1, AK_CACHE, &mkCalcT<cgaRepair>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-mesh3d)->cg-mesh3d;(mf-cross2d)->cg-cross2d" },  /* repair(m): mesh 返し(3D autorefine / 2D even-odd)・mf 入力も引受 */
-	{ "section",      ROTATE_IN, 3, AK_CACHE, &mkCalcT<cgaSection>, 0, "(cg-mesh3d)->cg-cross2d" },  /* section(m,P,N): 平面で切った 2D 断面 */
+	{ "section",      SECTION_IN,4, AK_CACHE, &mkCalcT<cgaSection>, 0, "(cg-mesh3d)->cg-cross2d" },  /* section(m,P,N,mode): mode 0=平面ちょうど/-1=直下/+1=直上 */
+	{ "empty2d",      0,         0, AK_CACHE, &mkCalcT<cgaEmpty2D>, 0, "->cg-cross2d" },  /* 空集合(2D)。{} は中立元なので別物 */
+	{ "empty3d",      0,         0, AK_CACHE, &mkCalcT<cgaEmpty3D>, 0, "->cg-mesh3d" },   /* 空集合(3D) */
 	{ "volume",       MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaVolume>,      0, "(cg-mesh3d)->value" },  /* 値出力 (out=value) */
 	{ "perimeter",    MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaPerimeter>, 0, "(cg-cross2d)->value;(mf-cross2d)->value" },  /* perimeter(m): 値返し(2D 境界長・3D エラー)・mf 入力も引受 */
 	{ "centroid",     MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaCentroid>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* centroid(m): 配列返し([x,y]/[x,y,z]) */

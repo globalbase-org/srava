@@ -853,6 +853,38 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		f->set_info(ci);
 		return f;
 	}
+	/* ★ section の 2 形態(ひさ設計 2026-08-15):
+	 *   section(m,P,N)      → **3 要素配列** [ε=0, ε−, ε+] に糖衣展開する。
+	 *       共面あり … [0]=空 / [1],[2]=平面の直下・直上の断面
+	 *       共面なし … [0]=断面 / [1],[2]=空
+	 *     ("共面か" の判定は各 mode の計算本体が厳密に行い、出番でない要素は空メッシュを返す。)
+	 *     配列リテラルは要素を先に全 trigger するので、3 つの断面は **並列**に計算される。
+	 *   section(m,P,N,mode) → 単一の 2D 断面(mode 0/-1/+1)。移行と使い分けのための明示形。
+	 * 空要素は `{}`(fold の中立元)ではなく **空メッシュ**(empty2d() と同じもの)。 */
+	if ( ::strcmp(nm, "section") == 0 && na == 3 ) {
+		sPtr<pigDataOperatorArray> arr = thNEW(pigDataOperatorArray,());
+		static const int MODES[3] = { 0, -1, 1 };
+		for ( int k = 0 ; k < 3 ; ++k ) {
+			sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
+			for ( int i = 0 ; i < 3 ; ++i )
+				f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+			f->pushArg(thNEW(pigDataInteger,((INTEGER64)MODES[k])));
+			f->set_op_name(thNEW(stdString,("section")));
+			f->set_out_cache(1);
+			f->set_info(ci);
+			arr->pushArg(f);
+		}
+		arr->set_info(ci);
+		return arr;
+	}
+	/* 引数なしの leaf: empty2d() / empty3d() = 値としての空集合(`{}` は中立元で別物)。 */
+	if ( ::strcmp(nm, "empty2d") == 0 || ::strcmp(nm, "empty3d") == 0 ) {
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
+		f->set_op_name(thNEW(stdString,(nm)));
+		f->set_out_cache(1);
+		f->set_info(ci);
+		return f;
+	}
 	/* tube(path[, segs]): path=[[[x,y,z],r],...] を 3D 折れ線まわりに掃引した管。segs=断面円の辺数
 	 * (精度ピッチ。省略=32)。内部は常に 2 引数 (path, segs)。path は構造 inline 値。 */
 	if ( ::strcmp(nm, "tube") == 0 ) {
@@ -874,7 +906,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	  || ::strcmp(nm, "ngon") == 0
 	  || ::strcmp(nm, "extrude") == 0  /* 2D→3D */
 	  || ::strcmp(nm, "repair") == 0   /* 修復(mesh 1 個→mesh) */
-	  || ::strcmp(nm, "section") == 0  /* 3D→2D 断面(mesh, 点, 法線) */
+	  || ::strcmp(nm, "section") == 0  /* 3D→2D 断面(mesh, 点, 法線, mode)。3 引数形は上で配列に展開済み */
 	  || ::strcmp(nm, "mirror") == 0  /* transform 系: mesh + パラメータ */
 	  || ::strcmp(nm, "transform") == 0
 	  || ::strcmp(nm, "color") == 0   /* 着色: mesh + 色指定(名前/#RRGGBB/[r,g,b]) */

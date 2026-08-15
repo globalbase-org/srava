@@ -84,10 +84,25 @@ cgaSection_::compute()
 	read3( (na > 1) ? (*args)[1] : sPtr<pigData>(), P, 0.0 );   /* 点(z 省略=0) */
 	read3( (na > 2) ? (*args)[2] : sPtr<pigData>(), N, 1.0 );   /* 法線(省略=z 軸) */
 
-	mesh = in->op_section(P, N);   /* 多態: 3D=slicer / 2D=null(エラー) */
-	if ( ! mesh.is_notNull() )
+	/* mode: 0=平面ちょうど / -1=平面の直下(h-ε) / +1=平面の直上(h+ε)。既定 0。 */
+	int mode = ( na > 3 ) ? (int)(*args)[3]->get_int() : 0;
+	if ( mode > 0 ) mode = 1; else if ( mode < 0 ) mode = -1;
+
+	int coplanar = 0;
+	mesh = in->op_section(P, N, mode, &coplanar);   /* 多態: 3D=厳密カット / 2D=null(エラー) */
+	if ( ! mesh.is_notNull() ) {
 		result = thNEW(pigDataError,(thNEW(stdString,(
 		    "section: needs a 3D mesh and a non-degenerate normal"))));
+		return;
+	}
+	/* ★ 3 要素配列仕様(ひさ設計 2026-08-15)の要素判定。パーサが section(m,P,N) を
+	 *   [section(..,0), section(..,-1), section(..,+1)] へ展開するので、ここでは各モードが
+	 *   「自分の出番か」を判定して、出番でなければ **空集合**(空 cross2d)を返す:
+	 *     共面あり … 平面ちょうど(0)は退化して定義できない → 空。両側の極限(-1/+1)が答え。
+	 *     共面なし … 平面ちょうど(0)が答え。極限(-1/+1)は空。
+	 *   空要素は `{}`(fold の中立元)ではなく **empty2d() と同じ空メッシュ**で返す。 */
+	if ( ( coplanar && mode == 0 ) || ( ! coplanar && mode != 0 ) )
+		mesh = thNEW(cgMesh2D,());   /* 空集合 */
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は
