@@ -54,12 +54,15 @@ Linux・macOS・Windows(MSYS2/MINGW64・Cygwin)での **ビルド + インスト
 ## 2. tinyState(共通の前提)
 
 srava は `find_package(tinyState)` で tinyState を探す。先に tinyState をビルド・インストールする。
-**要 tinyState v2.0.0-rc12 以上**。rc11 以前は不可: Windows で必須の修正(スレッドローカルの
-イメージ跨ぎ単一化)が rc12 で入ったほか、rc12 で内部レイアウト(ABI)が変わっている。
+**要 tinyState v2.0.0-rc13 以上**。rc13 では並列ワーカの親付けが修正されており、srava はこれに依存する
+(旧版だと cold cache 実行で `pig_value_parse: malformed value` が出る)。rc11 以前は Windows で必須の
+修正(スレッドローカルのイメージ跨ぎ単一化)も欠く。
 
-> ⚠ **tinyState を rc11 以前から入れ替えた場合、srava は再リンクではなく**クリーン再ビルド**が必要**
-> (`rm -rf build` からやり直す)。レイアウト変更を跨ぐ incremental ビルドは、エラーにならずに
-> 壊れたバイナリを作ることがある。
+> ⚠ **入れ替え時の再ビルド範囲は、どの版から上げるかで変わる**
+> - **rc12 → rc13**: ABI は変わっていない。**再リンクだけでよい**(srava の build ディレクトリは再利用可)。
+> - **rc11 以前 → rc12/rc13**: rc12 で内部レイアウト(ABI)が変わっているため、**クリーン再ビルドが必要**
+>   (`rm -rf build` からやり直す)。レイアウト変更を跨ぐ incremental ビルドは、エラーにならずに
+>   壊れたバイナリを作ることがある。
 
 ```sh
 git clone https://github.com/globalbase-org/tinyState.git
