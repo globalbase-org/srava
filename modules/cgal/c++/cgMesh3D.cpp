@@ -693,6 +693,18 @@ struct SecPtLess {   /* 厳密辞書式(交点の同一性判定に使う) */
 	}
 };
 
+/* リングから連続重複点(と末尾=先頭の重複)を落とす。 */
+static CGAL::Polygon_2<SecK> sec_dedup_ring(const CGAL::Polygon_2<SecK>& r)
+{
+	CGAL::Polygon_2<SecK> o;
+	for ( auto v = r.vertices_begin() ; v != r.vertices_end() ; ++v ) {
+		if ( o.size() > 0 && *v == o[o.size()-1] ) continue;
+		o.push_back(*v);
+	}
+	while ( o.size() >= 2 && o[0] == o[o.size()-1] ) o.erase(o.vertices_end()-1);
+	return o;
+}
+
 } // namespace
 
 sPtr<cgMesh>
@@ -803,8 +815,13 @@ cgMesh3D::op_section(const double P[3], const double N[3], int mode, int *coplan
 	CGAL::Multipolygon_with_holes_2<SecK> mp;
 	for ( size_t k = 0 ; k < loops.size() ; ++k ) {
 		CGAL::Polygon_2<SecK> poly;
+		/* 同一点が連続したら 1 個に潰す(ゼロ長辺を作らない)。平面が頂点をちょうど通ると、その頂点に
+		 * 集まる複数の面が同じ交点を出すため連続重複が起きる。幾何は変わらないが、SVG/DXF に
+		 * ゼロ長セグメントとして出ると CAM 側で自己交差扱いになるので、ここで落としておく。 */
 		for ( size_t i = 0 ; i < loops[k].size() ; ++i ) {
 			const SecK::Point_3& q = loops[k][i];
+			if ( i > 0 && q == loops[k][i-1] ) continue;
+			if ( i + 1 == loops[k].size() && q == loops[k][0] ) continue;
 			if ( ax == 0 )      poly.push_back(SecK::Point_2(flip ? -q.y() : q.y(), q.z()));
 			else if ( ax == 1 ) poly.push_back(SecK::Point_2(flip ? -q.z() : q.z(), q.x()));
 			else if ( ax == 2 ) poly.push_back(SecK::Point_2(flip ? -q.x() : q.x(), q.y()));
@@ -821,8 +838,19 @@ cgMesh3D::op_section(const double P[3], const double N[3], int mode, int *coplan
 	}
 	/* even-odd repair: 入れ子ループを外周/穴に整理(断面の内壁=穴)。 */
 	auto repaired = CGAL::Polygon_repair::repair(mp);
-	for ( const auto& pwh : repaired.polygons_with_holes() )
-		out->regions().push_back(pwh);
+	/* 連続重複点(ゼロ長辺)を落とす。平面が頂点をちょうど通ると、その頂点に集まる複数の面が
+	 * 同じ交点を出すので同一点が並ぶ(repair も残す)。幾何は変わらないが、SVG/DXF にゼロ長
+	 * セグメントとして出ると CAM 側で自己交差扱いになるため、ここで一度だけ掃除する。 */
+	for ( const auto& pwh : repaired.polygons_with_holes() ) {
+		CGAL::Polygon_2<SecK> ob = sec_dedup_ring(pwh.outer_boundary());
+		if ( ob.size() < 3 ) continue;
+		CGAL::Polygon_with_holes_2<SecK> cleaned(ob);
+		for ( auto h = pwh.holes_begin() ; h != pwh.holes_end() ; ++h ) {
+			CGAL::Polygon_2<SecK> hh = sec_dedup_ring(*h);
+			if ( hh.size() >= 3 ) cleaned.add_hole(hh);
+		}
+		out->regions().push_back(cleaned);
+	}
 	return out;
 }
 

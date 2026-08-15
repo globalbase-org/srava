@@ -6,6 +6,9 @@
 #include	"cg/c++/cgMesh.h"
 #include	"cg/c++/cgaMeshCodec.h"   /* put_u32/put_coord/get_u32/get_coord(Sink/Source 越し)を再利用 */
 #include	"ts2/c++/stdString.h"
+#include	<string>
+#include	<vector>
+#include	<utility>
 
 #include	<CGAL/Polygon_set_2.h>
 #include	<CGAL/Boolean_set_operations_2.h>
@@ -285,6 +288,38 @@ static int dxf_insunits(const char* u) {
 	return 0;
 }
 
+/* ---- 出力座標のヘルパ ----
+ * 断面の頂点は厳密有理数なので、**厳密には異なるのに double では同じ**点が隣り合うことがある
+ * (corefinement 由来のごく近接した頂点。実測: 1 断面で 2474 組)。そのまま書くと SVG/DXF に
+ * ゼロ長セグメントとして残り、CAM 側で自己交差やゼロ長要素として扱われる。書き出す値そのもの
+ * (= %.12g に整形した文字列)で連続重複を落とす。厳密データはキャッシュ側にそのまま残る。 */
+#define SEC_COORD_FMT "%.12g"
+static std::string sec_fmt2(double x, double y) {
+	char b[80];
+	::snprintf(b, sizeof b, SEC_COORD_FMT "," SEC_COORD_FMT, x, y);
+	return std::string(b);
+}
+/* リング(または折れ線)を「書き出す値」に落とし、連続重複と末尾=先頭の重複を除いた点列にする。 */
+template<class It>
+static std::vector<std::pair<double,double> > sec_out_points(It begin, It end, bool ring) {
+	std::vector<std::pair<double,double> > out;
+	std::vector<std::string> keys;
+	for ( It v = begin ; v != end ; ++v ) {
+		double x = CGAL::to_double(v->x()), y = CGAL::to_double(v->y());
+		std::string k = sec_fmt2(x, y);
+		if ( ! keys.empty() && k == keys.back() ) continue;
+		keys.push_back(k);
+		out.push_back(std::make_pair(x, y));
+	}
+	if ( ring ) while ( out.size() >= 2 && keys.front() == keys.back() ) { out.pop_back(); keys.pop_back(); }
+	return out;
+}
+
+/* 座標は %.12g で書く。既定の %g は **有効 6 桁**しかなく、100mm 級の座標では 0.001mm 単位に
+ * 量子化されて隣り合う頂点が同一点に潰れる (実測: 断面 4729 頂点のうち 2242 個が連続重複点に
+ * なっていた)。曲線の細かい起伏が消えたり、CAM 側で自己交差・ゼロ長セグメントとして扱われる。
+ * 12 桁あれば 100mm 座標で 1e-10mm まで表現でき、ファイルサイズも %.17g ほど膨らまない。
+ * (3MF/AMF ライタは元から %.17g = round-trip 桁。mesh3mf.h) */
 static void write_svg(FILE* f, const std::vector<Pwh2>& regs,
                       const std::vector<cgMesh2D::Guide>& guides, const char* unit) {
 	double minx = DBL_MAX, miny = DBL_MAX, maxx = -DBL_MAX, maxy = -DBL_MAX;
@@ -307,8 +342,8 @@ static void write_svg(FILE* f, const std::vector<Pwh2>& regs,
 	const char* su = svg_unit(unit);
 	::fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" ");
 	if ( su[0] )   /* 単位指定あり → 物理サイズ(width/height)を付与(viewBox は無単位のまま) */
-		::fprintf(f, "width=\"%g%s\" height=\"%g%s\" ", maxx - minx, su, maxy - miny, su);
-	::fprintf(f, "viewBox=\"%g %g %g %g\">\n", minx, miny, maxx - minx, maxy - miny);
+		::fprintf(f, "width=\"%.12g%s\" height=\"%.12g%s\" ", maxx - minx, su, maxy - miny, su);
+	::fprintf(f, "viewBox=\"%.12g %.12g %.12g %.12g\">\n", minx, miny, maxx - minx, maxy - miny);
 	for ( std::size_t i = 0 ; i < regs.size() ; ++i ) {
 		::fprintf(f, "  <path fill=\"#cccccc\" stroke=\"#000000\" stroke-width=\"0.01\" fill-rule=\"evenodd\" d=\"");
 		/* 外周 + 穴を 1 つの path に(evenodd で穴が抜ける)。 */
@@ -318,10 +353,11 @@ static void write_svg(FILE* f, const std::vector<Pwh2>& regs,
 			rs.push_back(&(*h));
 		for ( std::size_t ri = 0 ; ri < rs.size() ; ++ri ) {
 			const Poly2& r = *rs[ri];
-			int k = 0;
-			for ( Poly2::Vertex_const_iterator v = r.vertices_begin() ; v != r.vertices_end() ; ++v, ++k )
-				::fprintf(f, "%s%g,%g ", (k == 0 ? "M" : "L"),
-				          CGAL::to_double(v->x()), CGAL::to_double(v->y()));
+			std::vector<std::pair<double,double> > pts =
+			    sec_out_points(r.vertices_begin(), r.vertices_end(), true);
+			for ( std::size_t k = 0 ; k < pts.size() ; ++k )
+				::fprintf(f, "%s" SEC_COORD_FMT "," SEC_COORD_FMT " ",
+				          (k == 0 ? "M" : "L"), pts[k].first, pts[k].second);
 			::fprintf(f, "Z ");
 		}
 		::fprintf(f, "\"/>\n");
@@ -330,12 +366,17 @@ static void write_svg(FILE* f, const std::vector<Pwh2>& regs,
 	for ( std::size_t i = 0 ; i < guides.size() ; ++i ) {
 		if ( guides[i].size() < 2 ) continue;
 		::fprintf(f, "  <polyline fill=\"none\" stroke=\"#0066cc\" stroke-width=\"0.05\" points=\"");
-		for ( std::size_t j = 0 ; j < guides[i].size() ; ++j )
-			::fprintf(f, "%g,%g ", CGAL::to_double(guides[i][j].x()), CGAL::to_double(guides[i][j].y()));
+		{
+			std::vector<std::pair<double,double> > pts =
+			    sec_out_points(guides[i].begin(), guides[i].end(), false);
+			for ( std::size_t j = 0 ; j < pts.size() ; ++j )
+				::fprintf(f, SEC_COORD_FMT "," SEC_COORD_FMT " ", pts[j].first, pts[j].second);
+		}
 		::fprintf(f, "\"/>\n");
 	}
 	::fprintf(f, "</svg>\n");
 }
+/* 座標精度は write_svg と同じ %.12g (上の注記参照)。DXF は CAM へ流す形式なので特に効く。 */
 static void write_dxf(FILE* f, const std::vector<Pwh2>& regs,
                       const std::vector<cgMesh2D::Guide>& guides, const char* unit) {
 	int iu = dxf_insunits(unit);
@@ -349,18 +390,23 @@ static void write_dxf(FILE* f, const std::vector<Pwh2>& regs,
 			rs.push_back(&(*h));
 		for ( std::size_t ri = 0 ; ri < rs.size() ; ++ri ) {
 			const Poly2& r = *rs[ri];
-			::fprintf(f, "0\nLWPOLYLINE\n8\n0\n90\n%d\n70\n1\n", (int)r.size());  /* 70=1 閉じ */
-			for ( Poly2::Vertex_const_iterator v = r.vertices_begin() ; v != r.vertices_end() ; ++v )
-				::fprintf(f, "10\n%g\n20\n%g\n", CGAL::to_double(v->x()), CGAL::to_double(v->y()));
+			std::vector<std::pair<double,double> > pts =
+			    sec_out_points(r.vertices_begin(), r.vertices_end(), true);
+			if ( pts.size() < 3 ) continue;
+			::fprintf(f, "0\nLWPOLYLINE\n8\n0\n90\n%d\n70\n1\n", (int)pts.size());  /* 70=1 閉じ */
+			for ( std::size_t k = 0 ; k < pts.size() ; ++k )
+				::fprintf(f, "10\n" SEC_COORD_FMT "\n20\n" SEC_COORD_FMT "\n", pts[k].first, pts[k].second);
 		}
 	}
 	/* ガイド層: 開いた LWPOLYLINE(70=0)。レイヤ "GUIDES" に分けて寸法線/ガイドと分かるように。 */
 	for ( std::size_t i = 0 ; i < guides.size() ; ++i ) {
 		if ( guides[i].size() < 2 ) continue;
-		::fprintf(f, "0\nLWPOLYLINE\n8\nGUIDES\n90\n%d\n70\n0\n", (int)guides[i].size());  /* 70=0 開 */
-		for ( std::size_t j = 0 ; j < guides[i].size() ; ++j )
-			::fprintf(f, "10\n%g\n20\n%g\n",
-			          CGAL::to_double(guides[i][j].x()), CGAL::to_double(guides[i][j].y()));
+		std::vector<std::pair<double,double> > pts =
+		    sec_out_points(guides[i].begin(), guides[i].end(), false);
+		if ( pts.size() < 2 ) continue;
+		::fprintf(f, "0\nLWPOLYLINE\n8\nGUIDES\n90\n%d\n70\n0\n", (int)pts.size());  /* 70=0 開 */
+		for ( std::size_t j = 0 ; j < pts.size() ; ++j )
+			::fprintf(f, "10\n" SEC_COORD_FMT "\n20\n" SEC_COORD_FMT "\n", pts[j].first, pts[j].second);
 	}
 	::fprintf(f, "0\nENDSEC\n0\nEOF\n");
 }
