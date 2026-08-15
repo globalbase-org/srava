@@ -29,6 +29,7 @@
 #endif
 #include	<unistd.h>
 #include	<string.h>
+#include	<errno.h>
 
 CLASS_TINYSTATE(pig/c++/ptsWireCacheStreamWriter,pig/c++/ptsObject)
 
@@ -66,6 +67,7 @@ protected:
 	int	chunkBufLen;
 
 private:
+	int  write_full(const void *buf, uint32_t len);
 	void write_record(uint16_t type, uint16_t flags,
 	                  const uint8_t *payload, uint32_t len);
 	void flush_chunk();
@@ -100,14 +102,36 @@ ptsWireCacheStreamWriter_::ptsWireCacheStreamWriter_(TS_ARGS0)
 	INSTANCE FUNCTIONS
 ********************************************/
 
+/* 全量書き込み: ::write は要求量より少なく書いて返りうる (EINTR・ENOSPC 部分書き等)。
+ * 途中で欠けるとレコード framing がずれたまま W_END まで書かれ「完成品に見える壊れた
+ * キャッシュ」が焼き付くので、ここで全量保証する。成功=0 / エラー=-1。 */
+int
+ptsWireCacheStreamWriter_::write_full(const void *buf, uint32_t len)
+{
+	const uint8_t *p = (const uint8_t *)buf;
+	while ( len > 0 ) {
+		ssize_t n = ::write(fd, p, len);
+		if ( n < 0 ) {
+			if ( errno == EINTR ) continue;
+			return -1;
+		}
+		if ( n == 0 ) return -1;   /* 前進なし: 無限ループ回避 */
+		p   += n;
+		len -= (uint32_t)n;
+	}
+	return 0;
+}
+
 void
 ptsWireCacheStreamWriter_::write_record(uint16_t type, uint16_t flags,
                                          const uint8_t *payload, uint32_t len)
 {
+	if ( fd < 0 || errCode ) return;   /* 一度失敗したら以降は全部スキップ */
 	uint8_t hdr[WIRE_RECHDR_SIZE];
 	wire_put_rechdr(hdr, type, flags, len);
-	::write(fd, hdr, WIRE_RECHDR_SIZE);
-	if ( payload && len > 0 ) ::write(fd, payload, len);
+	if ( write_full(hdr, WIRE_RECHDR_SIZE) < 0 ) { errCode = -2; return; }
+	if ( payload && len > 0 )
+		if ( write_full(payload, len) < 0 ) errCode = -2;
 }
 
 void
@@ -196,7 +220,7 @@ TS_STATE(INI_ptsObject_START)
 	if ( fd < 0 ) { errCode = -1; return rDO|FIN_START; }
 	uint8_t hdr[WIRE_STREAMHDR_SIZE];
 	wire_put_streamhdr(hdr, osglue_getpid());
-	::write(fd, hdr, WIRE_STREAMHDR_SIZE);
+	if ( write_full(hdr, WIRE_STREAMHDR_SIZE) < 0 ) { errCode = -2; return rDO|FIN_START; }
 	return rDO|INI_ptsWireCacheStreamWriter_INIT;
 }
 TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* 派生がここで D_META 等を書く */
@@ -220,8 +244,13 @@ TS_STATE(FIN_START)
 TS_STATE(FIN_ptsWireCacheStreamWriter_START)
 {
 	if ( fd >= 0 ) {
-		flush_chunk();
-		write_record(W_END, 0, 0, 0);   /* END 番兵 */
+		/* エラー時は W_END を書かない: 番兵なしファイルは reader が既存の仕組み
+		 * (番兵+writer PID 生存確認) で「未完成」と扱う。書いてしまうと壊れた
+		 * キャッシュが完成品に化けて焼き付く。 */
+		if ( errCode == 0 ) {
+			flush_chunk();
+			write_record(W_END, 0, 0, 0);   /* END 番兵 */
+		}
 		::close(fd); fd = -1;
 	}
 	parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)errCode)));
