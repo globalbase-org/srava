@@ -40,7 +40,11 @@
 #include	<stdint.h>
 #include	<unistd.h>
 #include	<dirent.h>
-#include	<strings.h>               /* strcasecmp(SRAVA_CACHE_RETAIN 解釈) */
+#include	<strings.h>
+
+#ifndef SRAVA_AGENT_DEFAULT
+#define SRAVA_AGENT_DEFAULT "/usr/local/bin/srava_agent"   /* install 既定 (CMake で上書き) */
+#endif               /* strcasecmp(SRAVA_CACHE_RETAIN 解釈) */
 #include	<time.h>                  /* time/mktime(キャッシュ保持期日の算出) */
 #include	<sys/stat.h>
 #ifndef _WIN32
@@ -81,7 +85,7 @@ static void compute_cache_fingerprint(char *out, size_t outsz)
 #endif
 	const char *agent = ::getenv("SRAVA_AGENT");
 	if ( agent == 0 )
-		agent = "/usr/local/bin/srava_agent";
+		agent = SRAVA_AGENT_DEFAULT;   /* 起動側 (pigfModuleAgent) と同じ既定を使う */
 	long asz = -1, amt = -1;
 	struct stat st;
 	if ( ::stat(agent, &st) == 0 ) { asz = (long)st.st_size; amt = (long)st.st_mtime; }

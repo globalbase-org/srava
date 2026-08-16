@@ -55,6 +55,9 @@
 #include	<stdint.h>
 #include	<unistd.h>   /* access */
 #include	<string.h>   /* strchr/strlen (rev4 B-2: codec_tags の 4CC 走査) */
+#include	<sys/stat.h>   /* agent バイナリの存在確認 */
+#include	<errno.h>      /* 起動失敗の理由 */
+
 #include	<string>     /* rev4 B-2: 継続スタンプの型名リスト構築 */
 
 CLASS_TINYSTATE(pig/c++/pigfAgent,pig/c++/pigfFunction)
@@ -592,11 +595,28 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 		 *        ② 物理上限が後から増えるわけでもないので AIMD 回復も不合理。
 		 *  メモリ容量等を含めた動的制御は将来ちゃんと整理する。) */
 		if ( gateCredited && ptsApp.is_notNull() ) { ptsApp->gate_release(); gateCredited = 0; }
-		char msg[256];
-		::snprintf(msg, sizeof msg,
-			"fork failed (process limit): PIG_MAX_WORKERS=%d exceeds this machine's fork/process limit. "
-			"Lower PIG_MAX_WORKERS and re-run.",
-			ptsApp.is_notNull() ? ptsApp->gate_cap() : 0);
+		/* ★ 起動失敗は「上限超過」だけではない。agent バイナリが無い/実行できないときも同じ経路に
+		 * 来るので、その場合は上限の話をせずに **実際のコマンドを出す**(誤った原因表示で探し回る
+		 * のを防ぐ。2026-08-15: Windows の install 済み実行でまさにこれを踏んだ)。 */
+		char msg[512];
+		sPtr<stdString> ac = agent_cmd();
+		const char *acs = ( ac.is_notNull() ) ? ac->get_str() : "";
+		const char *p = acs;
+		while ( *p == '#' || *p == ' ' ) ++p;            /* 直接 exec 印と空白を飛ばす */
+		char bin[256]; size_t bi = 0;
+		while ( p[bi] && p[bi] != ' ' && bi + 1 < sizeof bin ) { bin[bi] = p[bi]; ++bi; }
+		bin[bi] = '\0';
+		struct stat abst;
+		if ( bin[0] != '\0' && ::stat(bin, &abst) != 0 )
+			::snprintf(msg, sizeof msg,
+				"cannot start the agent: %s (%s). SRAVA_AGENT で正しいパスを指すか、"
+				"cmake --install で配置してください。",
+				bin, ::strerror(errno));
+		else
+			::snprintf(msg, sizeof msg,
+				"fork failed (process limit): PIG_MAX_WORKERS=%d exceeds this machine's fork/process limit. "
+				"Lower PIG_MAX_WORKERS and re-run.",
+				ptsApp.is_notNull() ? ptsApp->gate_cap() : 0);
 		err = thNEW(pigDataError,(msg, front->get_info(), 1));   /* fatal: 回復不能=即終了 */
 		return rDO|ACT_pigfAgent_ERROR;
 	}
@@ -639,6 +659,24 @@ TS_STATE(ACT_pigfAgent_CACHEREAD)
  *   の状態で行い、yield 再走は write_record 自身の pico(ps_write_record)が安全に再開する。
  *   (ptsWirePipe が read_c を ev 非依存で呼ぶのと同じ作法) */
 
+/* ★ agent が「planner と版が違う」と判断して終了したときの説明文 (2026-08-15 bench 報告)。
+ * planner と agent が別ビルドだと、症状が「両版が持つ素の式が `volume: needs a mesh` で落ちる」
+ * 「引数が増えた op で agent が落ちて planner が待ち続ける」など**原因の見当がつかない形**で出る。
+ * agent は起動時に版を突き合わせて、違えば exit 3 で即終了する (srava_agent_main.cpp)。ここで
+ * それを名指しに変換する。該当しなければ 0。 */
+static int pigf_version_mismatch_msg(sPtr<ptsMediator> med, sPtr<stdString> cmd, char *out, size_t outsz)
+{
+	int st = ( med.is_notNull() ) ? med->child_status() : -1;
+	if ( st < 0 || (st & 0x7f) != 0 ) return 0;        /* 未終了 / シグナル死 */
+	if ( ((st >> 8) & 0xff) != 3 )     return 0;        /* 版不一致の合図 (exit 3) ではない */
+	::snprintf(out, outsz,
+		"planner と agent の版が違います。同じビルドのものを使ってください "
+		"(ビルドツリーで動かすなら SRAVA_AGENT にそのツリーの srava_agent を指定する)。"
+		"起動コマンド: %s",
+		( cmd.is_notNull() ) ? cmd->get_str() : "(不明)");
+	return 1;
+}
+
 TS_STATE(ACT_pigfAgent_HELLO)
 {
 	/* ★ med の終了 (filter が flag に畳んだ TSE_RETURN・§8.3) = handshake 前に閉じた。
@@ -653,6 +691,11 @@ TS_STATE(ACT_pigfAgent_HELLO)
 				"Lower PIG_MAX_WORKERS and re-run.",
 				ptsApp.is_notNull() ? ptsApp->gate_cap() : 0);
 			err = thNEW(pigDataError,(msg, front->get_info(), 1));   /* fatal: 回復不能=即終了 */
+			return rDO|ACT_pigfAgent_ERROR;
+		}
+		char vmsg[400];
+		if ( pigf_version_mismatch_msg(med, agent_cmd(), vmsg, sizeof vmsg) ) {
+			err = thNEW(pigDataError,(vmsg, front->get_info(), 1));   /* fatal: 混在は続行不能 */
 			return rDO|ACT_pigfAgent_ERROR;
 		}
 		err = thNEW(pigDataError,("agent closed before handshake", front->get_info()));
@@ -902,6 +945,11 @@ TS_STATE(ACT_pigfAgent_ABORT)
 		    ? sPtr<pigData>(thNEW(pigDataError,(sPtr<pigData>::d_cast(mediator_error)->error_message(),
 		        front->get_info())))
 		    : sPtr<pigData>(thNEW(pigDataError,("agent closed unexpectedly", front->get_info())));
+		{	/* ★ 版不一致 (agent が exit 3) なら、名指しの説明に差し替える。 */
+			char vmsg[400];
+			if ( pigf_version_mismatch_msg(med, agent_cmd(), vmsg, sizeof vmsg) )
+				err = thNEW(pigDataError,(vmsg, front->get_info(), 1));
+		}
 		return rDO|ACT_pigfAgent_ERROR;   /* ERROR が front/promise を解決する */
 	}
 	/* ★ 未返済の front/promise を**エラーで解決してから**死ぬ (ひさ指摘 2026-08-06)。

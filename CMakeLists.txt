@@ -5,6 +5,24 @@ project(srava LANGUAGES CXX C)   # C は lemon_cpp(パーサ生成器)のビル�
 # レキサ(cgptsLemonParser)が $SRAVA_PATH の後にここを探す → インストール済み stdlib を環境変数なしで引ける。
 # add_compile_definitions は以降に定義する全ターゲットに効く(冒頭に置く)。
 add_compile_definitions(SRAVA_LIBDIR="${CMAKE_INSTALL_PREFIX}/share/srava/lib")
+# モジュールの install 既定 (探索路の最弱・pigModuleLoader.cpp の SRAVA_MODULE_SYSDIR 既定を上書き)。
+# ★ ここを定義していなかったため、Windows では既定の "/usr/local/lib/srava/modules" が
+#   そのまま使われていた。MSYS2 の /usr/local は Win32 から見ると C:/msys64/usr/local なので、
+#   install 済みモジュールを一切見つけられない (`srava --modules` で sysdir が「(無し)」になる)。
+#   prefix から作れば Linux/macOS は従来と同じ文字列になり、Windows だけが正しくなる。
+add_compile_definitions(SRAVA_MODULE_SYSDIR="${CMAKE_INSTALL_PREFIX}/lib/srava/modules")
+# agent バイナリの install 既定 (env SRAVA_AGENT 未指定時の既定)。これも "/usr/local/bin/srava_agent" の
+# ハードコードだったため、Windows では **agent を起動できず** その失敗が「fork 上限超過」という
+# 無関係なエラーになっていた。prefix + 実行ファイル拡張子から作る。
+add_compile_definitions(SRAVA_AGENT_DEFAULT="${CMAKE_INSTALL_PREFIX}/bin/srava_agent${CMAKE_EXECUTABLE_SUFFIX}")
+
+# planner と agent が同じビルドかを突き合わせる識別子。**configure 時に 1 回決める**ので、この
+# ビルドツリーから出る全バイナリ (srava / srava_agent / libpig) が同じ値を持つ。別ツリー・別 install は
+# 別の値になるため、混ぜて実行すると起動時に検出できる (pigBuildStamp.cpp のコメント参照)。
+if(NOT DEFINED SRAVA_BUILD_STAMP)
+  string(TIMESTAMP SRAVA_BUILD_STAMP "%Y%m%dT%H%M%S" UTC)
+endif()
+add_compile_definitions(SRAVA_BUILD_STAMP="${SRAVA_BUILD_STAMP}")
 
 find_package(Threads REQUIRED)
 
@@ -245,6 +263,7 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsAgentStub.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfAgent.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfModuleAgent.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigBuildStamp.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfAgentTest.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/ptsCalcBody.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaBox.cpp
@@ -492,6 +511,7 @@ set(AGENT_HOST_SRC
   src/classes/pig/c++/pigfFunction.cpp
   src/classes/pig/c++/pigfAgent.cpp
   src/classes/pig/c++/pigfModuleAgent.cpp
+  src/classes/pig/c++/pigBuildStamp.cpp
   src/classes/pig/c++/pigfAssign.cpp
   src/classes/pig/c++/pigfOps.cpp
   src/classes/pig/c++/pigfSequence.cpp

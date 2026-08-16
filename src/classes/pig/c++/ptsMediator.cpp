@@ -47,6 +47,8 @@ public:
 	virtual int	enable();
 	/* 起動失敗が非同期に確定したか (External の fork 失敗)。基底は常に 0。 */
 	virtual int	launch_failed();
+	/* 子プロセスが終了していれば waitpid の生 status、まだ/該当なしなら -1。基底は -1。 */
+	virtual int	child_status();
 	/* ★ 演算子名の送信 (2026-08-02 メモ §2.1)。 */
 	virtual int	pl_write_op(sPtr<stdString> s);
 	/* planner→agent: 引数 1 個。PATH/INLINE の弁別 (is_cache) は Mediator 内で行う。 */
@@ -100,6 +102,12 @@ int
 ptsMediator_::launch_failed()
 {
 	return 0;
+}
+
+int
+ptsMediator_::child_status()
+{
+	return -1;   /* 子プロセスを持たない実装 (in-proc thread 等) */
 }
 
 int

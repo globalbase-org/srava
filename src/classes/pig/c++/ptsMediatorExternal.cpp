@@ -61,6 +61,7 @@ public:
 	virtual int	enable();
 	int		enable_body();   /* ACT_START から呼ぶ実体 (thNEW を自分の実行中に行う) */
 	virtual int	launch_failed();  /* 起動失敗が確定したか (pigfAgent がエラー文言を作るのに使う) */
+	virtual int	child_status();   /* 子 agent の waitpid 生 status (終了していれば・未終了は -1) */
 	/* ★ agent (ts2System=子プロセス) の TSE_RETURN を握りつぶして agentReturnFlag に畳む。
 	 * pigfAgent が med に対してやっているのと同じ作法 (§8.3)。「子が終了した」はどの状態に
 	 * 居ても意味を持つ横断的事実なので、イベントではなくフラグで持つ。 */
@@ -91,6 +92,7 @@ protected:
 	 * 送出を FIN_AGENTWAIT の 1 箇所だけにし、送ったら即 FIN_ptsObject_START へ抜けるので
 	 * 構造として 1 回しか通らない。 */
 	int			errCode;  /* TSE_RETURN の msg_int (0=正常 / -1=起動失敗) */
+	int			childStatus;   /* 子 agent の waitpid 生 status (終了していれば) */
 	int			agentReturnFlag;  /* ★ 子プロセス (ts2System) が終了して TSE_RETURN を返したか */
 	int			retPid;
 	/* ★ enable の遅延実行フラグ (#3406, 2026-08-01 ひさ指示)。
@@ -160,6 +162,14 @@ ptsMediatorExternal_::enable()
 	return 0;
 }
 
+/* 子 (agent) が終了していれば waitpid の生 status、まだなら -1。pigfAgent が
+ * 「版が違う」等の具体的なエラー文を作るのに使う。 */
+int
+ptsMediatorExternal_::child_status()
+{
+	return ( agentReturnFlag ) ? childStatus : -1;
+}
+
 int
 ptsMediatorExternal_::launch_failed()
 {
@@ -179,6 +189,7 @@ ptsMediatorExternal_::filter(sPtr<stdEvent> ev)
 		return ev;
 	if ( ev->type == TSE_RETURN && ev->source == agent ) {
 		agentReturnFlag = 1;
+		childStatus = (int)ev->msg_int;   /* waitpid の生 status (版不一致の判定に使う) */
 		wakeup();       /* 置き換えイベントで通知 (握りつぶすと状態関数が走らないため) */
 		return thNULL;  /* TSE_RETURN は握りつぶし */
 	}

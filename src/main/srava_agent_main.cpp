@@ -11,9 +11,11 @@
  *   未解決シンボルをここから解決する (カーネル .so 側はそれらを bundle しない)。 */
 #include	"ts2/c++/tsApplication.h"
 #include	"pig/c++/ptsAgentApplication.h"
+#include	"pig/c++/pigBuildStamp.h"
 
 #include	<signal.h>
 #include	<cstdio>
+#include	<string.h>
 
 int
 main(int argc, char** argv)
@@ -25,6 +27,24 @@ main(int argc, char** argv)
 	if ( argc < 2 ) {
 		std::fprintf(stderr, "usage: %s <module.so> [op file line]\n", argv[0]);
 		return 2;
+	}
+
+	/* ★ 版の突き合わせ (2026-08-15 bench 報告)。planner が `b=<ビルド識別子>` を渡してくるので、
+	 * 自分のものと比べて違えば **ここで落ちる**。混ぜて動かすと、症状が「両版が持つ素の式が
+	 * `volume: needs a mesh` で落ちる」「沈黙してハング (SIGTERM 不応)」など原因の見当がつかない
+	 * 形で出るため、起動直後に潰しておく。b= が無い = 古い planner なので、その場合は素通しする
+	 * (古い planner はこの引数を知らないので、ここで弾いても状況は良くならない)。 */
+	for ( int i = 2 ; i < argc ; ++i ) {
+		if ( ::strncmp(argv[i], "b=", 2) != 0 )
+			continue;
+		if ( ::strcmp(argv[i] + 2, srava_build_stamp()) == 0 )
+			break;   /* 一致 */
+		std::fprintf(stderr,
+			"srava_agent: planner と版が違います (planner=%s / agent=%s)。\n"
+			"  planner と agent は同じビルドのものを使ってください。ビルドツリーで動かすときは\n"
+			"  SRAVA_AGENT にそのツリーの srava_agent を指定します (agent の実体: %s)。\n",
+			argv[i] + 2, srava_build_stamp(), argv[0]);
+		return 3;   /* pigfAgent がこの終了コードを見て「版が違う」と報告する */
 	}
 
 	/* ★ #3427 ③: 旧 file-static (g_agent_so / g_load_failed) は撤去。bootstrap は

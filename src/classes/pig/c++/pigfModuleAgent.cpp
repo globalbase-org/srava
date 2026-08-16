@@ -9,6 +9,7 @@
  * 使い方: pigDataFunction<pigfModuleAgent> ノードを作る(pigDataFunction<pigfAgent> の代わり)。
  */
 #include	"pig/c++/pigfAgent.h"
+#include	"pig/c++/pigBuildStamp.h"   /* planner/agent の版突き合わせ */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"ts2/c++/stdString.h"
@@ -179,11 +180,28 @@ pigfModuleAgent_::agent_cmd()
 	 *   パスを解く。agent バイナリは env SRAVA_AGENT 優先・未定義なら install 先。 */
 	const char *cmd = ::getenv("SRAVA_AGENT");
 	if ( cmd == 0 )
-		cmd = "/usr/local/bin/srava_agent";
+		cmd = SRAVA_AGENT_DEFAULT;   /* install 先 (prefix から生成・Windows は .exe 付き) */
+	/* ★ 版の突き合わせ (2026-08-15): planner と agent が別ビルドだと、症状が「素の式が誤ったエラーで
+	 *   落ちる」「沈黙ハング」など分かりにくい形で出る。自分のビルド識別子を渡し、agent 側で
+	 *   食い違いを検出して即座に終了させる (pigBuildStamp.cpp のコメント参照)。 */
+	const char *bstamp = srava_build_stamp();
 	const char *kname = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 	    ? ptsApp->module_registry->name_of_id(outModule) : "delayed";   /* ★ #3427 ③ */
 	char sopath[512];
-	resolve_module_so(cmd, kname, sopath, sizeof sopath);
+	/* ★ agent へ渡す .so は「**planner が実際に計画に使ったもの**」でなければならない
+	 * (2026-08-16 bench が真因として特定)。従来は resolve_module_so() が **agent バイナリの隣**を
+	 * 見て解決していたため、planner がビルドツリーの cgal.so で計画したのに agent には
+	 * /usr/local の別世代を渡す、という食い違いが起きた。しかも突き合わせが無いので、症状は
+	 * 「引数の数が違う op で agent が落ちて planner が待ち続ける」等の分かりにくい形で出る。
+	 * レジストリは登録時に出所を控えている (#3425①) ので、それをそのまま渡す。 */
+	sopath[0] = '\0';
+	if ( ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
+		const char *dp = ptsApp->module_registry->descriptor_path(outModule);
+		if ( dp != 0 && dp[0] != '\0' )
+			::snprintf(sopath, sizeof sopath, "%s", dp);
+	}
+	if ( sopath[0] == '\0' )   /* 出所不明 (組込登録・診断用のローカル registry 等) は従来の探索 */
+		resolve_module_so(cmd, kname, sopath, sizeof sopath);
 	/* 起動コマンドに op 名と元ソース行番号を **引数として** 付ける(agent は無視するが ps/top -c や
 	 * agentwatch で「どの op がどの行から走っているか」が見えるようになる)。comm は "srava_agent"。
 	 * ts2System は通常文字列を sh -c で起動する。
@@ -225,7 +243,7 @@ pigfModuleAgent_::agent_cmd()
 	/* Windows: ts2System の sh -c 経路が機能しない(native に sh が無い/CreateProcess の解釈)。
 	 * 先頭 '#' で ts2System を **直接 exec(CreateProcess 直起動)** モードにする。以降は空白区切りで
 	 * argv 化され argv[0]=agent パス argv[1]=.so。SRAVA_AGENT/.so が空白を含まない前提。 */
-	::snprintf(buf, sizeof buf, "#%s %s %s %s %d", cmd, sopath, op, fn, line);
+	::snprintf(buf, sizeof buf, "#%s %s %s %s %d b=%s", cmd, sopath, op, fn, line, bstamp);
 #else
 	/* ★ 2026-08-11: POSIX でも **直接 exec を既定** にした (ひさ判断)。
 	 *   利点: sh 孫が消えてプロセス半減 + **ts2System が追う子 = 実 agent 本人**になり、
@@ -236,9 +254,9 @@ pigfModuleAgent_::agent_cmd()
 	{
 		const char *de = ::getenv("SRAVA_DIRECT_EXEC");
 		if ( de != 0 && de[0] == '0' )
-			::snprintf(buf, sizeof buf, "%s %s %s %s %d", cmd, sopath, op, fn, line);
+			::snprintf(buf, sizeof buf, "%s %s %s %s %d b=%s", cmd, sopath, op, fn, line, bstamp);
 		else
-			::snprintf(buf, sizeof buf, "#%s %s %s %s %d", cmd, sopath, op, fn, line);
+			::snprintf(buf, sizeof buf, "#%s %s %s %s %d b=%s", cmd, sopath, op, fn, line, bstamp);
 	}
 #endif
 	return thNEW(stdString,(buf));
