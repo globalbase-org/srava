@@ -13,18 +13,23 @@ host は入力 mesh の**型でディスパッチ**先を決める（例: `union
 | 分類 | モジュール | 既定 |
 |---|---|---|
 | 幾何カーネル | [cgal.so](#cgal) / [manifold.so](#manifold) | **ON** |
-| 幾何カーネル | [nef_snc.so / nef_hybrid.so](#nef) | **ON** |
-| 幾何カーネル | [geogram.so](#geogram) / [cherchi.so](#cherchi) | opt-in |
-| ボリューム | [openvdb.so](#openvdb) | opt-in |
-| ボリューム橋渡し | [openvdb_mf.so / openvdb_cg.so / openvdb_gg.so](#openvdb_bridge) | opt-in |
-| B-rep | [occt.so](#occt) / [occt_mf.so](#occt_mf) | opt-in |
+| 幾何カーネル | [nef_hybrid.so](#nef) | **ON** |
+| 幾何カーネル | [nef_snc.so](#nef) | **OFF**（`-DSRAVA_MODULE_NEF_SNC=ON` で追加） |
+| 幾何カーネル | [geogram.so](#geogram) / [cherchi.so](#cherchi) | **ON** |
+| ボリューム | [openvdb.so](#openvdb) | **ON** |
+| ボリューム橋渡し | [openvdb_mf.so / openvdb_cg.so / openvdb_gg.so](#openvdb_bridge) | **ON**（`openvdb_cg` は CGAL をリンクするので **GPL**・`-DSRAVA_MODULE_OPENVDB_CG_GPL=OFF` で外せる） |
+| B-rep | [occt.so](#occt) / [occt_mf.so](#occt_mf) | **ON**（system の OpenCASCADE が要る） |
 | 解析 | [pipe_proximity.so](#pipe_proximity) | **ON** |
 | デモ／テスト | [demo.so / d2.so / d3.so / d4.so / d5.so](#demo) | **ON** |
 
-opt-in のものは `-DSRAVA_MODULE_<名前>=ON` で有効化する（外部依存を連れてくるため既定は OFF）。
+**2026-08-31 以降、同梱モジュールは既定で全部ビルドされる**（`nef_snc.so` を除く）。
+不要なものは `-DSRAVA_MODULE_<名前>=OFF` で外せる — `geogram` / `openvdb` / `cherchi` は
+FetchContent で取得してビルドするため時間がかかり、`occt` は system の OpenCASCADE を要求する。
+⚠ **Cygwin では TBB / OpenCASCADE / abseil の都合で `geogram` / `openvdb` / `occt` / `cherchi` が
+自動 OFF** になる（`manifold` の op 内並列も同様）。詳細は[Cygwin ビルド手順](cygwin_build.html)。
 
-記述子 ABI・レジストリ・型ディスパッチ・モジュール間の型変換といった**内部設計**は[モジュール設計](srava_module_design.html)
-（`docs/agent_so_design.md` / `docs/cross_module_conversion_design.md`）を参照。
+記述子 ABI・レジストリ・型ディスパッチ・モジュール間の型変換といった**内部設計**は
+[モジュール設計](srava_module_design.html)を参照。
 
 ---
 
@@ -82,7 +87,10 @@ SRAVA_MODULE_ALL=1 srava foo.sra   # 環境変数でも同じことができる
 > `SRAVA_PATH=<ソースツリー>/lib` を明示する。見つからなければ **`include: cannot find` で明示エラー**に
 > なる(探した場所がメッセージに出る)。黙って無視はしない。
 > ⚠ `all.sra` に入るのは cgal / geogram / manifold / occt / openvdb / **nef_hybrid**。
-> `nef_snc.so` は同一プロセスに 2 変種を同居させる特殊用途なので入っていない（要るなら個別に書く）。
+> `nef_snc.so` は同一プロセスに 2 変種を同居させる特殊用途なので入っていない。
+> ⚠ さらに `nef_snc.so` は **既定でビルドもされない**（2026-08-31 以降）。使うには
+> `-DSRAVA_MODULE_NEF_SNC=ON` でビルドし直す必要がある — 入れずに `module("nef_snc.so",{})` を
+> 呼ぶと `cannot open shared object file` になる。
 > ⚠ 橋渡しモジュール（`openvdb_mf` / `openvdb_cg` / `openvdb_gg`）も入っていない。
 > ⚠ サードパーティのプラグイン（`pipe_proximity`）と依存ゼロのトイ実装（`d2`-`d5` / `demo`）も
 > 入っていない。`pipe_scene_adjust` 等が `undefined variable` になるのはこのため（仕様）。

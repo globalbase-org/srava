@@ -8,8 +8,10 @@
 // 旧来 (#3452 以前) の「起動時に全カーネルが使える」挙動に近い状態になる。
 //
 // ★ nef は nef_snc.so / nef_hybrid.so の 2 変種があり、同一プロセスに両方読み込める設計だが
-//   通常用途では衝突を避けるため nef_hybrid.so のみをここに含める。nef_snc.so が必要な場合は
-//   呼び出し側で個別に module("nef_snc.so", {}); を追加すること。
+//   通常用途では衝突を避けるため nef_hybrid.so のみをここに含める。
+//   ⚠ nef_snc.so は **既定でビルドされない** (2026-08-31 以降)。使うには
+//   -DSRAVA_MODULE_NEF_SNC=ON でビルドし直したうえで module("nef_snc.so", {}); を書く。
+//   ビルドされていない状態で呼ぶと「cannot open shared object file」になる。
 //
 // openvdb と cgal/geogram/manifold を跨ぐ橋渡しモジュール (openvdb_cg.so/openvdb_gg.so/
 // openvdb_mf.so) はここには含めない (openvdb_cg は CGAL を巻き込むため GPL になる・

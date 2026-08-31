@@ -62,6 +62,25 @@ struct srava_module_descriptor {
 
     // --- 型と本体クラス (§4・幾何モジュールのみ) ---
     const pigModuleType*       provides; // 階層 × 型名 × 4CC (wire==0 番兵終端)。0 可
+
+    // --- キャッシュキーソルト (#3427) ---
+    const char*       hash_salt;     // 出力キャッシュのキーに混ぜる弁別バイト列 (manifold="\x01MFM")。
+                                     // 基準カーネル cgal は 0 = ソルト無し (既存キーを byte 不変に保つ)
+
+    // --- 項数ポリシー (v9・#3436 P4・§5.2) ---
+    int               arity;         // N' = 1 ノードあたり受け取りたい**最大**項数。0 = 未指定 = 2 (二項)。
+                                     // 実項数 k = min(N', op の sig が申告する N, 群の執行者が許す最大)。
+                                     // module(so,{arity:k}) で上書き可。capability (op ごと・正しさ) と
+                                     // policy (モジュールごと・つまみ) の分離がこの設計の核
+
+    // --- フック (0 可) ---
+    void (*initialize)(void);        // §7。**そのモジュールの最初の agent が起きるときに 1 回だけ**。
+                                     // TBB の global_control のような「プロセスに 1 度だけ」を置く。
+                                     // 呼ぶのは ptsMediator で TS_STATE 内なので排他は不要
+    void (*configure)(sPtr<pigData> opts);  // v10・#3441。module(so,{opts}) のハッシュ全体を受け取る。
+                                     // initialize と違い **opts が設定/更新されるたび**呼ばれる →
+                                     // ★冪等に実装すること。opts は thNULL のことがある
+                                     // (module(so,"on"/"off") 等)。稼働中 agent への再配線はしない
 };
 
 SRAVA_MODULE_EXPORT const srava_module_descriptor* srava_module(void);   // .so の唯一の export
@@ -146,7 +165,7 @@ struct pigOpEntry {
 - fold 形は「**引数のどれか 1 個が主型**」を要求する。これが「cgal は `(mf,mf)` の行を*書かない*」という
   運用（disjoint 原則）を規則にしたもので、`union(mf,mf)` は cgal にマッチせず manifold が取る。
 - **`{…}…` と `[…](N)` は統合できない**。似ているのは構文だけで、分解の可否・主型の有無・昇格を
-  宣言するか・出力が集合の中かが全部違う。詳細は `docs/sig_grammar_design.md`。
+  宣言するか・出力が集合の中かが全部違う。
 
 ### 3.2 何項で投げるか — capability と policy
 
@@ -527,7 +546,7 @@ routing」という型軸ディスパッチ。
   形式のみで書かれ、派生型は on-demand 再生成される。
 
 （in-proc の生産側は set_body と同時に実 cache file も書くので、消費側の変換 reader は in-proc でも file を
-読める。詳細は `cross_module_conversion_design.md`。）
+読める。）
 
 ---
 
@@ -689,6 +708,9 @@ extern const srava_module_descriptor helatsAgent_descriptor = {
     &mk_helatsAgent, (unsigned)(EXEC_THREAD|EXEC_PROCESS), EXEC_THREAD,
     HELLO_OPS, HELLO_N_OPS, 0, 0,                        // ops / import_exts / export_exts
     0,                                                  // provides (値のみ)
+    0,                                                  // hash_salt (値だけなので不要)
+    0,                                                  // arity (0 = 未指定 = 二項)
+    0, 0,                                               // initialize / configure (使わない)
 };
 static const int helatsAgent_desc_registered =
     (pigModuleRegistry::register_descriptor(&helatsAgent_descriptor), 0);
@@ -714,5 +736,4 @@ wire-cache stream の reader/writer を足す（`modules/d3/` が最小の mesh 
 - [srava 言語リファレンス §10 幾何カーネル — 型ディスパッチと型変換](srava_language_reference.html#kernel) —
   幾何カーネル / 型 / モジュールの語法、`load` / `module` の言語仕様、型ディスパッチと `cast`。
 - [srava 関数リファレンス](srava_function_reference.html) — 組込 op と各モジュール op の一覧・引数仕様。
-- `docs/cross_module_conversion_design.md` — モジュール間の型変換（`get_body(型名)` / `reader_for` /
-  per-type single-flight）の詳細設計。
+
