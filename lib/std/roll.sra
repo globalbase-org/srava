@@ -8,9 +8,9 @@
 //   無い場合は -DSRAVA_MODULE_PIPEPROX=ON でビルドし直す(既定 ON)。
 //
 // ★推奨 params(知らないと事故る 2 つ):
-//   parallel: 1   … 事実上必須。0 だと 1 solve が ~150 秒かかり、実用サイズで 1 時間級になる。
+//   parallel: 1   … 事実上必須。0 だと 1 solve が桁違いに遅く、実用サイズでは現実的な時間で終わらない。
 //   wSpace:   0.1 … 区間長の正則化。入れないと自由尾の制御点が 1 点に寄り、gap が 1mm 級まで潰れる。
-//   例: {maxIter:100, threads:21, parallel:1, wSpace:0.1}
+//   例: {maxIter:100, threads:<コア数>, parallel:1, wSpace:0.1}
 //
 // 公開関数:
 //   roll_initial(core, pipe, d, N, L, params)                       → {ctrl, radius, movable, raw, pp0}

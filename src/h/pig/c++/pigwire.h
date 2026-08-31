@@ -31,6 +31,16 @@ enum {
   A_BYE        = 8,   /* 正常終了通知(END_NORMAL の検知点) */
   C_ARG_DATA   = 9,   /* ★ Internal 専用(ワイヤに乗らない): 引数 pigData 直渡し(#3406 4.3。
                        *   PATH/INLINE の弁別が消えた形。ptsMediatorPacket の type にのみ現れる) */
+  /* ★ #3419 で L_THR 配布用に導入 → §12.8 で撤去 → **#3441 でモジュール opts 配布用に再定義**
+   *   (ひさ判断 2026-08-26)。単一コードベース内の再構築であって版間互換の話ではないので、
+   *   番号の使い回しに実害は無い (旧「再利用しない」注記は「配線中の版が混在する」場面を
+   *   想定したもので、ここでは該当しない)。
+   *   payload = module(so,{opts}) のハッシュ**全体**の srava 文法テキスト
+   *   (pigData::serialize() の出力)。**起動時に 1 回だけ送る** — 稼働中の agent への
+   *   再配線はしない (旧 C_ENV も実装上はこの形でしか機能していなかった。§13.3 参照)。
+   *   agent 側は pig_value_parse() で戻し、そのモジュールの descriptor->configure() を呼ぶ
+   *   (docs/srava_load_control_design.md §17.6・module_design.md)。 */
+  C_ENV        = 10,
 
   /* データプレーン (pigCacheStream: キャッシュファイル本体) */
   D_META       = 64,  /* メタ(repr_type で分岐) */
@@ -48,10 +58,14 @@ static inline int wire_tag_is_text(const unsigned char t[4]) {
 
 /* マジック: バイト列で 'P','W','I','G'。LE u32 で 0x47495750 */
 static const uint32_t WIRE_MAGIC   = 0x47495750u;
-static const uint16_t WIRE_VERSION = 1;
+/* ★ v2 (2026-08-26): streamhdr に **writer プロセスの起動時刻** を追加 (12 → 20 バイト)。
+ *   pid だけでは同一プロセスを名指せない (OS が使い回す) ため、書きかけキャッシュの writer 判定が
+ *   一周後に誤爆し、誰も書かないファイルを永久に待つ = 沈黙ハングになりうる。→ [[osglue_pid_alive_as]]
+ *   ⚠ 版を上げるので**旧キャッシュは版ゲート/死体判定で捨てられる** (意図どおり・再計算される)。 */
+static const uint16_t WIRE_VERSION = 2;
 
 enum {
-  WIRE_STREAMHDR_SIZE = 12, /* magic4 ver2 endian1 hflags1 pid4 */
+  WIRE_STREAMHDR_SIZE = 20, /* magic4 ver2 endian1 hflags1 pid4 start8 */
   WIRE_RECHDR_SIZE    = 8,  /* len4 type2 rflags2            */
   WIRE_VARINT_MAX     = 10  /* 64bit LEB128 の最大バイト数    */
 };
@@ -120,7 +134,7 @@ static inline void wire_get_rechdr(const uint8_t *s, uint16_t *type,
 
 /* ---- ストリームヘッダ ---- */
 
-static inline void wire_put_streamhdr(uint8_t *d, uint32_t pid)
+static inline void wire_put_streamhdr(uint8_t *d, uint32_t pid, uint64_t start)
 {
   d[0]  = (uint8_t)WIRE_MAGIC;        d[1]  = (uint8_t)(WIRE_MAGIC >> 8);
   d[2]  = (uint8_t)(WIRE_MAGIC >> 16);d[3]  = (uint8_t)(WIRE_MAGIC >> 24);
@@ -129,10 +143,13 @@ static inline void wire_put_streamhdr(uint8_t *d, uint32_t pid)
   d[7]  = 0;                          /* hflags 予約 */
   d[8]  = (uint8_t)pid;               d[9]  = (uint8_t)(pid >> 8);
   d[10] = (uint8_t)(pid >> 16);       d[11] = (uint8_t)(pid >> 24);
+  /* ★ writer プロセスの起動時刻 (不透明値・0 = 取れなかった)。pid と対で同一性を決める。 */
+  for (int i = 0; i < 8; ++i) d[12 + i] = (uint8_t)(start >> (8 * i));
 }
 
-/* magic/version/endian を検証。0=ok, <0=理由。pid!=NULL なら *pid に格納 */
-static inline int wire_check_streamhdr(const uint8_t *s, uint32_t *pid)
+/* magic/version/endian を検証。0=ok, <0=理由。pid/start != NULL ならそれぞれ格納。
+ * ★ start は writer プロセスの起動時刻 (pid と対で同一性を決める・0 = 不明)。 */
+static inline int wire_check_streamhdr(const uint8_t *s, uint32_t *pid, uint64_t *start = 0)
 {
   uint32_t magic = (uint32_t)s[0]        | ((uint32_t)s[1] << 8)
                  | ((uint32_t)s[2] << 16)| ((uint32_t)s[3] << 24);
@@ -143,6 +160,11 @@ static inline int wire_check_streamhdr(const uint8_t *s, uint32_t *pid)
   if (pid)
     *pid = (uint32_t)s[8]         | ((uint32_t)s[9] << 8)
          | ((uint32_t)s[10] << 16)| ((uint32_t)s[11] << 24);
+  if (start) {
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= ((uint64_t)s[12 + i]) << (8 * i);
+    *start = v;
+  }
   return WIRE_OK;
 }
 

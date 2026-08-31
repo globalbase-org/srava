@@ -11,8 +11,10 @@
  *     D_META 書込済 = 下流 attach 可) で cache を CV_VALID にし、starter へ TSE_ASSERT を転送
  *     (agent はこれで A_SAVE_BEGIN を先行送信 = read-while-write 維持)。TSE_RETURN で FIN。
  *   MODE_LOAD (get_body 起動): ::access で存在検査 → 無ければ CV_INVALID で FIN (get_body は
- *     再評価で thNULL = invalid を返す)。有ればヘッダの **先頭 D_META 4CC** で reader を選ぶ
- *     (pigCacheCodec::reader_for_tag。未登録タグ = コーデック外の既定 = "TEXT" → ReaderText)。
+ *     再評価で thNULL = invalid を返す)。有ればヘッダの **先頭 D_META 4CC と要求型**で reader を
+ *     選ぶ (pigModuleRegistry::reader_for(tag, type)。値キャッシュ "TEXT" は既定分岐で ReaderText)。
+ *     ★ 2026-08-19: 型を指定しない選択 (旧 reader_for_tag) は撤去した。同じ形式を複数モジュールが
+ *     読める以上「型を言わずに reader を 1 つ選ぶ」のは先勝ちの当てずっぽうになるため。
  *     reader の TSE_RETURN で本文を cache へ。decode 失敗 (thNULL) は CV_INVALID。
  *     **D_TEXT の中身は素のテキストではなく pigData のコード** (= serialize 出力) なので、
  *     ReaderText の後に値パーサを通して pigData に戻す (LOADTEXT → LOADPARSE。2026-07-31 メモ 3.2)。
@@ -46,13 +48,21 @@ class TS_THISCLASS : public TS_BASECLASS {
 public:
 	/* parent = starter (set_body/get_body を呼んだ TS_STATE の tinyState)。
 	 * cache = 対象 pigDataCache。mode = PDC_MODE_SAVE / PDC_MODE_LOAD / PDC_MODE_LOAD_CONV。
-	 * target_type = LOAD_CONV のとき「どの型へ変換読みするか」(この helper が不変に保持・共有 convType 廃止)。
-	 *   SAVE/LOAD では thNULL。 */
+	 * target_type = この helper が扱う型 (不変に保持・共有 convType 廃止)。
+	 * wire = 配線された本体クラス (0 可)。非 0 なら LOAD の reader をその階層に固定する。
+	 *   ★ 2026-08-12 の再設計以降、**全モードで非 null** — SAVE は writer の型 (pigData.cpp の
+	 *   set_body)、LOAD/LOAD_CONV は読む型 (同 get_body) が渡る。
+	 *   ⚠ 旧コメントは「SAVE/LOAD では thNULL」としていたが**誤り**。FIN_START の conv_finish は
+	 *   `target_type != thNULL` で守られているため、これを信じると「SAVE/LOAD では conv_finish が
+	 *   呼ばれない = pigDataCache のリーク源」という誤った結論に見える (2026-08-22 に実際に
+	 *   一度そう読んだ)。converted[i].helper ⇄ ptsDataCache_.cache の循環は FIN_START でのみ
+	 *   切れるので、この保証は効いている。 */
 	ptsDataCache_(
 		sPtr<tinyState> parent,
 		sPtr<pigDataCache> cache,
 		int mode,
-		sPtr<stdString> target_type);
+		sPtr<stdString> target_type,
+		const pigWireClass* wire);
 
 	sRptr<tinyState,tinyState>		parent;
 protected:
@@ -108,7 +118,7 @@ TS_STATE(INI_ptsObject_START)
 		if ( wi >= 0 ) b = cache->converted[wi].body;
 		/* ★ #3427 ③: codec 表は app 所有レジストリから (pts 系なので ptsApp 経由)。 */
 		pigCacheWriterFn w = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
-		    ? ptsApp->module_registry->codecs.writer_for_body(b) : 0;
+		    ? ptsApp->module_registry->writer_for_body(b) : 0;
 		if ( w != 0 )
 			worker = w(ifThis, cache->path, b);
 		else
@@ -142,8 +152,16 @@ TS_STATE(INI_ptsObject_START)
 			 * (「D_META = mesh」の誤分類が 2026-08-12 の値 warm 読み全滅の原因)。
 			 * 型付き: file 4CC + 要求型で reader_for を引く (native も conversion もこれで一意)。 */
 			if ( ! wire_tag_is_text(tag) ) {
-				pigCacheReaderFn r = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
-				    ? ptsApp->module_registry->codecs.reader_for(tag, tt) : 0;
+				/* ★ 2026-08-28 (ABI v12): 配線が来ていれば **そのクラスの reader** を直に起こす。
+				 *   型名で codec 表を引き直さない — 「この 4CC をこの階層として読む」は
+				 *   既に create_for_meta が受理判定済みで、reader は階層に 1 本しかない。
+				 *   配線が無い経路 (値キャッシュ・型名版 get_body) は従来どおり reader_for。 */
+				/* ★ 2026-08-28 (ABI v12): reader は **配線された階層のもの**を直に起こす。
+				 *   型名で codec 表を引き直さない (旧 reader_for) — 「この 4CC をこの階層として
+				 *   読めるか」は呼び側の create_for_meta が既に判定しており、reader は階層に 1 本
+				 *   しかないため、引き直しても同じ答えにしかならなかった。
+				 *   配線が無いのは値経路だけで、そちらは下の wire_tag_is_text 分岐が受ける。 */
+				pigCacheReaderFn r = ( wire != 0 ) ? wire->mkReader : 0;
 				if ( r != 0 ) {
 					worker = r(ifThis, cache->path);
 					return ACT_ptsDataCache_LOAD;   /* reader の TSE_RETURN 待ち → rDO なし */
@@ -261,9 +279,10 @@ TS_STATE(FIN_START)
  * (module_registry->set_pdc_helper) に登録する。pigDataCache 側は pig_current_registry()
  * (TLS) 経由で引く = プロセス可変 static ゼロ。 ---- */
 static sPtr<tinyState>
-mk_ptsDataCache(sPtr<tinyState> starter, sPtr<pigDataCache> c, int mode, sPtr<stdString> target_type)
+mk_ptsDataCache(sPtr<tinyState> starter, sPtr<pigDataCache> c, int mode, sPtr<stdString> target_type,
+                const pigWireClass* wire)
 {
-	return sPtr<tinyState>::d_cast(thNEW(ptsDataCache,(starter, c, mode, target_type)));
+	return sPtr<tinyState>::d_cast(thNEW(ptsDataCache,(starter, c, mode, target_type, wire)));
 }
 pigDataCacheHelperFn
 ptsDataCache_helper()

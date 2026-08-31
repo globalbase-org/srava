@@ -177,7 +177,8 @@ TS_STATE(ACT_T1A)
 	r1 = node1->compact();   /* 初回 yield → agent 起動 → front=pair 確定で再開 */
 	int isPair = sPtr<pigDataPair>::d_cast(r1).is_notNull();
 	CHECK("T1 box miss returns pair", isPair &&
-	      pig_is_delayed(r1));   /* car はカーネル名 (cg agent 経由なので "cgal"・2026-07-29 メモ 1.) */
+	      pig_is_delayed(r1));   /* car は **型スタンプ** ("cg-mesh3d")。2026-08-19 の型スタンプ化で
+	                              * カーネル名 ("cgal") から変わった (旧コメントは 2026-07-29 のもの)。 */
 	return rDO|ACT_T1B;
 }
 TS_STATE(ACT_T1B)

@@ -290,7 +290,7 @@ static int dxf_insunits(const char* u) {
 
 /* ---- 出力座標のヘルパ ----
  * 断面の頂点は厳密有理数なので、**厳密には異なるのに double では同じ**点が隣り合うことがある
- * (corefinement 由来のごく近接した頂点。実測: 1 断面で 2474 組)。そのまま書くと SVG/DXF に
+ * (corefinement 由来のごく近接した頂点。1 断面で数百4 組)。そのまま書くと SVG/DXF に
  * ゼロ長セグメントとして残り、CAM 側で自己交差やゼロ長要素として扱われる。書き出す値そのもの
  * (= %.12g に整形した文字列)で連続重複を落とす。厳密データはキャッシュ側にそのまま残る。 */
 #define SEC_COORD_FMT "%.12g"
@@ -316,7 +316,7 @@ static std::vector<std::pair<double,double> > sec_out_points(It begin, It end, b
 }
 
 /* 座標は %.12g で書く。既定の %g は **有効 6 桁**しかなく、100mm 級の座標では 0.001mm 単位に
- * 量子化されて隣り合う頂点が同一点に潰れる (実測: 断面 4729 頂点のうち 2242 個が連続重複点に
+ * 量子化されて隣り合う頂点が同一点に潰れる (実測: 断面の頂点のうち相当数が連続重複点に
  * なっていた)。曲線の細かい起伏が消えたり、CAM 側で自己交差・ゼロ長セグメントとして扱われる。
  * 12 桁あれば 100mm 座標で 1e-10mm まで表現でき、ファイルサイズも %.17g ほど膨らまない。
  * (3MF/AMF ライタは元から %.17g = round-trip 桁。mesh3mf.h) */
@@ -410,6 +410,26 @@ static void write_dxf(FILE* f, const std::vector<Pwh2>& regs,
 	}
 	::fprintf(f, "0\nENDSEC\n0\nEOF\n");
 }
+/* ---- 計測: 頂点数 / 面数 (#3443) ----
+ * 2D は「面」を持たないので op_nfaces()=0。頂点数は外周 + 穴の点の総数 (全リージョン合計)。
+ * ★ガイド (開ポリライン) の点も数える (line() で作った寸法線などが空にならないように)。 */
+int
+cgMesh2D::op_nverts()
+{
+	int n = 0;
+	for ( size_t i = 0 ; i < regions_.size() ; ++i ) {
+		n += (int)regions_[i].outer_boundary().size();
+		for ( Pwh_2::Hole_const_iterator h = regions_[i].holes_begin() ;
+		      h != regions_[i].holes_end() ; ++h )
+			n += (int)h->size();
+	}
+	for ( size_t i = 0 ; i < guides_.size() ; ++i )
+		n += (int)guides_[i].size();
+	return n;
+}
+
+int cgMesh2D::op_nfaces() { return 0; }
+
 /* ---- 計測: 囲み面積(各 Pwh の 外周面積 − 穴面積 の総和)。Polygon::area は符号付き ---- */
 double
 cgMesh2D::op_area()

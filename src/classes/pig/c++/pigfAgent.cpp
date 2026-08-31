@@ -7,7 +7,7 @@
  *      同一演算・同一引数の結果は常に同じ前提(ハッシュは「何の演算結果か」を表す)。
  *   2. 遅延引数(= 上流 pigfAgent の継続 pair)が無く、キャッシュファイルが既にあれば
  *      **agent を起動せず短絡**(データキャッシュは本文を読んで返す)。
- *   3. キャッシュミス/遅延引数ありなら、まず **3 段継続** ("delayed" . beginPromise) を front へ即セットして
+ *   3. キャッシュミス/遅延引数ありなら、まず **3 段継続** ("delayed" . beginPromise) を _front へ即セットして
  *      呼び元を解放(非ブロッキング)。C_ARG_END 送信(=計算開始=admitted)で beginPromise→("begin".promise)、
  *      A_SAVE_BEGIN(保存開始)で promise→結果(mesh は pigDataCache・値は pigDataString)を解決。
  *      親は cdr()->car()=="begin" で「子が計算を始めた」を、cdr()->cdr() で結果を取る。
@@ -29,7 +29,7 @@
  *   キャッシュ dir は pigfFunction env の "CACHE_DIR" を参照(getenv 直読みしない)。
  *
  * 割り切り(TODO):
- *   - op 名は派生固定(front 由来にするのは別途)。キャッシュ本文の型判定(データ/mesh)は
+ *   - op 名は派生固定(_front 由来にするのは別途)。キャッシュ本文の型判定(データ/mesh)は
  *     「A_SAVE_BEGIN payload の有無」で代用。HIT 読みは常にデータキャッシュ(D_TEXT)前提。
  *   - pigDataCache の global dedup list は未実装。
  */
@@ -42,7 +42,6 @@
 #include	"pig/c++/pigExecBackend.h"        /* 起動方式→Mediator 生成 (具体クラス名を隠す・Phase1-3) */
 #include	"pig/c++/pigModuleRegistry.h"     /* K4: カーネル別キャッシュキーソルト */
 #include	"pig/c++/pigModule.h"             /* rev4 B-2: descriptor.codec_tags (継続の型リスト構築) */
-#include	"pig/c++/pigTypeRegistry.h"       /* rev4 B-2: 4CC→型名 (継続スタンプ) */
 #include	"pig/c++/ptsMediatorPacket.h"     /* Internal 経路の pigData 直渡しパケット (4.3) */
 #include	"ts2/c++/ts2Parallel.h"
 #include	"ts2/c++/stdEvent.h"
@@ -64,6 +63,7 @@ CLASS_TINYSTATE(pig/c++/pigfAgent,pig/c++/pigfFunction)
 
 /* 基底: 演算子固有の短絡なし(派生 = 言語層が override)。0=非該当。 */
 int pigfAgent_::try_shortcircuit() { return 0; }
+int pigfAgent_::try_decompose()    { return 0; }
 
 /* 基底: 値パーサ無し(言語パーサは srava 固有)。thNULL = 生テキストを pigDataString として返す。 */
 
@@ -83,6 +83,7 @@ pigfAgent_::agent_module_name()
 	return thNULL;
 }
 
+
 /* 基底: カーネル非依存(単一 agent)。MODULE_NONE = 継続にスタンプせず・ハッシュにも混ぜない
  * (= 従来の振る舞いと完全に同一)。カーネルを持つ言語層(pigfModuleAgent)が override する。 */
 int
@@ -91,44 +92,34 @@ pigfAgent_::decide_out_module()
 	return MODULE_NONE;
 }
 
-/* 引数 1 個のカーネルを非ブロッキングに読む(言語非依存の補助・#3404)。
- *   - 継続 ("delayed".promise): pair(compact で非ブロッキングに取れる)のスタンプ値。
- *   - HIT キャッシュ: pigDataCache がファイル先頭 D_META タグから読む。
- *   - それ以外(スカラ/点/配列などの値): MODULE_NONE(カーネル中立)。 */
-/* ★ rev4 Phase B-2: カーネル id → そのカーネルがサポートする **全型名の CSV** ("cg-mesh3d,cg-cross2d")。
- *   継続スタンプに載せる (純粋型スタンプ)。出力型がまだ絞れない producer は「そのカーネルの全型」を
- *   スタンプする = 「カーネル水準の型不明」を型リストで表現 (ひさ設計)。B-2b で注釈済み op は
- *   decide_executor が絞った単一出力型に置き換える。descriptor.codec_tags の各 4CC を type_of_tag で写す。
- *   空 (型を持たないカーネル) なら false = 呼び元がカーネル名スタンプへフォールバック。 */
-static bool
-pigf_module_type_list(sPtr<pigModuleRegistry> reg, int module, std::string& out)
+/* ★ 2026-08-19: この agent が産む **型スタンプ** を出力キャッシュのハンドルへ載せる。
+ *   値は decide_out_module (型ディスパッチ) が sig から決めた出力型そのもので、
+ *   **継続 pair の car に載せる文字列と同一**。同じ文字列を載せることで、下流から見た型の
+ *   見え方が「継続で受け取ったか / キャッシュで受け取ったか」に依存しなくなる
+ *   = cold と warm で routing が変わらない。
+ *   ★ 幾何型でない出力も型を持つ ("value" = 値キャッシュ / "ref" = D_REF レコード。どちらも
+ *     組込モジュール "pig" が申告する型) ので、「型の無い出力」は存在しない。
+ *   ★ outCache を作る箇所すべてから呼ぶ (ACT_START / 遅延引数あり経路 / A_SAVE_BEGIN の保険)。
+ *     継続が解決した後は下流も生のハンドルを見るため、1 箇所だけでは漏れる。 */
+void
+pigfAgent_::stamp_out_cache()
 {
-	if ( reg == thNULL ) return false;
-	const srava_module_descriptor *d = reg->descriptor(module);
-	if ( d == 0 || d->codec_tags == 0 ) return false;
-	for ( const char *p = d->codec_tags ; *p ; ) {
-		const char *c = ::strchr(p, ',');
-		size_t seg = c ? (size_t)(c - p) : ::strlen(p);
-		if ( seg == 4 ) {
-			const char *tn = reg->types.type_of_tag((const unsigned char*)p);
-			if ( tn != 0 ) { if ( ! out.empty() ) out += ","; out += tn; }
-		}
-		if ( ! c ) break;
-		p = c + 1;
-	}
-	return ! out.empty();
+	if ( outCache == thNULL || outTypeList == thNULL )
+		return;
+	outCache->set_type_stamp(thNEW(stdString,(outTypeList->get_str())));
 }
+
 
 /* ★ P2e (⑤ 型軸化): 旧 arg_module (入力の「所属 module」を継続スタンプ/HIT キャッシュから引く) は撤去。
  *   routing は入力の **型** (arg_type_set) を読み、型から executor を決める (decide_executor / 型不一致時は
  *   module_of_type で「型を産む home module」へ配送・pigfModuleAgent)。「値に module が属す」概念は消えた。 */
 
-/* 演算子名は front(ノード)由来(C_OP + 結果ハッシュ + cgatsAgent の dispatch キー)。
+/* 演算子名は _front(ノード)由来(C_OP + 結果ハッシュ + cgatsAgent の dispatch キー)。
  * 未設定なら thNULL(空扱い)。agent 種別ではなくノード演算ごとに決まるので派生で固定しない。 */
 sPtr<stdString>
 pigfAgent_::agent_op_name()
 {
-	return front->get_op_name();
+	return _front->get_op_name();
 }
 
 #if 0
@@ -142,6 +133,16 @@ public:
 		sPtr<pigDataOperator> _front);
 
 	sRptr<ptsObject,tinyState>		parent;
+	/* ★ #3419 (2026-08-23) ゲート入場順序: ワーカーゲートの待ち行列を並べ替えるキー。
+	 * **値が小さいほど先に入場**する (tinyState の規約。既定 TS_DEFAULT_PRIORITY=10000)。
+	 * ここでは「生成通し番号の負値」を返す = **後から生まれた agent ほど先に入場** (LIFO 近似)。
+	 * DAG を幅優先に広げず深さ優先寄りに掘るので、同時に生きる中間結果が減る、というのが狙い。
+	 * 有効になるのは gateSem->enablePriority=1 のとき (SRAVA_GATE_ORDER=lifo) だけで、
+	 * 既定 (先着順) では参照されない = この override を置いても既定の挙動は変わらない。
+	 * ⚠⚠ この宣言は **public セクションに置くこと**。protected だと tscpp2 が interface 側に
+	 *   override を生成せず、glue が impl->tinyState_::priority() を **修飾付き(非仮想)** で呼ぶため、
+	 *   エラーも警告も出ないまま既定値 10000 が返り続ける (tinyState example/semaphore-priority-test)。 */
+	virtual int	priority(sPtr<tinyState> caller=thNULL);
 protected:
 	/* 起動する agent コマンド。pigfAgent は piggybackTurtle 汎用で特定 agent を知らない
 	 * → 基底は thNULL(未設定=エラー)。派生クラス(例 pigfModuleAgent)が override して供給する。
@@ -157,17 +158,24 @@ protected:
 	/* ★ pig / 言語層(srava)の境界フック。pigfAgent は piggybackTurtle 汎用で特定演算子も特定言語の
 	 * 値構文も知らない。言語固有の知識は派生(pigfModuleAgent)が override して供給する:
 	 *   try_shortcircuit: 演算子固有の代数的短絡(srava の単位元 {} 等で CGAL を呼ばず畳む)。
-	 *     戻り 0=非該当(agent 起動へ) / 1=front に結果セット済み(FIN) / 2=err セット済み(ERROR)。基底=0。
+	 *     戻り 0=非該当(agent 起動へ) / 1=_front に結果セット済み(FIN) / 2=err セット済み(ERROR)。基底=0。
 	 * ★ 値テキスト → pigData の復元フック (旧 make_value_parser / parse_value_text) は廃止した
 	 *   (§3.1/§8.1)。agent の結果は ptsMediatorExternal が、キャッシュ本文は pigDataCache が
 	 *   それぞれ pigValueParser レジストリ経由で戻すので、pigfAgent は値構文を一切知らない。 */
 	virtual int		try_shortcircuit();
+	/* ★ #3436 P4: n 項ノードの評価時分解 (docs/sig_grammar_design.md §5)。戻り値の約束は
+	 *   try_shortcircuit と同じ (0=非該当 / 1=_front に結果セット済み / 2=err セット済み)。
+	 *   基底は 0 (分解しない)。pigfModuleAgent が override。 */
+	virtual int		try_decompose();
 	/* ★ med の TSE_RETURN を握りつぶして mediator_return_flag に畳む (§8.3)。 */
 	virtual sPtr<stdEvent>	filter(sPtr<stdEvent> ev);
 	/* ★ カーネル選択フック(#3404): この agent 起動で使う幾何カーネル(MODULE_CGAL/MANIFOLD)を
 	 *   入力引数の型と DEFAULT_OUTPUT から決める。基底=MODULE_NONE(カーネル非依存 = 従来の単一 agent)。
 	 *   pigfModuleAgent が override(入力伝播 + DEFAULT_OUTPUT)。ACT_START で 1 度呼ばれ outModule に memo。 */
 	virtual int		decide_out_module();
+	/* ★ 2026-08-19: 出力キャッシュハンドルへ型スタンプを載せる (継続 pair と同じ文字列)。
+	 *   outCache を作る箇所すべてから呼ぶ。 */
+	void			stamp_out_cache();
 	/* ★ P2e: 旧 arg_module (入力の所属 module を引く補助) は撤去。routing は入力の型 (arg_type_set) を読む。 */
 	/* planner↔agent 通信は Mediator に集約 (#3406)。旧 agent/pipe/rfd/wfd の 4 部材は
 	 * ptsMediatorExternal が内包する。pigfAgent は種別 (process/thread) を知らない。 */
@@ -185,9 +193,26 @@ protected:
 	sPtr<pigDataCache>	outCache;
 	pHashKeyType		hashVal;
 	int			sendIdx;
-	int			promiseLive;     /* front=("delayed".promise) を返済み(継続あり) */
+	int			promiseLive;     /* _front=("delayed".promise) を返済み(継続あり) */
 	int			promiseResolved; /* promise->set_result 済み(= 結果が呼び元へ渡った) */
+	uint32_t		loadPid;         /* ★ #3419: agent プロセスの pid (in-proc は 0) */
+	int			inflightClaimed; /* ★ #3419: 自分が in-flight 台帳へ登録した (FIN で外す) */
 	int			gateCredited;    /* ワーカーゲートの credit を取得済み(FIN で gate_release。取得/解放を 1:1 に保つ) */
+	int			gateSeq;         /* ★ #3419: agent の生成通し番号(INI で ptsApp から 1 度だけ貰う)。priority() の元 */
+	/* ★ #3419 §16.13 (ひさ指摘 2026-08-24): **ゲートを取る位置**。
+	 * 0 = first: 「1 引数が完了 + 残りが begin」で入場 (従来)。上流の計算とストリーム読みを重ねられる
+	 *            → **外部プロセス実行 (CGAL 等) ではこれが正しい**: ディスクから読む時間を隠せる。
+	 * 1 = all  : **全引数が解決してから**入場。⚠ in-proc は重ねる相手が無い (データはメモリ上) ので、
+	 *            従来だと **枠を握ったまま残りの上流を待つ agent** が生まれ、cap が小さいと実効枠が減る。
+	 * 実体は「最初の 1 つで par を cancel するかどうか」だけ (下の lambda 参照)。 */
+	int			gateWhenAll;
+	/* ★ #3419 §16.14: **枠を握ったまま入力を待っていた時間** の計測 (ひさ依頼 2026-08-24)。
+	 * gate_get() の時刻を控え、ACT_SEND で par が返った時点 (= **全引数が解決**) との差を取る。
+	 * ⚠ この差には agent の起動 (fork / thread 生成) と C_OP 送信も含まれる。in-proc では小さいが、
+	 *   process 実行では fork のぶん過大に出る。「純粋な待ち」ではなく「握ってから使えるまで」。
+	 * gateHadDelay=0 (遅延引数なしの葉) は待ちようがないので集計から外す。 */
+	long long		gateT0;
+	int			gateHadDelay;
 	int			forkFails;       /* fork EAGAIN の連続失敗回数(上限超でようやくエラー) */
 	int			outModule;       /* ★ この agent が起動するカーネル(#3404)。ACT_START で decide_out_module() が設定 */
 	/* ★ rev4 Phase B-2b: この agent の **出力型リスト** (CSV)。型ディスパッチ (decide_executor) が絞った
@@ -202,7 +227,6 @@ protected:
 private:
 	pHashKeyType    compute_arg_hash();
 	sPtr<stdString> make_cache_path(pHashKeyType h);
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -228,7 +252,6 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     hashVal         = 0;
     mediator_return_flag = 0;
     sendIdx         = 0;
@@ -236,6 +259,11 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
     promiseResolved = 0;
     beginResolved   = 0;
     gateCredited    = 0;
+    gateSeq         = 0;
+    gateWhenAll     = 0;
+    gateT0          = 0;
+    gateHadDelay    = 0;
+    loadPid         = 0;
     forkFails       = 0;
     outModule       = MODULE_NONE;
     i               = 0;
@@ -245,6 +273,17 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
 /*******************************************
 	INSTANCE FUNCTIONS
 ********************************************/
+
+/* ★ #3419 (2026-08-23): ワーカーゲート(stdLimitSemaphore)の待ち行列を並べる優先度。
+ * 小さいほど先。生成通し番号の**負値**を返すので、後発 agent ほど先に入場する = LIFO 近似。
+ * gateSeq==0 (app 無しの単体テスト) は 0 を返し、全員同値 → 到着順のまま(挙動不変)。
+ * ⚠ この値は **ゲートが enablePriority=1 のときだけ**使われる。他に priority() を見る生きた経路は
+ *   tinyState には無い (tsGC の priority キューは exe() に呼び出し元が無く未使用)。 */
+int
+pigfAgent_::priority(sPtr<tinyState> caller)
+{
+	return -gateSeq;
+}
 
 /* 演算子名 + 各引数の get_hashkey() を FNV-1a で畳む。この関数が呼ばれる時点で引数は
  * 解決済み(compact 済)。遅延継続 ("delayed" . promise) は car=="delayed" で判別し、実値
@@ -267,11 +306,30 @@ pigfAgent_::compute_arg_hash()
 		if ( salt != 0 )
 			for (const char *p = salt; *p; ++p) { h ^= (unsigned char)*p; h *= prime; }
 	}
+	/* ★ 可換 op (union/intersection) は各引数の get_hashkey() を畳む前に昇順ソートし、
+	 *   a op b と b op a を同一キャッシュキーにする(旧 pigDataOperator::normalize() の parse 時
+	 *   ソートが担っていたが、#3452 でモジュール登録が eval 時の module() 呼び出しへ移ったため
+	 *   parse 直後は 1 本もロードされておらず op_commutative() が常に false を返す回帰になった。
+	 *   ここは eval 時 = 先行する module() 呼び出しが既に実行済みなので正しく判定できる)。
+	 *   HIT 判定はハッシュの一致だけを見る(2.は既に compute 済みの結果を指すファイルの有無)ので、
+	 *   実際にどちらの引数順で計算されたかは問わない — ソートは compute_arg_hash 側だけで足りる。 */
+	int commutative = ( op != thNULL && ptsApp != thNULL && ptsApp->module_registry != thNULL )
+	    ? ptsApp->module_registry->op_commutative(opn) : 0;
+	sArray<uint64_t> argHashes;
+	argHashes.length(args.length());
 	for (int k = 0; k < args.length(); ++k) {
 		sPtr<pigData> v = args[k];
 		if (pig_is_delayed(v))   /* 遅延継続 → 実値(cdr->cdr: "begin" 段を飛ばす) */
 			v = v->cdr()->cdr();
-		uint64_t a = (uint64_t)v->get_hashkey();
+		argHashes[k] = (uint64_t)v->get_hashkey();
+	}
+	if ( commutative )
+		for (int i = 1; i < argHashes.length(); ++i)
+			for (int j = i; j > 0 && argHashes[j-1] > argHashes[j]; --j) {
+				uint64_t t = argHashes[j-1]; argHashes[j-1] = argHashes[j]; argHashes[j] = t;
+			}
+	for (int k = 0; k < argHashes.length(); ++k) {
+		uint64_t a = argHashes[k];
 		for (int b = 0; b < 8; ++b) { h ^= (a >> (8*b)) & 0xff; h *= prime; }
 	}
 	return (pHashKeyType)h;
@@ -320,6 +378,16 @@ pigfAgent_::filter(sPtr<stdEvent> ev)
 	if ( ev->type == TSE_RETURN && ev->source == med ) {
 		mediator_return_flag = 1;
 		mediator_error = ev->msg_obj;
+		if ( osglue_env_int("PIG_DBG_SIG", 0) ) {
+			sPtr<stdString> _dop = agent_op_name();
+			sPtr<stdString> _dc = agent_cmd();
+			::fprintf(stderr, "[sigdbg] MEDRET op=%s st=%d appErr=%d destroyed=%d cmd=%s\n",
+				( _dop != thNULL ) ? _dop->get_str() : "(none)",
+				( med.is_notNull() ) ? med->child_status() : -1,
+				(int)( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ),
+				(int)is_destroyed(),
+				( _dc != thNULL ) ? _dc->get_str() : "(none)");
+		}
 		wakeup();       /* 置き換えイベントで通知 (握りつぶすと状態関数が走らないため) */
 		return thNULL;  /* TSE_RETURN は握りつぶし */
 	}
@@ -339,15 +407,18 @@ pigfAgent_::filter(sPtr<stdEvent> ev)
 
 TS_STATE(INI_pigfFunction_START)
 {
-	if ( ptsApp.is_notNull() )
+	if ( ptsApp.is_notNull() ) {
 		ptsApp->agent_enter(ifThis);   /* 生存数 ++ + 登録(FIN で leave)。全 agent 完了判定 + 撤収用 */
+		gateSeq = ptsApp->agent_next_seq();   /* ★ #3419: 生成順を確定(priority() の元。以後不変) */
+	}
 	return rDO|ACT_START;
 }
+
 
 TS_STATE(ACT_START)
 {
 	/* 既に他 agent がエラー集約済みなら、ここで起動準備に入らず即撤収(無駄な promise/fork を避ける)。
-	 * abort 経路では呼び元も同時に撤収するので front 未解決でハングしない(set_agentError の wake-all)。 */
+	 * abort 経路では呼び元も同時に撤収するので _front 未解決でハングしない(set_agentError の wake-all)。 */
 	if ( PIGFAGENT_SHOULD_ABORT() ) return rDO|ACT_pigfAgent_ABORT;
 
 	/* 1) 引数エラー検査(is_error() は遅延ノードでも compact ゲートで解決。継続は delayed pair を即返す
@@ -362,8 +433,18 @@ TS_STATE(ACT_START)
 	 *   pigfModuleAgent::try_shortcircuit が行う。pigfAgent 自体は特定演算子を知らない(基底=0)。 */
 	{
 		int sc = try_shortcircuit();
-		if ( sc == 1 ) return rDO|FIN_START;              /* front に結果セット済み */
+		if ( sc == 1 ) return rDO|FIN_START;              /* _front に結果セット済み */
 		if ( sc == 2 ) return rDO|ACT_pigfAgent_ERROR;    /* err セット済み */
+	}
+
+	/* 1.6) ★ #3436 P4: n 項ノードの分解 (docs/sig_grammar_design.md §5.5)。パーサは n 項のまま
+	 *   残すので、ここで「n 項のまま受けられるか / 何項ずつの木にするか」を決める。
+	 *   ⚠ 1) の is_error() で引数は compact ゲートを通っており (継続は delayed pair)、型スタンプが
+	 *   読める = 分解に必要な型が非ブロッキングに取れる。1.7 の routing より前に置く。 */
+	{
+		int dc = try_decompose();
+		if ( dc == 1 ) return rDO|FIN_START;              /* _front を木の根に解決済み */
+		if ( dc == 2 ) return rDO|ACT_pigfAgent_ERROR;
 	}
 
 	/* 1.7) ★ カーネル選択(#3404): 入力引数の型 + DEFAULT_OUTPUT からこの agent のカーネルを決める
@@ -384,25 +465,28 @@ TS_STATE(ACT_START)
 		if ( pig_is_delayed(args[i]) ) { hasDelay = 1; break; }
 
 	/* 3) 遅延無し → 結果ハッシュ確定 → キャッシュファイルがあれば agent 起動せず短絡 */
+	gateHadDelay = hasDelay;   /* ★ #3419 §16.14: 待ちうる agent かどうか (葉は除外) */
 	if ( !hasDelay ) {
 		hashVal   = compute_arg_hash();
 		cachePath = make_cache_path(hashVal);
 		/* HIT 判定はハンドルを先に作って is_valid で (2026-07-29 メモ 2.: ::access 直叩きを
 		 * pigDataCache へ吸収)。このハンドルは HIT 時の結果 (CACHEREAD)・MISS 時の出力
 		 * (SENDEND → agent が set_body) にそのまま使う。 */
-		outCache = thNEW(pigDataCache,(hashVal, cachePath, front->get_info()));
+		outCache = thNEW(pigDataCache,(hashVal, cachePath, _front->get_info()));
+		stamp_out_cache();   /* ★ 型スタンプを載せる (HIT ならこのハンドルが下流へ渡る) */
 		if ( outCache->is_valid() ) {
 			if ( ptsApp.is_notNull() ) ptsApp->cache_hit();   /* HIT 計上 */
 			return rDO|ACT_pigfAgent_CACHEREAD;   /* HIT */
 		}
 		/* ★ in-flight dedup(最も綺麗な位置・ユーザ案): hashVal 確定 & ファイル未 HIT。継続(/ * 4))を
-		 * **まだ作っていない=front 未解決**なので、先行 pigfAgent があれば `front->set_result(その front)`
+		 * **まだ作っていない=_front 未解決**なので、先行 pigfAgent があれば `_front->set_result(その _front)`
 		 * の **統一形**(out_cache 0/1 を区別しない)で受け売りして撤収できる。呼び元は dupFront→firstFront
-		 * を不動点で辿る。自分が最初なら front を登録してこのまま計算へ。 */
+		 * を不動点で辿る。自分が最初なら _front を登録してこのまま計算へ。 */
 		if ( ptsApp.is_notNull() ) {
-			sPtr<pigData> firstFront = ptsApp->inflight_claim(hashVal, front);
+			sPtr<pigData> firstFront = ptsApp->inflight_claim(hashVal, _front);
+			if ( firstFront == thNULL ) inflightClaimed = 1;   /* ★ 自分が最初 */
 			if ( firstFront.is_notNull() ) {       /* 先行あり = 次点 */
-				front->set_result(firstFront);     /* dupFront → firstFront(継続/値どちらでも不動点で解決) */
+				_front->set_result(firstFront);     /* dupFront → firstFront(継続/値どちらでも不動点で解決) */
 				ptsApp->cache_hit();
 				return rDO|FIN_START;              /* 起動せず撤収(無駄 fork/計算なし) */
 			}
@@ -414,31 +498,31 @@ TS_STATE(ACT_START)
 	 *    ただし継続 ("delayed".promise) pair は **mesh 出力(out_cache)専用**。これは下流 pigfAgent が
 	 *    arg を compact せず car() で「未解決」を覗き見て起動を遅延させる mesh-DAG パイプラインの仕掛け
 	 *    で、cdr を辿るのは pigfAgent だけ。値返し op(out_cache==0)は式の演算子等(pigfAgent 以外)が
-	 *    消費するので pair を返さず、front を未解決のまま残して **完了時に front を実値へ直接解決**する
+	 *    消費するので pair を返さず、_front を未解決のまま残して **完了時に _front を実値へ直接解決**する
 	 *    (消費側は通常の pigDataDelay compact ゲートで await→実値を得る。HIT 経路と同じ扱い)。 */
-	if ( front->get_out_cache() ) {
+	if ( _front->get_out_cache() ) {
 		promise      = thNEW(pigDataPromise,(ifThis));   /* 結果。A_SAVE_BEGIN で hashCache へ */
 		beginPromise = thNEW(pigDataPromise,(ifThis));   /* 計算開始。SENDEND で ("begin".promise) へ */
 		promiseLive  = 1;
 		/* ★ 継続を **3段化**: ("delayed" . beginPromise)。SENDEND(C_ARG_END=計算開始)で beginPromise を
 		 * ("begin" . promise) に解決し、A_SAVE_BEGIN で promise を hashCache に解決する。
 		 * 親は cdr()->car()=="begin" で「子が計算を始めた(admitted)」を、cdr()->cdr() で結果を取る。 */
-		/* ★ 継続の car = **型名リスト** (rev4 Phase B-2・純粋型スタンプ)。outModule の全型を CSV で載せる
-		 *   (出力型未確定 producer の「カーネル水準の型不明」を型リストで表現)。下流 pigfAgent は
-		 *   arg_module()/arg_types() で car を非ブロッキングに読み、上流完了を待たず入力の型/カーネルを知る。
-		 *   型を持たないカーネル (値のみ) は従来のカーネル名スタンプへフォールバック (coexistence)。
-		 *   B-2b で注釈済み op は decide_executor が絞った単一出力型へ置き換える。 */
-		std::string tl;
-		const char *stampStr;
-		if ( outTypeList.is_notNull() )                       /* B-2b: 型ディスパッチが絞った出力型 (優先) */
-			stampStr = outTypeList->get_str();
-		else if ( ptsApp != thNULL
-		          && pigf_module_type_list(ptsApp->module_registry, outModule, tl) )   /* B-2a: outModule の全型 (未注釈 op) */
-			stampStr = tl.c_str();
-		else                                                  /* 型を持たないカーネル: 旧カーネル名 (coexistence) */
-			stampStr = pig_module_name(outModule);
-		sPtr<pigDataPair> cont = thNEW(pigDataPair,(thNEW(pigDataString,(stampStr)), beginPromise));
-		front->set_result(cont);
+		/* ★ 継続の car = **型スタンプ** (出力キャッシュに載せるものと同じ文字列)。下流 pigfAgent は
+		 *   これを非ブロッキングに読み、上流の完了を待たずに入力の型を知る。
+		 *   ★ 2026-08-19: 出どころは **sig が決めた出力型だけ**。旧 2 段目 (outModule の全型 CSV) と
+		 *   3 段目 (型を持たないモジュールはモジュール名) のフォールバックは撤去した。値も参照も
+		 *   組込の型 ("value" / "ref") として sig に書かれているので、型を持たない出力は存在しない。
+		 *   sig で決まらない呼び出しは decide_out_module が **明示エラー**にするので、ここへ
+		 *   型なしで来ることは無い (来たら planner のバグなので黙って進まない)。 */
+		if ( outTypeList == thNULL ) {
+			err = thNEW(pigDataError,(
+			    "internal: the planner produced no output type stamp for this node "
+			    "(every op's sig must declare its output type)", _front->get_info(), 1));
+			return rDO|ACT_pigfAgent_ERROR;
+		}
+		sPtr<pigDataPair> cont = thNEW(pigDataPair,
+		    (thNEW(pigDataString,(outTypeList->get_str())), beginPromise));
+		_front->set_result(cont);
 	}
 
 	/* 5) agent の起動タイミング(★ワーカーゲート):
@@ -450,6 +534,19 @@ TS_STATE(ACT_START)
 	 *      C_ARG_END 送信前=計算開始前)で行う。 */
 	if ( !hasDelay )
 		return rDO|ACT_pigfAgent_GATE;   /* 全引数 ready の leaf → ゲートへ(fork 絞り) */
+
+	/* ★ #3419 §16.13: ゲートを取る位置を決める。既定 (env 無指定) は **auto**:
+	 *   in-proc (agent_module_name() != thNULL) なら all / 外部プロセスなら first。
+	 *   ⚠ outModule は上の decide_out_module() で確定済みなのでここで判定できる。
+	 *   env SRAVA_GATE_WHEN=first|all|auto で上書き (対照の口・消さないこと)。 */
+	{
+		/* ★ #3419 §17.3: srava 変数 GATE_WHEN → 環境変数 → 既定 "auto" (設定表)。 */
+		sPtr<stdString> gws = ptsApp.is_notNull() ? ptsApp->cfg_str("GATE_WHEN") : sPtr<stdString>(thNULL);
+		const char *gw = gws.is_notNull() ? gws->get_str() : 0;
+		if ( gw != 0 && ::strcmp(gw, "all") == 0 )        gateWhenAll = 1;
+		else if ( gw != 0 && ::strcmp(gw, "first") == 0 ) gateWhenAll = 0;
+		else                                              gateWhenAll = ( agent_module_name() != thNULL );
+	}
 
 	sendIdx = 0;
 	par = thNEW(ts2Parallel,(ifThis, 0,
@@ -471,11 +568,15 @@ TS_STATE(ACT_START)
 			sPtr<pigData> v = args[idx];
 			if ( pig_is_delayed(v) ) {
 				(void) v->cdr()->cdr()->get_hashkey();   /* 結果(cdr->cdr)。未解決なら compact ゲートで yield 再走 */
-				me->cancel();                            /* 最初に結果が出た子で全体終了 → 起動 */
+				/* ★ #3419 §16.13: cancel すると「最初の 1 つが完了」で par が終わる = 従来のゲート位置。
+				 * cancel しなければ par は全 worker 完了 = **全引数が解決**してから TSE_RETURN する。 */
+				if ( ! gateWhenAll )
+					me->cancel();                        /* 最初に結果が出た子で全体終了 → 起動 */
 				return 1;
 			}
 			if ( v->is_cache() ) {   /* 既に解決済みの子(キャッシュ HIT)も「終わった子」→ 即 cancel して起動 */
-				me->cancel();
+				if ( ! gateWhenAll )
+					me->cancel();
 				return 1;
 			}
 			return 1;   /* それ以外(非継続・非キャッシュ値)は待機対象でない */
@@ -528,6 +629,21 @@ TS_STATE(ACT_pigfAgent_GATE)
 	 * 後なので、待っても必ず誰か(より深い admitted ノード)が完走して release する = 前進が保証される。 */
 	ptsApp->gate_get();
 	gateCredited = 1;
+	gateT0 = osglue_now_ms();   /* ★ #3419 §16.14: 枠を握った時刻 */
+	/* ★ #3419 (2026-08-23): 入場**順序**のトレース (SRAVA_GATE_TRACE=1)。順序を変える実験なので、
+	 * 「本当に順序が変わったか」を目で確かめられる口を残す (検証できない機構は動いていないのと同じ)。
+	 * seq=生成通し番号 / order=fifo|lifo。lifo なら seq が降順寄りに並ぶはず。 */
+	if ( ptsApp.is_notNull() && ptsApp->cfg_int("GATE_TRACE") != 0 ) {   /* ★ #3419 §17.3 */
+		sPtr<stdString> on = agent_op_name();
+		::fprintf(stderr, "[gate] enter seq=%d op=%s live=%d order=%s\n",
+		          gateSeq, ( on != thNULL ) ? on->get_str() : "?",
+		          ptsApp->gate_live(), ptsApp->gate_order_lifo() ? "lifo" : "fifo");
+	}
+	/* ★ #3419 §12.8: 入場したので稼働数を更新し、L_AGENT をゲートへ反映する。 */
+	{
+		ptsApp->load_agent_enter();
+		ptsApp->load_apply_agent_limit();
+	}
 	return rDO|ACT_pigfAgent_LAUNCH;
 }
 
@@ -538,7 +654,7 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 	if ( PIGFAGENT_SHOULD_ABORT() ) return rDO|ACT_pigfAgent_ABORT;
 	sPtr<stdString> cmd = agent_cmd();   /* 派生クラスが供給(基底は thNULL) */
 	if ( cmd == thNULL ) {
-		err = thNEW(pigDataError,("pigfAgent: no agent command (subclass must override agent_cmd)", front->get_info()));
+		err = thNEW(pigDataError,("pigfAgent: no agent command (subclass must override agent_cmd)", _front->get_info()));
 		return rDO|ACT_pigfAgent_ERROR;
 	}
 	/* テスト用: 同時 fork 数の上限を人為的に N に設定し(PIG_TEST_FORKLIMIT=N)、それを超える fork を
@@ -582,19 +698,30 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 		med = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 		    ? ptsApp->module_registry->backends.make("process", ifThis, cmd)   /* 具体クラス名を隠す (Phase1-3) */
 		    : sPtr<ptsMediator>(thNULL);
-		launchFail = ( med == thNULL || med->enable() != 0 );
+		/* ★ #3441: module(so,{opts}) で積まれたハッシュがあれば、agent 起動直後に C_ENV で
+		 * 1 回だけ渡す (稼働中の agent への再配線はしない)。outModule は ACT_START の
+		 * decide_out_module() で既に確定済み。opts が無ければ thNULL のまま (enable の既定と同じ)。 */
+		sPtr<pigData> modOpts = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
+		    ? ptsApp->module_registry->opts_for(outModule) : sPtr<pigData>(thNULL);
+		launchFail = ( med == thNULL || med->enable(modOpts) != 0 );
 		/* ★ med = thNULL にしない (2026-08-11): 起動に失敗した med も destroy → TSE_RETURN を
 		 * 返して畳まれるので、FIN_pigfAgent_MEDWAIT がそれを待って回収する。 */
 		if ( launchFail && med.is_notNull() ) med->destroy();   /* 失敗オブジェクト破棄 */
 	}
 	if ( forcedFail || launchFail ) {
 		/* fork 失敗(典型は EAGAIN=同時プロセス上限超過)。**limit は固定方針**なので、適応バックオフ
-		 * (limit の動的縮小)も再試行もしない。fork が cap に届かない=PIG_MAX_WORKERS が実機の fork
+		 * (limit の動的縮小)も再試行もしない。fork が cap に届かない=ゲートの上限が実機の fork
 		 * 上限を超えている、なので **即エラーで終了し、ユーザに手で下げて再実行してもらう**。
 		 * (理由: ① 既に fork 済みの agent を殺せない以上、limit を後から縮めてもデッドロックは解けない。
 		 *        ② 物理上限が後から増えるわけでもないので AIMD 回復も不合理。
 		 *  メモリ容量等を含めた動的制御は将来ちゃんと整理する。) */
-		if ( gateCredited && ptsApp.is_notNull() ) { ptsApp->gate_release(); gateCredited = 0; }
+		if ( gateCredited && ptsApp.is_notNull() ) {
+			/* ★ #3419 T4: 退場するので稼働数を戻す (**出る方も契機**・§5.3)。 */
+			ptsApp->load_agent_leave();
+
+			ptsApp->load_apply_agent_limit();
+			ptsApp->gate_release(); gateCredited = 0;
+		}
 		/* ★ 起動失敗は「上限超過」だけではない。agent バイナリが無い/実行できないときも同じ経路に
 		 * 来るので、その場合は上限の話をせずに **実際のコマンドを出す**(誤った原因表示で探し回る
 		 * のを防ぐ。2026-08-15: Windows の install 済み実行でまさにこれを踏んだ)。 */
@@ -614,10 +741,11 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 				bin, ::strerror(errno));
 		else
 			::snprintf(msg, sizeof msg,
-				"fork failed (process limit): PIG_MAX_WORKERS=%d exceeds this machine's fork/process limit. "
-				"Lower PIG_MAX_WORKERS and re-run.",
-				ptsApp.is_notNull() ? ptsApp->gate_cap() : 0);
-		err = thNEW(pigDataError,(msg, front->get_info(), 1));   /* fatal: 回復不能=即終了 */
+				"fork failed (process limit): the worker gate is open to %d agents, which exceeds "
+				"this machine's fork/process limit. Lower it with SRAVA_LOAD_CPU=<percent> "
+				"(or SRAVA_LOAD_CPU=0 SRAVA_LOAD_AGENT=<count>) and re-run.",
+				ptsApp.is_notNull() ? ptsApp->gate_cap_dyn() : 0);
+		err = thNEW(pigDataError,(msg, _front->get_info(), 1));   /* fatal: 回復不能=即終了 */
 		return rDO|ACT_pigfAgent_ERROR;
 	}
 	if ( ptsApp.is_notNull() ) ptsApp->cache_miss();   /* fork 成功 → MISS 計上(再試行で二重計上しない) */
@@ -630,7 +758,7 @@ TS_STATE(ACT_pigfAgent_CACHEREAD)
 	/* HIT したキャッシュも「使った」→ 登録(再入で呼ばれるが cache_use は重複無視)。 */
 	if ( ptsApp.is_notNull() )
 		ptsApp->cache_use(hashVal);
-	/* キャッシュヒット(agent 起動なし)。出力種別で分岐(front->get_out_cache):
+	/* キャッシュヒット(agent 起動なし)。出力種別で分岐(_front->get_out_cache):
 	 *  - cache(mesh 等): 中身を読まず pigDataCache ハンドルを返す(下流が必要時に reader で読む)
 	 *  - 値(インライン): **本文を get_body() で取る** (2026-08-02 メモ §8.1)。読み出し helper の
 	 *    起動も D_TEXT 本文の値パース(言語パーサ or 同期パーサ)も pigDataCache/ptsDataCache が
@@ -638,17 +766,23 @@ TS_STATE(ACT_pigfAgent_CACHEREAD)
 	 *    (これで parse_value_text / make_value_parser の virtual ごと消えた)。
 	 * ⚠ get_body() は未ロードなら listen+sException で yield し、この状態関数は**先頭から再走**
 	 *   する → get_body 地点まで冪等であること (cache_use は重複無視なので ok)。 */
-	if ( front->get_out_cache() ) {
-		front->set_result(outCache);   /* HIT ハンドル = ACT_START で is_valid 判定に使ったもの */
+	if ( _front->get_out_cache() ) {
+		_front->set_result(outCache);   /* HIT ハンドル = ACT_START で is_valid 判定に使ったもの */
 		return rDO|FIN_START;
 	}
 	sPtr<pigData> v = outCache->get_body();
 	/* thNULL = 読込/decode 失敗 (is_valid 偽)。想定外本文は agent 側のバグなので
 	 * 生テキストへフォールバックせず明示エラー。 */
-	if ( v == thNULL )
-		v = thNEW(pigDataError,("failed to read/decode the cached value"
-		    " (possible cache race — try clearing the cache dir or rerun)", front->get_info()));
-	front->set_result(v);
+	if ( v == thNULL ) {
+		/* ★ #3433: 断定しない (cache race 以外に「型が変換できない」もある)。cache に自己記述させる。 */
+		sPtr<stdString> what = outCache->describe();
+		char eb[224];
+		::snprintf(eb, sizeof eb,
+		    "cached value (%s) を読み込み/decode できない (cache 破損/競合 か、その型では読めない値)",
+		    what->get_str());
+		v = thNEW(pigDataError,(eb, _front->get_info()));
+	}
+	_front->set_result(v);
 	return rDO|FIN_START;
 }
 
@@ -670,10 +804,10 @@ static int pigf_version_mismatch_msg(sPtr<ptsMediator> med, sPtr<stdString> cmd,
 	if ( st < 0 || (st & 0x7f) != 0 ) return 0;        /* 未終了 / シグナル死 */
 	if ( ((st >> 8) & 0xff) != 3 )     return 0;        /* 版不一致の合図 (exit 3) ではない */
 	::snprintf(out, outsz,
-		"planner と agent の版が違います。同じビルドのものを使ってください "
-		"(ビルドツリーで動かすなら SRAVA_AGENT にそのツリーの srava_agent を指定する)。"
-		"起動コマンド: %s",
-		( cmd.is_notNull() ) ? cmd->get_str() : "(不明)");
+		"planner and agent are from different builds; use a matching pair "
+		"(when running from a build tree, point SRAVA_AGENT at that tree's srava_agent). "
+		"launch command: %s",
+		( cmd.is_notNull() ) ? cmd->get_str() : "(unknown)");
 	return 1;
 }
 
@@ -684,21 +818,36 @@ TS_STATE(ACT_pigfAgent_HELLO)
 	 * Mediator に聞く。汎用の SHOULD_ABORT より先に見て具体的なエラーにする。 */
 	if ( mediator_return_flag ) {
 		if ( med.is_notNull() && med->launch_failed() ) {
-			if ( gateCredited && ptsApp.is_notNull() ) { ptsApp->gate_release(); gateCredited = 0; }
+			if ( gateCredited && ptsApp.is_notNull() ) {
+			/* ★ #3419 T4: 退場するので稼働数を戻す (**出る方も契機**・§5.3)。 */
+			ptsApp->load_agent_leave();
+			
+			ptsApp->load_apply_agent_limit();
+			ptsApp->gate_release(); gateCredited = 0;
+		}
 			char msg[256];
 			::snprintf(msg, sizeof msg,
-				"fork failed (process limit): PIG_MAX_WORKERS=%d exceeds this machine's fork/process limit. "
-				"Lower PIG_MAX_WORKERS and re-run.",
-				ptsApp.is_notNull() ? ptsApp->gate_cap() : 0);
-			err = thNEW(pigDataError,(msg, front->get_info(), 1));   /* fatal: 回復不能=即終了 */
+				"fork failed (process limit): the worker gate is open to %d agents, which exceeds "
+				"this machine's fork/process limit. Lower it with SRAVA_LOAD_CPU=<percent> "
+				"(or SRAVA_LOAD_CPU=0 SRAVA_LOAD_AGENT=<count>) and re-run.",
+				ptsApp.is_notNull() ? ptsApp->gate_cap_dyn() : 0);
+			err = thNEW(pigDataError,(msg, _front->get_info(), 1));   /* fatal: 回復不能=即終了 */
 			return rDO|ACT_pigfAgent_ERROR;
 		}
 		char vmsg[400];
 		if ( pigf_version_mismatch_msg(med, agent_cmd(), vmsg, sizeof vmsg) ) {
-			err = thNEW(pigDataError,(vmsg, front->get_info(), 1));   /* fatal: 混在は続行不能 */
+			err = thNEW(pigDataError,(vmsg, _front->get_info(), 1));   /* fatal: 混在は続行不能 */
 			return rDO|ACT_pigfAgent_ERROR;
 		}
-		err = thNEW(pigDataError,("agent closed before handshake", front->get_info()));
+		/* ★ mediator が組み立てた理由 (子の status + agent の stderr + wire の状態を
+		 * 総合したもの) があればそれを使う。無ければ従来の汎用文言 (2026-08-26)。 */
+		if ( mediator_error.is_notNull() && sPtr<pigData>::d_cast(mediator_error) != thNULL &&
+		     sPtr<pigData>::d_cast(mediator_error)->is_error() ) {
+			err = thNEW(pigDataError,(sPtr<pigData>::d_cast(mediator_error)->error_message(),
+				_front->get_info()));
+			return rDO|ACT_pigfAgent_ERROR;
+		}
+		err = thNEW(pigDataError,("agent closed before handshake", _front->get_info()));
 		return rDO|ACT_pigfAgent_ERROR;
 	}
 	if ( PIGFAGENT_SHOULD_ABORT() ) return rDO|ACT_pigfAgent_ABORT;
@@ -766,6 +915,12 @@ TS_STATE(ACT_pigfAgent_SEND)   /* イベント検出のみ(write なし)。par �
 		 * 遅延引数の compact ゲートを踏む = 解決されない promise で永久 yield し得るので、
 		 * abort 経路では踏まない。 */
 		if ( PIGFAGENT_SHOULD_ABORT() ) return rDO|ACT_pigfAgent_ABORT;
+		/* ★ #3419 §16.14: ここで par が返った = **全引数が解決**。枠を握ってからここまでが
+		 * 「握ったまま入力を待っていた時間」。遅延引数を持っていた agent だけ集計する。 */
+		if ( gateT0 != 0 && gateHadDelay && ptsApp.is_notNull() ) {
+			ptsApp->gate_note_idle(osglue_now_ms() - gateT0);
+			gateT0 = 0;
+		}
 		if ( err != thNULL )   /* SEND worker が上流エラーを検出 → 伝播(調査中) */
 			return rDO|ACT_pigfAgent_ERROR;
 		if ( cachePath == thNULL ) {   /* 遅延引数ケース: 全引数が揃った今ハッシュ確定 */
@@ -775,10 +930,11 @@ TS_STATE(ACT_pigfAgent_SEND)   /* イベント検出のみ(write なし)。par �
 			 * 同一キャッシュを計算中/済みの先行 pigfAgent があれば受け売りして撤収。agent は起動済みだが
 			 * C_ARG_END をまだ送っていない=計算は始まっていないので、FIN(wfd close→agent EOF→グレースフル
 			 * 終了)で無駄計算なしに撤収できる(無駄なのは fork だけ。ワーカーゲートを保つ代償)。
-			 * front を登録(0/1 統一)。次点は: out_cache=1=継続返済みなので dupPromise を firstPromise
-			 * (firstFront の継続 cdr)に解決(pigDataPair で包まない)/ out_cache=0=front 未解決なので front 直接。 */
+			 * _front を登録(0/1 統一)。次点は: out_cache=1=継続返済みなので dupPromise を firstPromise
+			 * (firstFront の継続 cdr)に解決(pigDataPair で包まない)/ out_cache=0=_front 未解決なので _front 直接。 */
 			if ( ptsApp.is_notNull() ) {
-				sPtr<pigData> firstFront = ptsApp->inflight_claim(hashVal, front);
+				sPtr<pigData> firstFront = ptsApp->inflight_claim(hashVal, _front);
+				if ( firstFront == thNULL ) inflightClaimed = 1;   /* ★ 自分が最初 */
 				if ( firstFront.is_notNull() ) {       /* 先行あり = 次点 */
 					if ( promise.is_notNull() ) {
 						/* out_cache 継続: 自分の begin-level(cdr)を **先行の begin-level(cdr)** へ別名解決。
@@ -787,7 +943,7 @@ TS_STATE(ACT_pigfAgent_SEND)   /* イベント検出のみ(write なし)。par �
 						beginResolved   = 1;
 						promiseResolved = 1;
 					} else {
-						front->set_result(firstFront);
+						_front->set_result(firstFront);
 					}
 					ptsApp->cache_hit();
 					return rDO|FIN_START;          /* 自分の agent を閉じて(EOF)撤収 */
@@ -810,8 +966,10 @@ TS_STATE(ACT_pigfAgent_SENDEND)   /* event 非依存: 計算開始 + 送信終�
 	/* 出力キャッシュのハンドルをここで作る (#3406 4.3)。Internal は agent がこの同一オブジェクトへ
 	 * set_body する (= 計算結果の in-memory body を planner がそのまま下流へ渡せる)。
 	 * yield 再走に備えて冪等 (再走で作り直さない)。 */
-	if ( outCache == thNULL )
-		outCache = thNEW(pigDataCache,(hashVal, cachePath, front->get_info()));
+	if ( outCache == thNULL ) {
+		outCache = thNEW(pigDataCache,(hashVal, cachePath, _front->get_info()));
+		stamp_out_cache();   /* ★ 遅延引数ありの経路 (ACT_START ではまだ作っていない) */
+	}
 	/* ★ 番兵 (旧 SENDWEND の pl_wend) はここに畳まれた (2026-08-02 メモ §2.1)。「送信の終わり」は
 	 * ワイヤの都合であって pigfAgent の関心ではないので、Mediator の中で面倒を見る。
 	 * 目標パスも outCache 自身が持っているので渡さない。yield 可(満杯時)・再走に対して冪等。 */
@@ -840,7 +998,7 @@ TS_STATE(ACT_pigfAgent_RESULT)
 			case A_SAVE_BEGIN:
 				if ( ptsApp.is_notNull() )
 					ptsApp->cache_use(hashVal);
-				if ( front->get_out_cache() ) {
+				if ( _front->get_out_cache() ) {
 					/* ★ A_SAVE_BEGIN = 生産者の「メタ書込済」宣言を planner 側ハンドルへ反映
 					 * (mark_valid) **してから** promise を解決する。External 生産者では
 					 * ACT_START の HIT 判定が MISS 時に焼き込んだ CV_INVALID がこのハンドルに
@@ -849,13 +1007,25 @@ TS_STATE(ACT_pigfAgent_RESULT)
 					 * 直接立てるので冪等な上書きになるだけ)。 */
 					if ( outCache != thNULL )
 						outCache->mark_valid();
-					promise->set_result(outCache != thNULL ? sPtr<pigData>(outCache)
-					    : sPtr<pigData>(thNEW(pigDataCache,(hashVal, cachePath, front->get_info()))));
+					if ( outCache == thNULL ) {   /* 通常来ないが、来たらスタンプ込みで作る */
+						outCache = thNEW(pigDataCache,(hashVal, cachePath, _front->get_info()));
+						stamp_out_cache();
+					}
+					promise->set_result(sPtr<pigData>(outCache));
 					promiseResolved = 1;
 				} else {
-					front->set_result(mpkt->data != thNULL ? mpkt->data
+					_front->set_result(mpkt->data != thNULL ? mpkt->data
 					    : sPtr<pigData>(thNEW(pigDataString,(thNEW(stdString,(""))))));
 					promiseResolved = 1;
+				}
+				/* ★ #3419 (ひさ 2026-08-22): **promise を解決した直後**に in-flight 台帳から外す。
+				 * 登録した agent 自身の責務。⚠ この時点でキャッシュはまだ書き込み中だが、
+				 * 書きかけを読む形は **process agent では常態** (単一 writer/複数 reader の
+				 * ストリーミング読み) なので、ここで外して壊れるなら process 実行が成立しない。
+				 * ⚠ 値返し op (out_cache==0) や error/abort 経路はここを通らないので、
+				 * FIN 側の解除は取りこぼし用に残す (フラグで冪等)。 */
+				if ( inflightClaimed && ptsApp.is_notNull() ) {
+					ptsApp->inflight_release(hashVal); inflightClaimed = 0;
 				}
 				return 0;
 			case A_SAVE_DONE:
@@ -863,16 +1033,16 @@ TS_STATE(ACT_pigfAgent_RESULT)
 			case A_ERROR:
 				/* エラーは **pigData (pigDataError) のまま**届く (2026-07-30 メモ L651。External は
 				 * ptsMediatorExternal が payload テキストから作る・§3.1)。生メッセージと
-				 * fatal を多態で取り、**ソース位置は呼び元 (front) の pigInfo を付け直す** —
+				 * fatal を多態で取り、**ソース位置は呼び元 (_front) の pigInfo を付け直す** —
 				 * 位置情報は planner 側の文脈で、agent は知らない (Mediator は位置を付けずに
 				 * 作る。これが無いと "ERROR[file,line]" が落ちる)。
 				 * fatal ビットは Internal では文字列化を経ないので保たれる (External はワイヤが
 				 * テキストしか運ばないので落ちる — ワイヤ仕様の限界)。 */
 				err = ( mpkt->data != thNULL && mpkt->data->is_error() )
 				    ? sPtr<pigData>(thNEW(pigDataError,(mpkt->data->error_message(),
-				        front->get_info(), mpkt->data->is_fatal())))
+				        _front->get_info(), mpkt->data->is_fatal())))
 				    : sPtr<pigData>(thNEW(pigDataError,(mpkt->str != thNULL ? mpkt->str
-				        : sPtr<stdString>(thNEW(stdString,("agent error"))), front->get_info())));
+				        : sPtr<stdString>(thNEW(stdString,("agent error"))), _front->get_info())));
 				return rDO|ACT_pigfAgent_ERROR;
 			default:
 				return 0;
@@ -899,21 +1069,27 @@ TS_STATE(ACT_pigfAgent_BYE)
 
 TS_STATE(ACT_pigfAgent_FINISH)
 {
-	/* front は ("delayed" . promise)、promise は解決済み。後片付けへ。 */
+	/* _front は ("delayed" . promise)、promise は解決済み。後片付けへ。 */
 	return rDO|FIN_START;
 }
 
 TS_STATE(ACT_pigfAgent_ERROR)
 {
 	if ( err == thNULL )
-		err = thNEW(pigDataError,("agent aborted", front->get_info()));
+		err = thNEW(pigDataError,("agent aborted", _front->get_info()));
+	/* ★ どの経路で返すにせよ **理由は必ず記録**しておく (2026-08-26・ひさ提案)。
+	 * 下の 3 分岐のうち promise 連鎖へ返す 2 つは ptsApp に何も残さないので、
+	 * 「落ちた本人の理由」が傍観者の汎用エラーに負けて消えていた。record は起こさない
+	 * (撤収トリガは従来どおり set_agentError だけ)。planner が末尾で列挙する。 */
+	if ( ptsApp.is_notNull() )
+		ptsApp->record_agentError(err);
 	if ( promiseResolved ) {
 		/* 継続は既に解決済み(結果は呼び元へ渡り先へ進んだ)→ promise では返せない。
 		 * アプリ全体のエラーとして ptsApp に集約(プランナーが countAgent==0 後に拾う)。 */
 		if ( ptsApp.is_notNull() )
 			ptsApp->set_agentError(err);
 	} else if ( promiseLive ) {
-		/* front=pair は返したが promise 未解決 → 継続を error で解決(呼び元の遅延参照が error に)。
+		/* _front=pair は返したが promise 未解決 → 継続を error で解決(呼び元の遅延参照が error に)。
 		 * ★ begin 未通知なら先に解決して親の GATE begin 待ち(cdr()->car())を解く。
 		 *   begin=("begin".promise)・結果 promise=err。親は begin を見て進み、SEND で結果=err を拾い伝播。 */
 		if ( beginPromise.is_notNull() && ! beginResolved ) {
@@ -923,8 +1099,8 @@ TS_STATE(ACT_pigfAgent_ERROR)
 		if ( promise.is_notNull() )
 			promise->set_result(err, 1);
 	} else {
-		/* まだ何も返していない(同期エラー)→ front を error で直接解決。 */
-		front->set_result(err, 1);
+		/* まだ何も返していない(同期エラー)→ _front を error で直接解決。 */
+		_front->set_result(err, 1);
 	}
 	return rDO|FIN_START;
 }
@@ -932,27 +1108,39 @@ TS_STATE(ACT_pigfAgent_ERROR)
 /* 他 agent のエラー集約 or 自分の destroy で撤収。エラーは既に ptsApp 側にあるので再集約しない
  * (set_agentError を呼ばない = wakeup/invoke_listen の連鎖嵐を避ける)。FIN で agent を kill。
  * ★ §8.3: med の突然死 (mediator_return_flag) **だけ** が理由でここへ来た場合は、誰も
- * エラーを集約していないので、ここでエラーに変換して ERROR へ振る (front 未解決のまま
+ * エラーを集約していないので、ここでエラーに変換して ERROR へ振る (_front 未解決のまま
  * FIN すると planner が永久待ちになる)。旧 per-state メッセージ ("agent closed during
  * arg send" / "before save done") はこの 1 本に集約 (どの状態で死んだかより「agent が
  * 途中で閉じた」が本質のため)。正常系の flag は BYE が先に拾うのでここへは来ない。 */
 TS_STATE(ACT_pigfAgent_ABORT)
 {
+	if ( osglue_env_int("PIG_DBG_SIG", 0) ) {
+		sPtr<stdString> _dop = agent_op_name();
+		sPtr<stdString> _dc2 = agent_cmd();
+		::fprintf(stderr, "[sigdbg] ABORT cmd=%s op=%s medflag=%d err=%d destroyed=%d appErr=%d st=%d\n",
+			( _dc2 != thNULL ) ? _dc2->get_str() : "(none)", ( _dop != thNULL ) ? _dop->get_str() : "(none)",
+			mediator_return_flag, (int)(err != thNULL), (int)is_destroyed(),
+			(int)( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ),
+			( med.is_notNull() ) ? med->child_status() : -1);
+	}
 	if ( mediator_return_flag && err == thNULL && ! is_destroyed() &&
 	     ! ( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ) ) {
+		/* ★ mediator_error = ptsMediatorExternal が **子の終了 status・agent の stderr・
+		 * wire の状態を総合して**組み立てた理由 (2026-08-26)。ここは位置情報を付けて
+		 * 再包装するだけ。理由が立たなかったときだけ従来の汎用文言になる。 */
 		err = ( mediator_error.is_notNull() && sPtr<pigData>::d_cast(mediator_error) != thNULL &&
 		        sPtr<pigData>::d_cast(mediator_error)->is_error() )
 		    ? sPtr<pigData>(thNEW(pigDataError,(sPtr<pigData>::d_cast(mediator_error)->error_message(),
-		        front->get_info())))
-		    : sPtr<pigData>(thNEW(pigDataError,("agent closed unexpectedly", front->get_info())));
+		        _front->get_info())))
+		    : sPtr<pigData>(thNEW(pigDataError,("agent closed unexpectedly", _front->get_info())));
 		{	/* ★ 版不一致 (agent が exit 3) なら、名指しの説明に差し替える。 */
-			char vmsg[400];
+			char vmsg[900];   /* ★ 異常終了の説明は agent の stderr を載せるので長い */
 			if ( pigf_version_mismatch_msg(med, agent_cmd(), vmsg, sizeof vmsg) )
-				err = thNEW(pigDataError,(vmsg, front->get_info(), 1));
+				err = thNEW(pigDataError,(vmsg, _front->get_info(), 1));
 		}
-		return rDO|ACT_pigfAgent_ERROR;   /* ERROR が front/promise を解決する */
+		return rDO|ACT_pigfAgent_ERROR;   /* ERROR が _front/promise を解決する */
 	}
-	/* ★ 未返済の front/promise を**エラーで解決してから**死ぬ (ひさ指摘 2026-08-06)。
+	/* ★ 未返済の _front/promise を**エラーで解決してから**死ぬ (ひさ指摘 2026-08-06)。
 	 * 黙って FIN すると、この promise を compact ゲートで待つ下流の par worker が永久に
 	 * 起きない (§8.3 で FIRSTWAIT/SEND が par の TSE_RETURN を必ず待つ形になって顕在化
 	 * した既存バグ — 従来は「呼び元 = planner は sig_abort で自力撤収する」場合しか
@@ -963,7 +1151,7 @@ TS_STATE(ACT_pigfAgent_ABORT)
 	if ( ! promiseResolved ) {
 		sPtr<pigData> ae = ( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL )
 		    ? ptsApp->get_agentError()
-		    : sPtr<pigData>(thNEW(pigDataError,("aborted", front->get_info())));
+		    : sPtr<pigData>(thNEW(pigDataError,("aborted", _front->get_info())));
 		if ( promiseLive ) {
 			/* begin 未通知なら先に解決して親の GATE begin 待ちを解く (ERROR と同じ作法) */
 			if ( beginPromise.is_notNull() && ! beginResolved ) {
@@ -974,7 +1162,7 @@ TS_STATE(ACT_pigfAgent_ABORT)
 				promise->set_result(ae, 1);
 			promiseResolved = 1;
 		} else
-			front->set_result(ae, 1);
+			_front->set_result(ae, 1);
 	}
 	return rDO|FIN_START;
 }
@@ -1000,18 +1188,22 @@ TS_STATE(FIN_pigfAgent_START)
 
 /* ★ med の回収待ち (ひさ指示 2026-08-11)。これが無いと **子プロセスを回収し終える前に
  * agent_leave() してしまい**、planner の WAITAGENTS (countAgent==0) が先に満たされて
- * planner だけ先に exit し、計算中の agent が取り残される (実測: SIGTERM 後 planner は 2 秒で
- * 消えるのに CGAL agent は 28 秒後も生存)。ptsMediatorExternal.cpp:383-391 の
+ * planner だけ先に exit し、計算中の agent が取り残される (SIGTERM 後、planner が先に消えても
+ * 重い agent は計算を続けてしまう)。ptsMediatorExternal.cpp:383-391 の
  * 「destroy を送る側は TSE_RETURN が戻るのを待つ」作法 (2026-08-06) に pigfAgent も揃える。
  * med を起動していない (thNULL) 経路は待つものが無いのでそのまま通過する。 */
 TS_STATE(FIN_pigfAgent_MEDWAIT)
 {
-	if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] agent MEDWAIT med=%d flag=%d\n", (int)med.is_notNull(), mediator_return_flag);
+	if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] agent MEDWAIT med=%d flag=%d\n", (int)med.is_notNull(), mediator_return_flag);
 	if ( med.is_notNull() && mediator_return_flag == 0 )
 		return 0;   /* med の TSE_RETURN 待ち (filter がフラグを立てて wakeup を積む) */
 	med = thNULL;   /* ★ med を手放すのはここ 1 箇所だけ (filter の source 照合を壊さないため) */
 	if ( ptsApp.is_notNull() ) {
 		if ( gateCredited ) {               /* ワーカーゲートの credit を返却 → 待機 agent を起こす */
+			/* ★ #3419 T4: 退場も再配分の契機 (§5.3)。 */
+			ptsApp->load_agent_leave();
+			
+			ptsApp->load_apply_agent_limit();
 			ptsApp->gate_release();
 			gateCredited = 0;
 		}
@@ -1028,5 +1220,7 @@ TS_STATE(FIN_pigfAgent_MEDWAIT)
 	cachePath      = thNULL;
 	outCache       = thNULL;
 	mediator_error = thNULL;
+	/* ★ #3419: in-flight 台帳から外す (登録したのが自分のときだけ)。 */
+	if ( inflightClaimed && ptsApp.is_notNull() ) { ptsApp->inflight_release(hashVal); inflightClaimed = 0; }
 	return rDO|FIN_pigfFunction_START;
 }

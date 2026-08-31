@@ -51,7 +51,15 @@ pigDataLambdaExpr::_start()
 	 *   e==null(pigf 文脈外の縁)は従来どおり素の参照(捕捉対象なし)。 */
 	sPtr<pigEnvironment> cap = e;
 	if ( e != thNULL ) {
-		sPtr<pigEnvironment> frozen = thNEW(pigEnvironment,(e));   // parent=e(再帰フォールバック)
+		/* ★ #3450 (ひさ設計 2026-08-29): **frozen は親を持たない** (完全な値スナップショット)。
+		 * 旧: parent=e で「未束縛の名前は apply 時に定義元 env で遅延解決」としていたが、
+		 *   ① 前方参照だけ凍らない非対称 (定義の並べ替えで挙動が変わる footgun) と
+		 *   ② env ⇄ lambda の参照循環 (capturedEnv->parent が定義元 env に戻る。参照カウントでは
+		 *      永遠に落ちず、束縛された継続 pair ごと中間結果がプロセス終了まで残る。実測 N+3 個)
+		 * の両方の根が同じこの 1 辺だった。前方参照は「未定義変数」の明示エラーになる。
+		 * 再帰は自己適用で書く: var f = \(f,x){ … f(f,x-1) … }; f(f,5)
+		 * (引数は後方束縛なので凍結と干渉しない。リポジトリ内の .sra に名前による自己再帰は 0 件)。 */
+		sPtr<pigEnvironment> frozen = thNEW(pigEnvironment,(thNULL));
 		e->snapshot_into(frozen);
 		cap = frozen;
 	}

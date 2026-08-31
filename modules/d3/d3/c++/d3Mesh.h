@@ -15,6 +15,7 @@
  *   型軸: 型名 "d3-mesh3d" ↔ 4CC タグ "D3M3" (1:1)。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<stdint.h>
 #include	<vector>
 
@@ -49,6 +50,11 @@ public:
 
 	/* reader 用ファクトリ: D_META タグから具体型を生成 (未知タグは null)。 */
 	static sPtr<d3Mesh> create_for_meta(const uint8_t *meta, int len);
+
+	/* ★ 2026-08-28 (ABI v12): **この階層への配線先**。op の OPS 行が OPWIRE(Calc, d3Mesh) と
+	 *   書くと、引数はこの WIRE 経由で実体化される。create_for_meta が 4CC を受理判定し、
+	 *   mkReader がこの階層の stream reader を起こす。定義は d3CacheCodec.cpp。 */
+	static const pigWireClass WIRE;
 
 protected:
 	std::vector<double>   verts_;

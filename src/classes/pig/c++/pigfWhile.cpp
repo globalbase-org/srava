@@ -12,6 +12,7 @@
  * 返り値: 最後の周回の body 値(0 周なら null)。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfWhile_.h"
@@ -41,7 +42,6 @@ protected:
 	sPtr<pigData>	last;       /* 最後の周回の body 値 */
 	int		loopDestroyed;   /* clone した cond/body へ destroy を転送済み(1 回だけ) */
 	int		iterCount;
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -60,7 +60,6 @@ pigfWhile_::pigfWhile_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     iterCount = 0;
     loopDestroyed = 0;
 }
@@ -83,23 +82,23 @@ TS_STATE(INI_pigfFunction_START)
 TS_STATE(ACT_START)
 {
 	/* ★ destroy の転送 (ひさ設計 2026-08-11)。curCond/curBody は **自分が clone した持ち物** なので
-	 * 呼び元の AST からは辿れない = ここで明示的に送る。無条件巡回はしない (args は front の持ち物)。
-	 * 1 度だけ送り通常経路へ落とす (destroy された子は front をエラー解決するので compact が拾う)。 */
+	 * 呼び元の AST からは辿れない = ここで明示的に送る。無条件巡回はしない (args は _front の持ち物)。
+	 * 1 度だけ送り通常経路へ落とす (destroy された子は _front をエラー解決するので compact が拾う)。 */
 	if ( is_destroyed() && ! loopDestroyed ) {
 		loopDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] while: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] while: destroy 転送\n");
 		if ( curCond.is_notNull() ) curCond->destroy();
 		if ( curBody.is_notNull() ) curBody->destroy();
 	}
 	if ( args.length() < 2 ) {                 /* 文法上ありえないが安全に */
-		front->set_result(thNEW(pigDataNull,()));
+		_front->set_result(thNEW(pigDataNull,()));
 		return rDO|FIN_START;
 	}
 	if ( curCond == thNULL )
 		curCond = args[0]->clone();            /* 周回ごとに新鮮ノード */
 	sPtr<pigData> cv = curCond->compact();     /* 不動点解決。async なら yield→再走(curCond 保持) */
 	if ( cv->is_error() ) {
-		front->set_result(cv);
+		_front->set_result(cv);
 		return rDO|FIN_START;
 	}
 	if ( cv->get_bool() )
@@ -111,17 +110,17 @@ TS_STATE(ACT_START)
 TS_STATE(ACT_pigfWhile_BODY)
 {
 	/* ★ destroy の転送 (ひさ設計 2026-08-11)。curCond/curBody は **自分が clone した持ち物** なので
-	 * 呼び元の AST からは辿れない = ここで明示的に送る。無条件巡回はしない (args は front の持ち物)。
-	 * 1 度だけ送り通常経路へ落とす (destroy された子は front をエラー解決するので compact が拾う)。 */
+	 * 呼び元の AST からは辿れない = ここで明示的に送る。無条件巡回はしない (args は _front の持ち物)。
+	 * 1 度だけ送り通常経路へ落とす (destroy された子は _front をエラー解決するので compact が拾う)。 */
 	if ( is_destroyed() && ! loopDestroyed ) {
 		loopDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] while: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] while: destroy 転送\n");
 		if ( curCond.is_notNull() ) curCond->destroy();
 		if ( curBody.is_notNull() ) curBody->destroy();
 	}
 	if ( curBody == thNULL ) {
 		if ( ++iterCount > PIGF_WHILE_MAX_ITER ) {
-			front->set_result(thNEW(pigDataError,("while: iteration limit exceeded",thNULL)));
+			_front->set_result(thNEW(pigDataError,("while: iteration limit exceeded",thNULL)));
 			return rDO|FIN_START;
 		}
 		curBody = args[1]->clone();            /* 周回ごとに新鮮ノード */
@@ -137,7 +136,7 @@ TS_STATE(ACT_pigfWhile_BODY)
 			curCond = thNULL; curBody = thNULL;
 			return rDO|ACT_START;
 		}
-		front->set_result(bv);                 /* return 信号 or 実エラー → 上方へ伝播 */
+		_front->set_result(bv);                 /* return 信号 or 実エラー → 上方へ伝播 */
 		return rDO|FIN_START;
 	}
 	last    = bv;
@@ -148,7 +147,7 @@ TS_STATE(ACT_pigfWhile_BODY)
 
 TS_STATE(ACT_pigfWhile_DONE)
 {
-	front->set_result( (last == thNULL) ? sPtr<pigData>(thNEW(pigDataNull,())) : last );
+	_front->set_result( (last == thNULL) ? sPtr<pigData>(thNEW(pigDataNull,())) : last );
 	return rDO|FIN_START;
 }
 

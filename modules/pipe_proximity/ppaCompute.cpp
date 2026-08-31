@@ -2,9 +2,9 @@
  * ppaCompute — pipe_proximity in-proc 実行体の計算本体 (ptsCalcBody 派生・値返し)。
  *   .so 化 Phase 5 (docs §5)。mfaVolume 等の値返し calc body のミラー。
  *
- * 1 つの calc body が pipe_proximity の 5 op (検出/調整/scene 検出/scene 調整/サンプル) を捌くので、
- *   ptsCalcBody の (parent, args, target) に加えて **op 名** を ctor で受け取り、TS_THREAD の
- *   compute() で pp_compute(op, *args) を回す。pp_compute は純 pigData 境界 (process 版 serve と共有)。
+ * 1 つの calc body が pipe_proximity の 5 _op (検出/調整/scene 検出/scene 調整/サンプル) を捌くので、
+ *   ptsCalcBody の (parent, args, target) に加えて **_op 名** を ctor で受け取り、TS_THREAD の
+ *   compute() で pp_compute(_op, *args) を回す。pp_compute は純 pigData 境界 (process 版 serve と共有)。
  *   重い調整計算 (pipe_adjust の反復) は基底 ptsCalcBody が専用 thread で走らせるので、planner の
  *   協調スケジューラ (ptsMediatorInternal 経路) をブロックしない。
  */
@@ -32,7 +32,6 @@ public:
 	sRptr<ptsObject,tinyState>		parent;
 protected:
 	virtual void	compute();
-	sPtr<stdString>	op;
 private:
 	TS_DEFARGS
 };
@@ -56,7 +55,6 @@ ppaCompute_::ppaCompute_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    op = _op;
 }
 
 
@@ -69,6 +67,6 @@ ppaCompute_::ppaCompute_(TS_ARGS0)
 void
 ppaCompute_::compute()
 {
-	const char *opn = ( op.is_notNull() ) ? op->get_str() : "pipe_proximity";
+	const char *opn = ( _op.is_notNull() ) ? _op->get_str() : "pipe_proximity";
 	result = pp_compute(opn, *args);
 }

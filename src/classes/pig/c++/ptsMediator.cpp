@@ -43,12 +43,29 @@ public:
 
 	sRptr<tinyState,tinyState>		parent;
 
-	/* 通信確立。0=成功 / 非0=起動失敗 (External: fork 失敗等。同期で返す)。 */
-	virtual int	enable();
+	/* 通信確立。0=成功 / 非0=起動失敗 (External: fork 失敗等。同期で返す)。
+	 * ★ #3441 (ひさ設計 2026-08-26・旧 #3419 C_ENV の再構築): env = module(so,{opts}) の
+	 *   ハッシュ (thNULL 可 = 何も渡さない)。**OS のプロセス環境変数は使わない** — in-proc の
+	 *   実行体に届かないため (同じ仕組みで process / in-proc の両方へ届ける必要がある)。
+	 *   ⚠ in-proc (Internal) は同一プロセス・同一 descriptor なので実は不要 — module() 実行時に
+	 *   pigModuleRegistry が直接 configure() を呼んで完結する。env は **process (External) だけ**
+	 *   が使う (起動直後に C_ENV で 1 回送る)。Internal 側は override してもパラメタを無視する。
+	 *   default 引数は **ここ (base) にだけ**書く (override 側で重複定義しない — C++ の
+	 *   既定引数は静的型で解決されるため、複数箇所に書くと base ポインタ越しの呼び出しで
+	 *   食い違いかねない)。 */
+	virtual int	enable(sPtr<pigData> env = thNULL);
+	/* ★ #3419 T4-b: 別プロセスで走っているなら its pid、そうでなければ 0。
+	 * C_MEM の集計に使う (§4.1)。in-proc は planner に含まれるので 0 でよい。 */
+	virtual uint32_t	agent_pid();
 	/* 起動失敗が非同期に確定したか (External の fork 失敗)。基底は常に 0。 */
 	virtual int	launch_failed();
 	/* 子プロセスが終了していれば waitpid の生 status、まだ/該当なしなら -1。基底は -1。 */
 	virtual int	child_status();
+	/* ★ このメディエータが担当しているモジュール名 (in-proc のみ・無ければ thNULL)。
+	 * 「いま走っている op はどのモジュールのものか」を caller 鎖から引くのに使う
+	 * (pig_current_module_id)。process 実行では agent プロセスに .so が 1 本しか無いので
+	 * レジストリ側の「唯一のモジュール」解決で足りる。 */
+	virtual sPtr<stdString>	module_name();
 	/* ★ 演算子名の送信 (2026-08-02 メモ §2.1)。 */
 	virtual int	pl_write_op(sPtr<stdString> s);
 	/* planner→agent: 引数 1 個。PATH/INLINE の弁別 (is_cache) は Mediator 内で行う。 */
@@ -74,6 +91,7 @@ private:
 TS_END_IMPLEMENT
 
 TS_BEGIN_INTERFACE
+class pigDataHash;   /* ★ #3419: 環境制御変数 */
 #include	"ts2/c++/sRptr.h"
 class ptsObject;
 class pigData;
@@ -110,10 +128,25 @@ ptsMediator_::child_status()
 	return -1;   /* 子プロセスを持たない実装 (in-proc thread 等) */
 }
 
-int
-ptsMediator_::enable()
+sPtr<stdString>
+ptsMediator_::module_name()
 {
-	return -1;
+	return sPtr<stdString>();   /* 基底は知らない (External は agent プロセス側で解決する) */
+}
+
+int
+ptsMediator_::enable(sPtr<pigData> env)
+{
+	(void)env;
+	return 0;
+}
+
+
+/* ★ #3419: 基底は「別プロセスではない」= 0。External だけが override する。 */
+uint32_t
+ptsMediator_::agent_pid()
+{
+	return 0;
 }
 
 int

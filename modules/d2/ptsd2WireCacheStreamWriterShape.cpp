@@ -27,7 +27,6 @@ public:
 
 	void	chunk(const uint8_t *data, int n);
 protected:
-	sPtr<d2Shape>	shapeObj;
 private:
 	TS_DEFARGS
 };
@@ -50,7 +49,6 @@ ptsd2WireCacheStreamWriterShape_::ptsd2WireCacheStreamWriterShape_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    shapeObj = _shape;
 }
 
 
@@ -71,21 +69,21 @@ ptsd2WireCacheStreamWriterShape_::chunk(const uint8_t *data, int n)
 
 TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* D_META に形式タグ "D2S2" を書く */
 {
-	if ( shapeObj.is_notNull() )
-		write_d_meta((const uint8_t*)shapeObj->meta_tag(), 4);
+	if ( _shape.is_notNull() )
+		write_d_meta((const uint8_t*)_shape->meta_tag(), 4);
 	else
 		write_d_meta((const uint8_t*)"D2S2", 4);
 	return rDO|INI_ptsWireCacheStreamWriter_DONE;
 }
 TS_THREAD(ACT_START)                          /* shape を D_CHUNK へストリーム書き込み */
 {
-	if ( shapeObj.is_notNull() ) {
+	if ( _shape.is_notNull() ) {
 		struct Sink : d2ChunkSink {
 			ptsd2WireCacheStreamWriterShape_ *w;
 			void chunk(const uint8_t *data, int n) { w->chunk(data, n); }
 		} sink;
 		sink.w = this;
-		shapeObj->encode(sink);
+		_shape->encode(sink);
 	}
 	return rDO|FIN_START;
 }

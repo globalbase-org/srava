@@ -91,17 +91,17 @@ static sPtr<stdString> export_write_error_msg(const char *path, int dim)
 	char buf[512];
 	if ( dim == 2 && is3dFmt )
 		::snprintf(buf, sizeof buf,
-			"export: '%s' は 3D 専用形式です。この形状は 2D です — "
-			"SVG/DXF で出力するか、extrude/revolve で 3D 化してから STL/OFF/OBJ/PLY に書いてください (%s)",
+			"export: '%s' is a 3D-only format but this shape is 2D - "
+			"write SVG/DXF instead, or make it 3D with extrude/revolve before writing STL/OFF/OBJ/PLY (%s)",
 			e, path);
 	else if ( dim == 3 && is2dFmt )
 		::snprintf(buf, sizeof buf,
-			"export: '%s' は 2D 専用形式です。この形状は 3D です — "
-			"STL/OFF/OBJ/PLY で出力するか、section で断面を取ってから SVG/DXF に書いてください (%s)",
+			"export: '%s' is a 2D-only format but this shape is 3D - "
+			"write STL/OFF/OBJ/PLY instead, or take a cross-section with section before writing SVG/DXF (%s)",
 			e, path);
 	else if ( ! is3dFmt && ! is2dFmt )
 		::snprintf(buf, sizeof buf,
-			"export: 未知の拡張子 '%s'。対応形式: 3D=OFF/STL/OBJ/PLY/AMF/3MF, 2D=SVG/DXF (%s)",
+			"export: unknown extension '%s'. supported: 3D=OFF/STL/OBJ/PLY/AMF/3MF, 2D=SVG/DXF (%s)",
 			e, path);
 	else   /* 形式と次元は合っているのに失敗 → IO(権限/パス)系。原因は特定できない */
 		::snprintf(buf, sizeof buf, "export: cannot write %s", path);

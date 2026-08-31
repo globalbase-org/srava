@@ -98,7 +98,7 @@ mfaExport_::compute()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
 		char b[256];
-		::snprintf(b, sizeof b, "export: cannot write %s (mf は STL/OFF に対応)", p);
+		::snprintf(b, sizeof b, "export: cannot write %s (mf supports STL/OFF)", p);
 		result = thNEW(pigDataError,(thNEW(stdString,(b))));
 		return;
 	}

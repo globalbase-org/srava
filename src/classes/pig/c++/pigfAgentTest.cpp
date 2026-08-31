@@ -29,10 +29,17 @@ CLASS_TINYSTATE(pig/c++/pigfAgentTest,pig/c++/ptsApplication)
  * fixture (cgal_test_fixture.cpp) は INI から app レジストリへ登録する。 */
 extern void srava_register_cgal_test_fixture(sPtr<pigModuleRegistry> reg);
 
+/* ★ #3440: op 名を必ず付ける。実プログラムのノードは parser / pigfMapOp が必ず set_op_name する
+ *   ので、op 名の無いノードは**このテストだけ**の形だった。routing は「型で解決できなければ
+ *   明示エラー」になったため、op 名なしノードのために routing 側へ例外を置くのは筋が悪い
+ *   (production のコードにテスト専用の穴が空く)。→ テスト側が実プログラムと同じ形を取り、
+ *   fixture が "test_echo" を "->value" で申告する (src/main/cgal_test_fixture.cpp)。
+ *   stub agent は op 名を見ず引数を連結して "R(args)" を返すので、期待値は変わらない。 */
 static sPtr<pigDataFunction<pigfModuleAgent> > mkAgent2(sPtr<pigData> a0, sPtr<pigData> a1) {
 	sPtr<pigDataFunction<pigfModuleAgent> > fn = thNEW(pigDataFunction<pigfModuleAgent>,());
 	fn->pushArg(a0);
 	if (a1.is_notNull()) fn->pushArg(a1);
+	fn->set_op_name(thNEW(stdString,("test_echo")));
 	return fn;
 }
 

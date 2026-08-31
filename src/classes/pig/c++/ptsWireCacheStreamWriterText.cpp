@@ -2,7 +2,7 @@
  * ptsWireCacheStreamWriterText — データキャッシュ(srava 文法テキスト)出力用の writer 派生。
  * 上位フレームワーク依存部の最小実装(往復テスト用):
  *   - INIT gate で D_META に形式タグ "TEXT" を書く。
- *   - ACT_START(TS_THREAD)で payload(stdString)を D_TEXT レコードとして書き出す。
+ *   - ACT_START(TS_THREAD)で _payload(stdString)を D_TEXT レコードとして書き出す。
  * 基底が streamhdr / TSE_ASSERT / W_END 番兵 / TSE_RETURN を担う。
  */
 #include	"pig/c++/ptsObject.h"
@@ -26,7 +26,6 @@ public:
 
 	sRptr<ptsObject,tinyState>		parent;
 protected:
-	sPtr<stdString>	payload;
 private:
 	TS_DEFARGS
 };
@@ -47,7 +46,6 @@ ptsWireCacheStreamWriterText_::ptsWireCacheStreamWriterText_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    payload = _payload;
 }
 
 
@@ -63,6 +61,6 @@ TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* D_META に形式タグを書く
 }
 TS_THREAD(ACT_START)                          /* 本体書き込み(blocking, 専用スレッド) */
 {
-	write_d_text(payload);
+	write_d_text(_payload);
 	return rDO|FIN_START;
 }

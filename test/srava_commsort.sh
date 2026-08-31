@@ -4,6 +4,12 @@
 # $1=srava 実行体。SRAVA_AGENT / SRAVA_CACHE_DIR は cmake が注入。
 SRAVA="$1"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★ #3452: 起動時 eager-load 撤去に伴い、union/intersection/difference の実行に実カーネルの
+#   明示ロードが要る。
+export SRAVA_MODULE_ALL=1
+# include "module/all.sra" の解決に要る(cmake ENVIRONMENT が SRAVA_PATH を設定していないため)。
+SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
+export SRAVA_PATH
 
 hashof() {   # $1 = srava ソース → result cache の 16hex を返す。dir を毎回リセットして
 	# 他 run のキャッシュ掃除ログ("swept unused cache: <hash>")の混入を防ぐ。result 行限定で抽出。

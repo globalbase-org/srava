@@ -12,12 +12,12 @@
 #include <string.h>
 #include <string>
 #include <typeinfo>
+#include <exception>   /* std::exception_ptr (spark_args の yield 握り直し・#3419) */
 #include <math.h>       /* 初等関数(sin/cos/sqrt/...) */
 #include <sys/stat.h>   /* pigDataFileRef::get_hashkey の (size,mtime) ゲート */
 #include <unistd.h>     /* access (pigDataCache::is_valid) */
 #include "pig/c++/pigwire.h"   /* pigDataCache::get_module_tag の D_META オフセット/定数 */
 #include "pig/c++/pigModuleRegistry.h"   /* カーネル名↔id・4CC→id はレジストリへ集約 (Phase 1) */
-#include "pig/c++/pigTypeRegistry.h"     /* rev4 Phase B-2: 型名↔tag (継続スタンプの型リスト解釈) */
 #include "pig/c++/pigCacheCodec.h"       /* P3: get_body(wantTypes) の reader_for (4CC×型で変換可否) */
 #include "pig/c++/pigModuleLoader.h"
 #include "pig/c++/osglue.h"   /* OSGLUE_MODULE_SUFFIX: module("x.so") の拡張子正規化 */     /* load()/agent() op が .so をロード (Phase 4b) */
@@ -59,40 +59,6 @@ pHashKeyType pigDataFileRef::get_hashkey() {
     for (int b = 0; b < 8; ++b) { h ^= (mt >> (8*b)) & 0xff; h *= prime; }
   }
   return (pHashKeyType)h;   /* 不在時は path のみ(size/mtime 寄与なし) */
-}
-
-/* 構造ハッシュ(可変ソートの順序キー)。typeid + op_name + 各 arg の recipe_hash を FNV-1a で混ぜる。
- * compact を一切呼ばないので評価(agent dispatch)を起こさない = 純静的。子も recipe_hash で再帰。 */
-pHashKeyType pigDataOperator::recipe_hash() {
-  uint64_t h = 1469598103934665603ULL;
-  const uint64_t prime = 1099511628211ULL;
-  for (const char *p = typeid(*this).name(); *p; ++p) { h ^= (unsigned char)*p; h *= prime; }
-  if (op_name != thNULL)
-    for (const char *p = op_name->get_str(); *p; ++p) { h ^= (unsigned char)*p; h *= prime; }
-  for (int k = 0; k < args.length(); ++k) {
-    uint64_t a = (uint64_t)args[k]->recipe_hash();
-    for (int b = 0; b < 8; ++b) { h ^= (a >> (8*b)) & 0xff; h *= prime; }
-  }
-  return (pHashKeyType)h;
-}
-
-/* 静的正規化: 子を先に正規化(構造ハッシュが正準化される)→ 可換 op(union/intersection)の引数を
- * recipe_hash 昇順に並べ替え。これで a|||b と b|||a が同一引数順 → 同一キャッシュキー(再利用)。
- * difference は非可換なのでソートしない。box 等の固定位置引数も対象外(op_name で限定)。 */
-void pigDataOperator::normalize() {
-  for (int k = 0; k < args.length(); ++k)
-    args[k]->normalize();
-  int commutative = 0;
-  if (op_name != thNULL) {
-    const char *nm = op_name->get_str();
-    commutative = (::strcmp(nm, "union") == 0 || ::strcmp(nm, "intersection") == 0);
-  }
-  if (commutative) {   /* 引数を recipe_hash 昇順に安定ソート(n 小なので挿入ソート) */
-    for (int i = 1; i < args.length(); ++i)
-      for (int j = i; j > 0 && (uint64_t)args[j-1]->recipe_hash() > (uint64_t)args[j]->recipe_hash(); --j) {
-        sPtr<pigData> t = args[j-1]; args[j-1] = args[j]; args[j] = t;
-      }
-  }
 }
 
 /* 非対応エラー(エラーオペランド自体は pigDataError の override が短絡するのでここには来ない) */
@@ -259,7 +225,8 @@ sPtr<pigData> pigDataString::p_add(sPtr<stdString> dd) {
 sPtr<stdString> pigDataArray::get_str() {
   /* std::string アキュムレータ(償却 O(1))。`r->add` 連結は O(N²)(serialize と同じ罠)。
    * ★ get_hashkey() が get_str() を呼ぶため、巨大配列のキャッシュキー計算がここに律速される
-   *   (#4: 8192 点 tube の planner 19s の正体。serialize は直したが get_str を見落としていた)。 */
+   *   (#4: 巨大な点列の tube で planner が律速していた正体。serialize は直したが
+   *    get_str を見落としていた)。 */
   std::string acc = "[";
   for (int i = 0; i < d.length(); ++i) {
     if (i) acc += ",";
@@ -299,19 +266,49 @@ sPtr<stdString> pigDataPair::print() {
   return r->add(_car->print())->add(" . ")->add(_cdr->print())->add(")");
 }
 /* ★ P2e (⑤ 型軸化): 旧 pigDataCache::get_module_tag (キャッシュの「サポートするカーネル」を 4CC→module で
- *   引く #3404 の API) を撤去した。routing はキャッシュの **型** (type_name) を読み、そこから型軸で
- *   executor を決める (arg_type_set→decide_executor / module_of_type)。「値に module が属す」概念は消えた。 */
+ *   引く #3404 の API) を撤去した。routing はキャッシュの **型スタンプ** (type_stamp) を読み、そこから
+ *   型軸で executor を決める (arg_type_set→decide_executor / module_of_type)。
+ *   ★ 2026-08-19: 「4CC → 型」の逆引き (type_of_tag) もシステムから撤去した。形式 (4CC) は
+ *   複数モジュールが共有してよいもので、型を一意に決める根拠にならない。cache が名乗るのは
+ *   **形式だけ** (describe) で、型は planner が載せたスタンプだけが持つ。 */
 
-/* キャッシュ本文の実装型名 = **file 先頭 D_META の 4CC → type_of_tag**。routing (arg_type_set) の
- *   一次キー。非ブロッキング (peek_tag は同期 read。file 不在/未メタなら fopen 失敗で 0)。
- *   ★ converted[] は見ない: converted[0] は「最初に載ったエントリ」で file の native 型とは限らず
- *   (downgrade で先に foreign 型を読むと不一致)、routing が誤った型を見る。型は 4CC が唯一の真実。
- *   値キャッシュ (D_META でない) は型なし = 0。 */
-const char *pigDataCache::type_name() {
+/* この cache が **ストリーム本体** (mesh 等) を指しているか。非ブロッキング
+ *   (peek_tag は同期 read。file 不在/未メタなら 0 = 形式不明)。 */
+int pigDataCache::is_stream_cache() {
   unsigned char tag[4];
-  if (!peek_tag(tag)) return 0;
-  sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③ */
-  return ( reg != thNULL ) ? reg->types.type_of_tag(tag) : 0;
+  if (!peek_tag(tag)) return 0;          /* 形式不明 (未書込/不在) */
+  return wire_tag_is_text(tag) ? 0 : 1;  /* "TEXT" = 値キャッシュ */
+}
+
+/* 診断用の自己記述 (宣言のコメント参照)。「型名が引けない」= 異常ではなく設計どおり
+ * (agent プロセスは planner が計画した .so を 1 本しか積まない) なので、欠落を示す記号は出さず
+ * 単に形式だけを名乗る。値キャッシュ (D_META "TEXT") は「値」と言い切る — 呼び出し側が
+ * 「形式 'TEXT' を mesh へ変換できない」と書くより原因に直結する。 */
+sPtr<stdString> pigDataCache::describe() {
+  unsigned char tag[4];
+  if (!peek_tag(tag))
+    return thNEW(stdString,("unknown format (D_META not written, or file missing)"));
+  if (wire_tag_is_text(tag))
+    return thNEW(stdString,("a value (format 'TEXT')"));
+  /* ★ 2026-08-19 (ひさ設計): 記述の主語は **形式 (4CC)** だけにする。
+   *   以前は type_of_tag で引いた型名を「= type 'X'」と 1 つだけ添えていたが、あれは
+   *   「同じ 4CC を複数モジュールが名乗ったら先勝ち」の結果であって、その形式の唯一の解釈ではない。
+   *   型を見せたいなら、**ロード済みモジュールのうちその 4CC を読めるものが出せる型を全部**
+   *   列挙するのが正しい (昇格読み・降格読みも含む)。 */
+  char b[320];
+  std::string types;
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  int n = ( reg != thNULL ) ? reg->types_readable_from_tag(tag, types) : 0;
+  /* ★ 列挙は **このプロセスに積まれているモジュール**の範囲であることを明示する。agent プロセスは
+   *   planner が計画した .so を 1 本しか積まない (docs §1.2) ので、そこで「読めない」と出ても
+   *   「システム全体にその型が無い」という意味ではない。4CC はどのプロセスでも読めるが、
+   *   型はモジュール依存、という非対称が元からある。 */
+  if (n > 0)
+    ::snprintf(b, sizeof b, "format '%.4s' (this process can read it as: %s)",
+               (const char*)tag, types.c_str());
+  else
+    ::snprintf(b, sizeof b, "format '%.4s' (no module in this process reads it)", (const char*)tag);
+  return thNEW(stdString,(b));
 }
 
 /* ★ in-memory body(#3406, 2026-0727 メモ §2 / 2026-07-29 メモ 3. で抽象化完成)。
@@ -344,15 +341,37 @@ int pig_register_module_name(const char *s) {
  *   「型スタンプか否か」= 型メンバシップだけ。これで module_of_tag 依存が消える。
  * 非 pair は car() がエラー値を返し get_str が安全に流れる = 従来判定と同じ素通り。 */
 int pig_is_delayed(sPtr<pigData> v) {
-  const char *car = v->car()->get_str()->get_str();
+  /* ★ 2026-08-28 (ひさ指摘): まず **pair かどうか**を確定させる。非 pair は pigData::car() の既定が
+   *   エラー値を返すので is_error() で分かる。以前は文字列にしてから型名照合に掛けていたが、
+   *   ① 非 pair (呼ばれ方の大多数) が毎回 全モジュール × 全 codec 行の CSV 走査を通っていた
+   *   ② 「pair か」と「car が型スタンプか」の 2 段が 1 段に潰れていて意図が読めなかった
+   *   ⚠ **訂正**: 当初これを「非 pair のとき解放済みメモリを読んでいる」と書いたが、**誤り**だった。
+   *      `v->car()->get_str()->get_str()` の一時 sPtr は文末で消えるので char* が宙に浮くはず、
+   *      と読んだが、**実測すると生きている** (非 pair 21 回すべてで先頭バイトが 'E' = "ERROR: " の
+   *      まま。sObject::operator delete は解放時に 0xaa で塗るので、塗られていない = 解放されていない。
+   *      valgrind (--fair-sched=yes) でも Invalid read は 0 件)。
+   *      sPtr をローカルで受ける形は残すが、それは**寿命の修正ではなく読みやすさのため**。
+   *   ★ 原則 (ひさ): **stdObject の中を指した const char* は、その stdObject が解放されない限り有効**。
+   *      見るべきは「一時 sPtr が文末で消えるか」ではなく「**その stdObject が解放されるか**」。
+   *      加えて pig_is_delayed の呼び手は 14 箇所すべて TS_STATE 内 (評価器 / planner / N 項分解) で、
+   *      tinyState の状態機械は app-mutex 下で直列化されるので、読んでいる間に別スレッドが
+   *      解放する筋も無い。 */
+  sPtr<pigData> c = v->car();
+  if ( c->is_error() ) return 0;                  /* 非 pair = 継続ではない */
+  sPtr<stdString> cs = c->get_str();
+  const char *car = cs->get_str();
   char tok[64]; int n = 0;                        /* 先頭トークン (CSV 型名リストの先頭型) */
   while (car[n] != '\0' && car[n] != ',' && n < 63) { tok[n] = car[n]; ++n; }
   tok[n] = '\0';
-  unsigned char tag[4];
   sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
   if ( reg == thNULL ) return 0;                  /* app 無し (単体テスト) = 型スタンプ概念なし */
-  return reg->types.tag_of_type(tok, tag)         /* 新: 先頭が登録済み型名 (型スタンプ) */
-      || reg->id_of_name(car) >= 0;               /* 旧: カーネル名スタンプ (coexistence) */
+  /* ★ 2026-08-28 (ひさ指摘): ここは **メンバシップだけ** が要る。以前は tag_of_type で 4CC まで
+   *   引いて捨てていたが、それだと ① 4CC を持たない型が型名でなくなる ② 所有モジュールを
+   *   module(so,"off") にすると型名ごと消える、という要らない条件が付いてきた。②は実害があり、
+   *   off にした型のスタンプが解釈できず agent が死んでいた。
+   *   ★ 旧「カーネル名スタンプ」(id_of_name(car) >= 0) は撤去した。型スタンプ化 (2026-08-19) の
+   *     受け皿として残していたが、全 345 テストで **一度も発火しなかった**ので死んでいた。 */
+  return reg->type_is_known(tok);                 /* 先頭が登録済み型名 (型スタンプ) */
 }
 
 /* ★ #3427 ③: 旧グローバルフック (プロセス唯一の可変 static) は撤去。helper 生成子は
@@ -442,7 +461,32 @@ int pigDataCache::peek_tag(unsigned char out[4]) {
  *      無ければ thNULL — reader は起動しない。「mesh cache に value は無い」「値キャッシュから
  *      mesh 型は作れない」も特殊ケースではなくこの一般規則の帰結。
  *   ④ 選ばれた型の reader helper を起動して listen+yield。 */
-sPtr<pigData> pigDataCache::get_body(const char* const* wantTypes, int n) {
+/* ★ 2026-08-28 (ひさ設計・ABI v12): **配線された本体クラス**で実体化する get_body。
+ *   want = op の引数に配線されたクラスの create_for_meta。この file の 4CC を渡して
+ *   「そのクラスが受け取れるか」を訊き、受け取れたら **返ってきた具象の type_name()** を
+ *   欲しい型として下の一般実装へ渡す。
+ *   ★ これで「モジュールが消費できる型の一覧」を申告させる必要が消える — 欲しい型は
+ *     op の計算本体が d_cast するクラスそのもので、そのクラスだけが知っている
+ *     (codec 表の writer 行からも reader 行からも sig からも導けない: writer を持たない
+ *      検査専用・reader を持たない生成専用・codec を持たないモジュールが現に成立するため)。
+ *   ⚠ probe は型を訊くためだけの空インスタンス。decode は下の実装が reader helper で行う。 */
+sPtr<pigData> pigDataCache::get_body(const pigWireClass* want) {
+  if (want == 0 || want->create == 0) return get_body_impl(0, 0, 0);   /* 幾何を要求しない引数 */
+  unsigned char tag[4];
+  if (!peek_tag(tag) || wire_tag_is_text(tag)) {     /* 値キャッシュ (D_META "TEXT" / メタ無し) */
+    static const char* const kValue = "value";
+    return get_body_impl(&kValue, 1, 0);
+  }
+  sPtr<pigData> probe = want->create(tag, 4);
+  if (probe == thNULL) return thNULL;                /* このクラスはこの形式を受け取れない */
+  const char* t = probe->type_name();
+  if (t == 0) return thNULL;
+  return get_body_impl(&t, 1, want);   /* reader はこの階層に固定 (型名で codec 表を引き直さない) */
+}
+
+/* wire != 0 なら reader をその階層に固定する (配線経路)。0 なら従来どおり型名で codec 表を引く
+ * (値キャッシュ・型名版 get_body の経路)。★ 隠れ状態を作らないよう **引数で通す**。 */
+sPtr<pigData> pigDataCache::get_body_impl(const char* const* wantTypes, int n, const pigWireClass* wire) {
   static const char* const kValue = "value";
   if (wantTypes == 0 || n <= 0) { wantTypes = &kValue; n = 1; }
   sPtr<tinyState> caller = sCallSection::key->caller();
@@ -482,29 +526,33 @@ sPtr<pigData> pigDataCache::get_body(const char* const* wantTypes, int n) {
     if (wantTypes[i] == 0) continue;
     int j = conv_index(wantTypes[i]);
     if (j >= 0 && converted[j].done) continue;       /* 失敗済みは再起動しない */
-    sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③ */
-    if (isText ? (::strcmp(wantTypes[i], "value") == 0)
-               : (reg != thNULL && reg->codecs.reader_for(tag, wantTypes[i]) != 0))
+    /* ★ 2026-08-28 (ABI v12): 型付き file の可否は **配線クラスの create_for_meta が既に判定済み**
+     *   (呼び側が受理を確かめてから type_name() を渡している) ので、codec 表を引き直さない。
+     *   配線が無いのは値経路だけ = wantTypes は "value" 1 個。 */
+    if (isText ? (::strcmp(wantTypes[i], "value") == 0) : (wire != 0))
       pick = wantTypes[i];
   }
   pigDataCacheHelperFn pdcFn = pdc_helper_fn();
   if (pick == 0 || pdcFn == 0 || path == thNULL)
     return thNULL;                                   /* この file から候補のどれも作れない */
-  /* ④ reader helper 起動。[CONV] は **genuine な変換 (src != target) のときだけ** 出す
-   *   (native 読みは出さない・旧仕様互換)。 */
-  const char* src = "value";
-  if (!isText) {
-    sPtr<pigModuleRegistry> reg = pig_current_registry();
-    src = ( reg != thNULL ) ? reg->types.type_of_tag(tag) : 0;
+  /* ④ reader helper 起動。[CONV] は **genuine な変換 (形式の自型でない型を作る) のときだけ** 出す
+   *   (native 読みは出さない・旧仕様互換)。
+   *   ★ 2026-08-19: 変換元は **形式 (4CC)** で名乗る。以前は 4CC を型名へ引き直して
+   *   ("mf-mesh3d -> cg-mesh3d") 出していたが、形式は複数モジュールが共有しうるので
+   *   先勝ちで引いた型名は嘘になる (geogram が書いた "MFM3" を mf-mesh3d と表示する)。 */
+  if (osglue_env_int("SRAVA_DBG_CONV", 0)) {
+    char src[8];
+    if (isText) ::snprintf(src, sizeof src, "value");
+    else        ::snprintf(src, sizeof src, "%.4s", (const char*)tag);
+    if (::strcmp(src, pick) != 0)
+      ::fprintf(stderr, "[CONV] %s -> %s\n", src, pick);
   }
-  if (::getenv("SRAVA_DBG_CONV") != 0 && src != 0 && ::strcmp(src, pick) != 0)
-    ::fprintf(stderr, "[CONV] %s -> %s\n", src, pick);
   int i = conv_ensure(pick);
   converted[i].body = thNULL;
   converted[i].done = 0;
   converted[i].isWriter = 0;
   converted[i].helper = pdcFn(caller, sPtr<pigDataCache>(this), PDC_MODE_LOAD,
-                                      thNEW(stdString,(pick)));
+                                      thNEW(stdString,(pick)), wire);
   if (converted[i].done) converted[i].helper = thNULL;   /* 同期完走の取りこぼし防止 */
   if (converted[i].body != thNULL) return converted[i].body;
   if (converted[i].helper.is_notNull()) {
@@ -512,12 +560,6 @@ sPtr<pigData> pigDataCache::get_body(const char* const* wantTypes, int n) {
     throw sException([](sPtr<tinyState> caller) { return 1; });
   }
   return converted[i].body;   /* done・body 無し = 失敗 */
-}
-
-/* 単型版 = 候補 1 個の退化形。 */
-sPtr<pigData> pigDataCache::get_body(const char* type) {
-  if (type == 0 || type[0] == '\0') type = "value";
-  return get_body(&type, 1);
 }
 
 void pigDataCache::set_body(sPtr<pigData> d) {
@@ -536,7 +578,7 @@ void pigDataCache::set_body(sPtr<pigData> d) {
   if (pdcFn != 0 && path != thNULL) {
     converted[i].done = 0;
     converted[i].helper = pdcFn(sCallSection::key->caller(), sPtr<pigDataCache>(this),
-                                        PDC_MODE_SAVE, thNEW(stdString,(ty)));
+                                        PDC_MODE_SAVE, thNEW(stdString,(ty)), 0);
     if (converted[i].done) converted[i].helper = thNULL;   /* 掲示より先に完走 → 取消 */
   } else {
     converted[i].done = 1;
@@ -545,7 +587,7 @@ void pigDataCache::set_body(sPtr<pigData> d) {
 
 /* 無引数 = 候補 {"value"} の退化形 (A_SAVE_BEGIN payload 判定 / 値本文の取得)。mesh cache に
  * 対しては「D_META から value は作れない」の一般規則で thNULL = インライン値ではない、が返る。 */
-sPtr<pigData> pigDataCache::get_body() { return get_body((const char* const*)0, 0); }
+sPtr<pigData> pigDataCache::get_body() { return get_body_impl(0, 0, 0); }   /* 値 / in-memory */
 
 /* SAVE (writer) が走り終えたか。writer エントリの done で判定・走行中は購読して 0。
  * writer が無い (process 生産者/reader) 場合は validState 確定で完了扱い。 */
@@ -754,14 +796,32 @@ void pigEnvironment::snapshot_into(sPtr<pigEnvironment> frozen) {
 void pigDataDelay::set_result(sPtr<pigData> r, int flag) {
   if (flag && result != thNULL) return;
   result = r;
-  if (helper.is_notNull())
+  if (helper.is_notNull()) {
     helper->invoke_listen(thNEW(stdEvent,(TSE_UPDATED, helper, thNULL)));
+    /* ★ #3419 (2026-08-22・ひさ判断): **解決した時点で helper を手放す**。
+     * helper は「まだ解決していない間だけ必要なもの」で、result が入れば用済み。
+     *
+     * ⚠ これが無いと pigDataPromise が helper (= pigfAgent) を永久に握る。promise には
+     *   clean() が無い (pigDataOperator にしかない) ので切る経路が存在せず、in-proc では
+     *   promise → helper → agent の環が残り、promise の result である pigDataCache
+     *   (メッシュ実体) が planner 終了まで常駐した。
+     *   ⇒ 切ると promise / pigDataCache の残存が大きく減り、終了時の常駐量も落ちる。
+     *
+     * ★ 安全性 (確認済み):
+     *   - preprocess() が helper を読むのは **result == thNULL のときだけ** (:810) なので到達しない
+     *   - 解決済みノードへの再 set_result は **実在しない** (ctest 全本で到達 0 件)
+     *   - destroy() の上流伝播 (:803) は「計算が終わっていない helper に値を確定させる」ための
+     *     もので、result 確定後は伝播しなくてよい (ひさ)。⚠ ctest 全本で到達 0 件
+     * ⚠ helper が set_result 後も生き続けてエラーを返す必要がある場合は、helper 側の別口で
+     *   面倒を見ること (agent なら ptsApplication の agent 台帳がある)。 */
+    helper = thNULL;
+  }
 }
 
 /* ★ 上流を止める (ひさ設計 2026-08-11)。helper を destroy し、委譲先(result)へ再帰する。
  * PIG_DBG_TD=1 で到達をトレースできる (teardown 調査と同じスイッチ)。 */
 void pigDataDelay::destroy() {
-  if (::getenv("PIG_DBG_TD"))
+  if (osglue_env_int("PIG_DBG_TD", 0))
     ::fprintf(stderr, "[td] pigData destroy: helper=%d result=%d\n",
               helper.is_notNull() ? 1 : 0, (result != thNULL) ? 1 : 0);
   if (helper.is_notNull()) helper->destroy();
@@ -790,6 +850,30 @@ void pigDataDelay::preprocess() {
   }
 }
 
+/* ★ #3419 (ひさ設計 2026-08-24): 引数を並列に解決し始める。詳細は pigData.h の宣言コメント。
+ * 未解決の yield (sException) は握って次の引数へ進み、最後に**最初の 1 つ**を投げ直す
+ * (std::exception_ptr で原物をそのまま持ち回す = EX_STAY 等の型・内容を壊さない)。 */
+sPtr<pigData> pigDataOperator::spark_args() {
+  std::exception_ptr ep;
+  int leftAllResolved = 1;      /* ここまで左が全部「解決済み・非エラー」か */
+  for (int i = 0; i < args.length(); ++i) {
+    try {
+      /* ★ is_error() は pigDataDelay の **compact ゲートウェイ**(pigData.h)。これ 1 つで
+       *   「起動する」と「エラーか見る」を兼ねる: 未解決なら compact→start して yield(=起動)、
+       *   解決済みならエラー判定。⇒ ここが「早く、解決された引数が欲しい」の直接の実装。
+       * ⚠ 左が全部解決済みのときだけ返す。そうしないと、左が未解決のまま右のエラーを拾って
+       *   **報告される ERROR[file,line] が run ごとに変わる**(左優先を壊さないための条件)。 */
+      if (args[i]->is_error() && leftAllResolved) return args[i];
+    }
+    catch (...) {
+      leftAllResolved = 0;      /* ⚠ ここより右のエラーは左優先を壊すので採らない */
+      if (!ep) ep = std::current_exception();
+    }
+  }
+  if (ep) std::rethrow_exception(ep);
+  return thNULL;
+}
+
 sPtr<pigData> pigDataDelay::compact(int depth) {
   preprocess();
   if (result == thNULL)   /* helper も無く未確定 = 論理エラー(同期演算子は到達しない) */
@@ -813,9 +897,8 @@ int pigDataDelay::is_compact() {
 #define PIG_OP_FOLD(Name, method) \
   void pigDataOperator##Name::_start() { \
     if (args.length() == 0) { result = thNEW(pigDataNull, ()); return; } \
-    /* 並列 spark: 2 引数以上なら全 args を起動だけ蹴ってから畳む(独立 op の agent が並列に走る)。 \
-     * 冪等(start_flag)なので _start の yield 再走で二度蹴っても安全。 */ \
-    if (args.length() >= 2) for (int i = 0; i < args.length(); ++i) args[i]->trigger(); \
+    /* ★ #3419: 引数を並列に解決し始める(左優先のエラーは早期リターン)。 */ \
+    { sPtr<pigData> e = spark_args(); if (e.is_notNull()) { result = e; return; } } \
     sPtr<pigData> acc = args[0]; \
     for (int i = 1; i < args.length(); ++i) acc = acc->method(args[i]); \
     result = acc; \
@@ -859,6 +942,9 @@ PIG_OP_UN(Bnot, bnot)   PIG_OP_UN(Anot, anot)
  * 遅延ノード(被参照が var ref 等)は get_ix ゲートで compact 解決される。 */
 void pigDataOperatorIndex::_start() {
   if (args.length() < 2) { result = thNEW(pigDataError, ("index needs base and key", info)); return; }
+  /* ★ #3419: base と key を**先に spark**。get_ix は両者を 1 つずつ解決するので、
+   * これが無いと `重い式[重い添字]` が**直列**に走る。 */
+  { sPtr<pigData> e = spark_args(); if (e.is_notNull()) { result = e; return; } }
   result = args[0]->get_ix(args[1]);
   /* get_ix のエラー(範囲外添字・キー無し等)は配列/ハッシュ値の info(通常 null)を持つ。
    * 位置不明なら、この添字式の位置(`a[i]` の出所)を刻んで ERROR[file,line] にする。 */
@@ -933,6 +1019,10 @@ void pigDataOperatorCatchContinue::_start() {
 }
 /* concat(a, b, ...): 配列連結。配列引数は要素展開、非配列引数は 1 要素として追加。 */
 void pigDataOperatorConcat::_start() {
+  /* ★ #3419: 引数を**先に全部 spark** してから畳む。下の compact ループは 1 つずつ解決するので、
+   * これが無いと `concat(volume(a), volume(b), …)` の agent が**直列**に走る (実測 4 引数で 4 波)。
+   * spark_args() は起動を蹴るだけで compact しない = yield しない。冪等なので _start 再走でも安全。 */
+  { sPtr<pigData> e = spark_args(); if (e.is_notNull()) { result = e; return; } }
   sPtr<pigDataArray> r = thNEW(pigDataArray, ());
   for (int i = 0; i < args.length(); ++i) {
     sPtr<pigData> v = args[i]->compact();
@@ -1063,6 +1153,9 @@ static sPtr<pigData> math_eval(const char *fn, sArray<sPtr<pigData> >& a, int n)
 }
 void pigDataOperatorMath::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError,("math: needs an argument", info)); return; }
+  /* ★ #3419: 引数を**先に全部 spark**。math_eval は a[i]->compact() を 1 つずつ回すので、
+   * これが無いと 2 引数形 (atan2/pow/min/max/log) の agent が**直列**に走る (実測 2 波)。 */
+  { sPtr<pigData> e = spark_args(); if (e.is_notNull()) { result = e; return; } }
   result = math_eval(op_name->get_str(), args, args.length());
 }
 /* print(x, ...): 全 args の print() を連結 → 1 回だけ ::printf。print() は遅延/継続なら
@@ -1075,6 +1168,11 @@ void pigDataOperatorPrint::_start() {
    * 実害: 関数内 exit が `print("r", f(5))` の引数に来ると "ERROR: exit" と表示されてしまう
    * (pigDataControl は pigDataError 派生なので is_error()=1 で伝播すべき値)。
    * エラー/制御値はそのまま結果として返し、上方へ伝播させる (exit はトップで捕捉される)。 */
+  /* ★ #3419: 引数を**先に全部 spark** してから解決する。下のエラーチェックも print() も
+   * 1 つずつ compact するので、これが無いと `print(volume(a), volume(b), …)` の agent が
+   * **直列**に走る (引数の数だけ波が分かれる)。spark_args() は起動を蹴るだけ = yield しない。
+   * ⚠ どのみち全引数を compact するので、先に起こしても評価される式の集合は変わらない。 */
+  { sPtr<pigData> e = spark_args(); if (e.is_notNull()) { result = e; clean(); return; } }
   for (int i = 0; i < args.length(); ++i) {
     sPtr<pigData> a = args[i]->compact();
     if (a->is_error()) { result = a; clean(); return; }
@@ -1089,24 +1187,6 @@ void pigDataOperatorPrint::_start() {
   result = (args.length() > 0) ? args[args.length()-1]->compact()
                                : sPtr<pigData>(thNEW(pigDataNull, ()));
   clean();
-}
-
-/* load(so) — .so をロードして registry へ配線 (planner 側・agent 不要)。冪等。結果 = モジュール名。 */
-void pigDataOperatorLoad::_start() {
-  if (args.length() < 1) { result = thNEW(pigDataError, ("load needs a .so path", info)); return; }
-  sPtr<pigData> pv = args[0]->compact();
-  if (pv->is_error()) { result = pv; return; }
-  const char* path = pv->get_str()->get_str();
-  sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
-  if (reg == thNULL) { result = thNEW(pigDataError, ("load: no module registry (no app)", info)); return; }
-  std::string err;
-  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true);
-  if (d == 0) {
-    char buf[600]; ::snprintf(buf, sizeof buf, "load: %s: %s", path, err.c_str());
-    result = thNEW(pigDataError, (buf, info));
-    return;
-  }
-  result = thNEW(pigDataString, (d->name ? d->name : ""));
 }
 
 /* agent(so[, {exec_default, priority}]) — .so をロードし設定を上書き (docs §2.4)。結果 = モジュール名。 */
@@ -1129,6 +1209,38 @@ normalize_module_path(const char* path) {
   return p;
 }
 
+/* module_loaded(so) — その .so が **いまロードされているか** (1/0)。
+ * ★ module(so,"off") が実アンロードになり、未ロードへの off が明示エラーになったので、
+ *   落とす前に確かめる手段として置く。パスの解き方は module() と同じ (名前だけなら探索路)。
+ * ★ **ロードはしない** — 判定 op がロードという副作用を持ったら判定にならない。 */
+void
+pigDataOperatorModuleLoaded::_start()
+{
+  if (args.length() < 1) { result = thNEW(pigDataError, ("module_loaded needs a .so path", info)); return; }
+  sPtr<pigData> pv = args[0]->compact();
+  if (pv->is_error()) { result = pv; return; }
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  if (reg == thNULL) { result = thNEW(pigDataError, ("module_loaded: no module registry (no app)", info)); return; }
+  std::string npath = normalize_module_path(pv->get_str()->get_str());
+  std::string resolved = reg->resolve_module_file(npath.c_str());
+  result = thNEW(pigDataInteger, ((INTEGER64)(reg->id_of_loaded_file(resolved.c_str()) >= 0 ? 1 : 0)));
+}
+
+/* module(so[, opts]) — **記述子の内容を上書きする** op (docs §2.4)。
+ *
+ * ★ この op は **ロード順を変えない**。ロードはロード (起動時の探索路走査・`load()`)、module は
+ *   上書き、と役割が分かれている。上書きのたびにロード順が動くと、priority 同点の tie-break が
+ *   「どの行を書いたか」で揺れてしまう。(以前は内部で毎回 dlopen し直しており、その副作用で
+ *   ロード順が書き換わっていた。load_file 側を冪等にして解消。)
+ *
+ * ★ 指定されたモジュールが **まだロードされていない場合は新たに読み込む**。探索路の外に置いた
+ *   .so をスクリプトから明示的に持ち込めるのはこの経路 (これは正真正銘のロードなので順序も進む)。
+ *
+ * ★ 同じファイル名で **別の実ファイル**を指した場合はエラー (2026-08-28)。「1 モジュール名に
+ *   つき dlopen は 1 回」(#3425) なので後から来た方は載せられず、黙って先勝ちにすると
+ *   「module() を書いたのに別物が動いている」になる。同じ実体の再指定は従来どおり冪等。
+ *
+ * ★ 引数 1 個の `module(so)` は **`module(so,"on")` の糖衣**。 */
 void pigDataOperatorModule::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError, ("module needs a .so path", info)); return; }
   sPtr<pigData> pv = args[0]->compact();
@@ -1137,28 +1249,90 @@ void pigDataOperatorModule::_start() {
   const char* path = npath.c_str();
   sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
   if (reg == thNULL) { result = thNEW(pigDataError, ("module: no module registry (no app)", info)); return; }
+  /* ★ #3452: optional:1 — 未ロードでも見つからなければ**静かに諦める**(致命エラーにしない)。
+   * lib/module/all.sra のような「入っているものだけ使う」便宜スクリプト向け(ビルド構成によって
+   * 実カーネルの本数は揃っていない = 全部揃っている前提は置けない)。判定は opts 引数(hash)を
+   * load_file より先に覗く必要がある。 */
+  bool optional = false;
+  if (args.length() >= 2) {
+    sPtr<pigData> ov0 = args[1]->compact();
+    if (ov0.is_notNull() && ! ov0->is_error()) {
+      sPtr<pigDataHash> opts0 = ov0->obt_hash();
+      if (opts0.is_notNull()) {
+        sPtr<pigData> op = opts0->get_ix(thNEW(pigDataString, ("optional")));
+        if (op.is_notNull() && ! op->is_error()) optional = (op->get_bool() != 0);
+      }
+    }
+  }
+  /* ★ 2026-08-28 (ひさ指摘): "off" (アンロード) は **load_file より先に**捌く。
+   *   後で捌くと「未ロードのモジュールを off」が「ロードしてから即 dlclose」になり、
+   *   .so の静的初期化と依存ライブラリのロードだけ走って捨てる、という無駄で驚きのある動きになる。
+   *   未ロードに対する off は **明示エラー** (黙って何もしないと、名前を間違えたときに気づけない)。 */
+  if (args.length() >= 2) {
+    sPtr<pigData> ov1 = args[1]->compact();
+    sPtr<pigDataString> sv1 = ov1.is_notNull() ? sPtr<pigDataString>::d_cast(ov1) : sPtr<pigDataString>();
+    if (sv1.is_notNull() && ::strcmp(sv1->get_str()->get_str(), "off") == 0) {
+      std::string resolved = reg->resolve_module_file(path);
+      int lid = reg->id_of_loaded_file(resolved.c_str());
+      char b[900];
+      if (lid < 0) {
+        ::snprintf(b, sizeof b, "module: cannot unload \"%s\": module is not loaded", path);
+        result = thNEW(pigDataError, (b, info));
+        return;
+      }
+      const srava_module_descriptor* ld = reg->descriptor(lid);
+      std::string nm = ( ld != 0 && ld->name != 0 ) ? ld->name : "";
+      std::string uerr;
+      if (!reg->unload_module(lid, &uerr)) {
+        ::snprintf(b, sizeof b,
+            "module: cannot unload \"%s\": %s "
+            "(unloading is only allowed before the module runs any op)",
+            path, uerr.c_str());
+        result = thNEW(pigDataError, (b, info));
+        return;
+      }
+      result = thNEW(pigDataString, (nm.c_str()));
+      return;
+    }
+  }
+
   std::string err;
-  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true);
+  bool conflict = false;   /* 同名で別ファイル (二重ロード) — 「見つからない」とは別物 */
+  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true, &conflict);
   if (d == 0) {
-    char buf[600]; ::snprintf(buf, sizeof buf, "module: %s: %s", path, err.c_str());
+    /* ★ optional:1 が黙って飲み込んでよいのは「入っていない」場合だけ。同名別ファイルの
+     * 衝突は構成の誤りなので optional でも必ず落とす (飲み込むと別物が動いたまま進む)。 */
+    if (optional && !conflict) { result = thNEW(pigDataString, ("")); return; }   /* 見つからなくても続行 */
+    char buf[1024]; ::snprintf(buf, sizeof buf, "module: %s: %s", path, err.c_str());
     result = thNEW(pigDataError, (buf, info));
     return;
   }
   int id = reg->id_of_name(d->name);
 
-  if (args.length() >= 2) {
+  if (args.length() < 2) {
+    /* 糖衣: module(so) = 「未ロードなら読み込む」。上の load_file が済ませているのでここは結果を返すだけ。
+     * ★ 2026-08-28: 旧 set_enabled(id,true) は撤去 (有効フラグという概念が無くなった)。 */
+    result = thNEW(pigDataString, (d->name ? d->name : ""));
+    return;
+  }
+
+  {
     sPtr<pigData> ov = args[1]->compact();
     if (ov->is_error()) { result = ov; return; }
-    /* ★ 文字列 "off"/"on" = 実行時無効化/有効化 (routing 候補からの出し入れ・2026-08-10)。
-     *   例: module("cgal.so","off"); box(2,2,2) → cgal 無効で manifold (既定次点) へ。
-     *   ロードは済ませたまま (codec は生きる) なので、無効カーネルが既に作った mesh の読みは可能。 */
+    /* ★ 2026-08-28 (ひさ設計): "off" は **実アンロード (dlclose)**。以前は有効フラグを倒すだけで
+     *   .so はプロセスに載ったままだった。明示的にモジュールを落としたり入れ替えたりできるように、
+     *   本当に落とす。以降 module(so,{}) で再ロードできる (id は同じものを再利用する)。
+     *   ★ 一度でも使われたモジュールは落とせない — .so の中身を指す生存オブジェクト
+     *     (本体クラスの実体・agent) が生まれる入口は make_agent 一つで、その直前に必ず
+     *     initDone_v が立つ。判定はそれだけで足りる (registry->unload_module のコメント参照)。
+     *   ★ 旧 "on" は撤去した。"off" がフラグでなく実アンロードになった以上、"on" は
+     *     「戻す」ではなく「再ロード」であり、それは module(so,{}) そのものだから。 */
     sPtr<pigDataString> sv = sPtr<pigDataString>::d_cast(ov);
     if (sv.is_notNull()) {
-      const char* s = sv->get_str()->get_str();
-      if      (::strcmp(s, "off") == 0) reg->set_enabled(id, false);
-      else if (::strcmp(s, "on")  == 0) reg->set_enabled(id, true);
-      else { result = thNEW(pigDataError, ("module: string option must be \"off\" or \"on\"", info)); return; }
-      result = thNEW(pigDataString, (d->name ? d->name : ""));
+      /* "off" は上で捌き済み (load_file より前)。ここへ来る文字列は全て誤り。 */
+      result = thNEW(pigDataError,
+          ("module: the only string option is \"off\" (to unload). "
+           "To load or reload, call module(path) or module(path, {...}).", info));
       return;
     }
     sPtr<pigDataHash> opts = ov->obt_hash();
@@ -1171,13 +1345,55 @@ void pigDataOperatorModule::_start() {
         else if (::strcmp(s, "process") == 0) reg->set_exec_default(id, EXEC_PROCESS);
         else { result = thNEW(pigDataError, ("module: exec_default must be \"thread\" or \"process\"", info)); return; }
       }
-      /* priority: 整数 (「今ロードした扱い」で後勝ち) */
+      /* priority: 整数 (大きいほど優先)。★同点になった場合の勝敗は **不定** —
+       *   ロード順で決まり、ロード順はディレクトリ走査順だから。確実に切り替えたいなら
+       *   同点でなく大きい値を指定する。 */
       sPtr<pigData> pr = opts->get_ix(thNEW(pigDataString, ("priority")));
       if (pr.is_notNull() && !pr->is_error())
         reg->set_priority(id, (int)pr->get_int());
+      /* ★ #3436 P4: arity = N' (このモジュールが 1 ノードあたり受け取りたい最大項数・policy)。
+       *   2 以上の**有限整数**のみ (「上限なし」は取らない。できるだけ多くやりたければ大きい整数を書く)。
+       *   実際の項数は k = min(N', op の sig が申告する N, 群の執行者が許す最大)。 */
+      sPtr<pigData> ar = opts->get_ix(thNEW(pigDataString, ("arity")));
+      if (ar.is_notNull() && !ar->is_error()) {
+        int k = (int)ar->get_int();
+        if (k < 2) { result = thNEW(pigDataError, ("module: arity must be an integer >= 2", info)); return; }
+        reg->set_arity(id, k);
+      }
+      /* ★ #3441 (ひさ設計 2026-08-26): 個別キー(exec_default/priority/arity)を読むのとは別に、
+       * ハッシュ**全体**を保持しておき、各モジュールの configure() へ渡す(geogram のスレッド数
+       * 制御が最初の用途)。apply_opts はここ(planner/in-proc)で直接 configure を呼ぶ ——
+       * in-proc は planner と同一プロセス・同一 descriptor なのでこれで完結する。
+       * process 実行のモジュールへは、次にその agent を起動するとき (pigfAgent LAUNCH) に
+       * opts_for(id) を C_ENV で渡す (稼働中の agent への再配線はしない)。 */
+      reg->set_opts(id, opts);
+      reg->apply_opts(d->name);
     }
   }
   result = thNEW(pigDataString, (d->name ? d->name : ""));
+}
+
+/* #3452: 未知名の呼び出しを module op / lambda 変数 apply のどちらとして扱うか、
+ * pigData.h の宣言コメントの通り eval 時に選ぶ。args[0]/args[1] のうち選ばれなかった方は
+ * 一切 compact しない(触れない=副作用なし。pigfIf の then/else 選択と同じ考え方)。 */
+void pigDataOperatorCallResolve::_start() {
+  if (args.length() < 2) {
+    result = thNEW(pigDataError, ("internal: pigDataOperatorCallResolve needs 2 branches", info, 1));
+    return;
+  }
+  sPtr<stdString> opn = get_op_name();
+  const char *op = (opn != thNULL) ? opn->get_str() : "";
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  if (reg != thNULL && reg->any_supports_op(op)) {
+    /* ★ #3452: out_cache(mesh か value か)も parse 時点(reg 空)では判定できず、
+     * mk_call は暫定値で組み立てている。ここで確定させてから module op 枝を評価する。 */
+    sPtr<pigDataOperator> mf = sPtr<pigDataOperator>::d_cast(args[0]);
+    if (mf.is_notNull())
+      mf->set_out_cache(reg->op_out_is_mesh(op) == 1 ? 1 : 0);
+    result = args[0]->compact();   /* module op 枝 */
+  } else {
+    result = args[1]->compact();   /* lambda 変数 apply 枝 */
+  }
 }
 
 /* 配列構築: 各要素式を **この地点の env で compact**(評価)して値配列を作る。
@@ -1185,11 +1401,9 @@ void pigDataOperatorModule::_start() {
  * 要素が遅延(mesh agent op の継続 pair 等)でも、その node をそのまま入れる(値として配列化。
  * 観測時に各要素の compact ゲートで解決=従来の配列値と同じ振る舞い)。 */
 void pigDataOperatorArray::_start() {
-  /* 要素を **先に全部 trigger(非ブロック並列起動)** してから compact する。これで配列リテラル
-   * [a,b,c] は要素を一斉ディスパッチ=並列評価する(= 旧 par(a,b,c) と同義)。既定の遅延評価は
-   * 観測で 1 つずつ force=直列化するので、先に全 trigger して並列性を出す(Add/Eq/par と同じ手筋・
-   * 再 trigger は冪等で安全)。「関数引数は並列」の言語約束を配列リテラルでも満たす。 */
-  for (int i = 0; i < args.length(); ++i) args[i]->trigger();
+  /* ★ #3419: 要素を**並列に解決し始める**。これで配列リテラル [a,b,c] は一斉ディスパッチ =
+   * 並列評価になる(= 旧 par(a,b,c) と同義)。既定の遅延評価は観測で 1 つずつ force = 直列化する。 */
+  { sPtr<pigData> e = spark_args(); if (e.is_notNull()) { result = e; return; } }
   sPtr<pigDataArray> r = thNEW(pigDataArray, ());
   for (int i = 0; i < args.length(); ++i) {
     sPtr<pigData> e = args[i]->compact();

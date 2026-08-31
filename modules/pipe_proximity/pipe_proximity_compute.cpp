@@ -198,7 +198,7 @@ static sPtr<pigData> check_pins(const PPAdjustParams& P, int npts, const char *o
 		if ( ! P.pins[i].hard ) continue;            /* 軟ピンは拘束行を張らない */
 		if ( P.pins[i].joint < 0 || P.pins[i].joint + 2 >= npts ) {
 			char b[192];
-			::snprintf(b, sizeof b, "%s: pins[%d].joint=%d が範囲外 (hard ピンは 0..%d)",
+			::snprintf(b, sizeof b, "%s: pins[%d].joint=%d is out of range (hard pins are 0..%d)",
 			           opname, (int)i, P.pins[i].joint, npts - 3);
 			return err(b);
 		}
@@ -262,13 +262,13 @@ compute_proximity(const char *op, sArray<sPtr<pigData> >& args)
 {
 	(void)op;
 	if ( args.length() < 1 )
-		return thNEW(pigDataError,(thNEW(stdString,("pipe_proximity: ctrl_pts(点列) が必要"))));
+		return thNEW(pigDataError,(thNEW(stdString,("pipe_proximity: needs ctrl_pts (a list of points)"))));
 
 	/* 1) ctrl_pts → 平坦 [x,y,z,...] ---- */
 	sPtr<pigDataArray> pts = args[0]->obt_array();
 	if ( ! pts.is_notNull() || pts->length() < 2 )
 		return thNEW(pigDataError,(thNEW(stdString,(
-		    "pipe_proximity: ctrl_pts は 2 点以上の [[x,y,z],...] (先頭=S, 末尾=E, 中間=制御点)"))));
+		    "pipe_proximity: ctrl_pts must be [[x,y,z],...] with 2 or more points (first=S, last=E, middle=control points)"))));
 	int npts = pts->length();
 	std::vector<double> flat;
 	flat.reserve((size_t)npts * 3);
@@ -314,7 +314,7 @@ compute_adjust(sArray<sPtr<pigData> >& args)
 	int npts = 0;
 	std::vector<double> flat = parse_ctrl(args.length() >= 1 ? args[0] : sPtr<pigData>(), &npts);
 	if ( npts < 2 )
-		return err("pipe_adjust: ctrl_pts は 2 点以上の [[x,y,z],...]");
+		return err("pipe_adjust: ctrl_pts must be [[x,y,z],...] with 2 or more points");
 
 	double r0, m, cS0, cS1, cR; std::vector<double> radial_sr;
 	parse_radius(args.length() >= 2 ? args[1] : sPtr<pigData>(), &r0, &m, &radial_sr, &cS0, &cS1, &cR);
@@ -351,7 +351,7 @@ parse_bodies(sPtr<pigData> a, const char *opname, sPtr<pigData> *e) {
 	}
 	for ( int i = 0 ; i < ba->length() ; ++i ) {
 		PPBody b = parse_body(ba->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
-		if ( b.npts < 2 ) { *e = err("pipe_scene_*: 各 body の ctrl は 2 点以上の [[x,y,z],...]"); bodies.clear(); return bodies; }
+		if ( b.npts < 2 ) { *e = err("pipe_scene_*: each body ctrl must be [[x,y,z],...] with 2 or more points"); bodies.clear(); return bodies; }
 		bodies.push_back(b);
 	}
 	return bodies;
@@ -366,7 +366,7 @@ parse_bodies(sPtr<pigData> a, const char *opname, sPtr<pigData> *e) {
 static sPtr<pigData>
 compute_scene_proximity(sArray<sPtr<pigData> >& args)
 {
-	if ( args.length() < 1 ) return err("pipe_scene_proximity: bodies が必要");
+	if ( args.length() < 1 ) return err("pipe_scene_proximity: needs bodies");
 	sPtr<pigData> e;
 	std::vector<PPBody> bodies = parse_bodies(args[0], "pipe_scene_proximity", &e);
 	if ( e != thNULL ) return e;
@@ -389,14 +389,14 @@ compute_scene_proximity(sArray<sPtr<pigData> >& args)
 static sPtr<pigData>
 compute_scene_adjust(sArray<sPtr<pigData> >& args)
 {
-	if ( args.length() < 2 ) return err("pipe_scene_adjust: bodies, movableIdx が必要");
+	if ( args.length() < 2 ) return err("pipe_scene_adjust: needs bodies and movableIdx");
 	sPtr<pigData> e;
 	std::vector<PPBody> bodies = parse_bodies(args[0], "pipe_scene_adjust", &e);
 	if ( e != thNULL ) return e;
 
 	int movableIdx = ( args[1] != thNULL ) ? (int)args[1]->get_int() : 0;
 	if ( movableIdx < 0 || movableIdx >= (int)bodies.size() )
-		return err("pipe_scene_adjust: movableIdx が範囲外");
+		return err("pipe_scene_adjust: movableIdx is out of range");
 
 	PPAdjustParams P = parse_params(args.length() >= 3 ? args[2] : sPtr<pigData>());
 	sPtr<pigData> pe = check_pins(P, bodies[movableIdx].npts, "pipe_scene_adjust");
@@ -418,7 +418,7 @@ compute_sample(sArray<sPtr<pigData> >& args)
 	int npts = 0;
 	std::vector<double> flat = parse_ctrl(args.length() >= 1 ? args[0] : sPtr<pigData>(), &npts);
 	if ( npts < 2 )
-		return err("pipe_sample: ctrl_pts は 2 点以上の [[x,y,z],...]");
+		return err("pipe_sample: ctrl_pts must be [[x,y,z],...] with 2 or more points");
 
 	double r0, m, cS0, cS1, cR; std::vector<double> radial_sr;
 	parse_radius(args.length() >= 2 ? args[1] : sPtr<pigData>(), &r0, &m, &radial_sr, &cS0, &cS1, &cR);

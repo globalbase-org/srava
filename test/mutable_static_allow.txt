@@ -1,0 +1,19 @@
+# 可変な static の許可リスト (test/srava_no_mutable_static.sh)。
+#
+# ★★ 現在 **0 件**。モジュール実装に可変なプロセス大域変数は 1 つも無い (2026-08-26)。
+#
+# 形式:  <ソースパス> <変数名>   # なぜ **プロセスに 1 つでよいか**
+#
+# ★ 原則として **登録しない**。モジュールは in-proc (EXEC_THREAD) で走りうる = 1 プロセスに
+#   複数 op が同居するので、可変な static は op どうしで混線する。
+#
+# ★ 置き場所は 2 つ用意してある。まずこちらを検討すること:
+#   ① **op ごとに違ってよい値** (例外の理由など)
+#        → 呼び手のバッファへ渡す。ggMesh の gg_guard / ocShape の oc_guard がその形。
+#   ② **そのモジュールにひとつで正しい値** (ライブラリの設定値など)
+#        → pigModuleRegistry のモジュール専用スロット (set_module_data / module_data) に
+#          stdObject 派生として預ける。ggMesh の ggModuleData / vdGrid の vdModuleData が例。
+#          ★ 素の幾何クラスからは pig_current_registry() で辿れる (ABI は変えなくてよい)。
+#   ③ **初期化したかのガード** → まず下地が冪等か確かめる。geogram/occt/openvdb はいずれも
+#        冪等でガード自体が不要だった。それでも要るなら記述子の initialize フックがある
+#        (registry が initDone_v で 1 回性を持つ・in-proc/process の両方から呼ばれる)。

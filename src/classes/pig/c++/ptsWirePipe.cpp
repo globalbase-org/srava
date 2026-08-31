@@ -283,7 +283,7 @@ ptsWirePipe_::wend()
 TS_STATE(INI_ptsObject_START)
 {
 	/* 自分の streamhdr を送る(writer_pid = 自プロセス pid) */
-	wire_put_streamhdr(shdr, osglue_getpid());
+	wire_put_streamhdr(shdr, osglue_getpid(), osglue_pid_starttime(osglue_getpid()));
 	if ( wio->write_c(shdr, WIRE_STREAMHDR_SIZE) != WIRE_STREAMHDR_SIZE ) {
 		errCode = -1;
 		send_assert_once();   /* 失敗でも ASSERT は必ず 1 回 (§7.3) */

@@ -55,9 +55,10 @@ public:
 protected:
 	int	fd;
 	int	errCode;
-	sPtr<stdString>	cacheFileName;
 	INTEGER64	consumed;        /* 論理読み出し offset(pread 用) */
 	uint32_t	writerPid;       /* streamhdr 由来。死活監視ハンドル */
+	/* ★ writer プロセスの起動時刻 (2026-08-26)。pid と対で初めてプロセスの同一性が決まる。 */
+	uint64_t	writerStart;
 	sArray<uint8_t>	meta;            /* 先頭 D_META payload(派生が検証) */
 	sPtr<stdObject>	result;          /* 派生が ACT 終了時にセット */
 
@@ -86,8 +87,7 @@ ptsWireCacheStreamReader_::ptsWireCacheStreamReader_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    fd = -1; errCode = 0; consumed = 0; writerPid = 0;
-    cacheFileName = _cacheFileName;
+    fd = -1; errCode = 0; consumed = 0; writerPid = 0; writerStart = 0;
 }
 
 
@@ -105,8 +105,11 @@ ptsWireCacheStreamReader_::wait_avail(INTEGER64 need)
 		if ( fsz < 0 ) { errCode = -1; return -1; }
 		INTEGER64 avail = (INTEGER64)fsz - consumed;
 		if ( avail >= need ) return 1;
-		/* まだ足りない: writer 生存確認(EOF は終了を意味しないので番兵+PID で判定) */
-		if ( osglue_pid_exists(writerPid) == 0 ) {
+		/* まだ足りない: writer 生存確認(EOF は終了を意味しないので番兵+PID で判定)
+		 * ★ 「生きている」は **pid と起動時刻の両方**で見る (2026-08-26)。pid だけだと OS の
+		 *   使い回しで無関係なプロセスを writer と誤認し、**誰も書かないファイルを永久に
+		 *   待つ (沈黙ハング)**。起動時刻が違えば「writer は死んだ」と同じ扱いにする。 */
+		if ( osglue_pid_alive_as(writerPid, writerStart) == 0 ) {
 			/* ★ レース窓: writer が「最後のデータ + W_END を書いて → 即終了」した瞬間、
 			 * 上の fstat(古いサイズ)の直後に writer が死ぬと、書き終えたデータを見落として
 			 * 破損と誤判定する。プロセス終了で write は durable になっているので、ここで
@@ -168,7 +171,7 @@ TS_STATE(INI_ptsObject_START)
 	/* open + streamhdr 検証(magic/ver/endian + writer pid) + 先頭 D_META 読込。
 	 * NB: 現状この読込は通常ステート(mtx 下)で行うので writer が hdr/meta を書き終えてから
 	 *     reader を起動する前提(逐次/ASSERT トリガ)。完全な早期 attach 対応は後段で。 */
-	fd = ::open(cacheFileName->get_str(), O_RDONLY|O_BINARY);   /* O_BINARY: Windows の \r\n 変換で mesh 破損を防ぐ */
+	fd = ::open(_cacheFileName->get_str(), O_RDONLY|O_BINARY);   /* O_BINARY: Windows の \r\n 変換で mesh 破損を防ぐ */
 	if ( fd < 0 ) { errCode = -1; return rDO|FIN_START; }
 
 	uint8_t shdr[WIRE_STREAMHDR_SIZE];
@@ -176,7 +179,7 @@ TS_STATE(INI_ptsObject_START)
 	if ( osglue_pread(fd, shdr, WIRE_STREAMHDR_SIZE, 0) != (long)WIRE_STREAMHDR_SIZE ) {
 		errCode = -1; return rDO|FIN_START;
 	}
-	if ( wire_check_streamhdr(shdr, &writerPid) != WIRE_OK ) {
+	if ( wire_check_streamhdr(shdr, &writerPid, &writerStart) != WIRE_OK ) {
 		errCode = -1; return rDO|FIN_START;    /* magic/version/endian 不一致 = 別世代キャッシュ */
 	}
 	consumed = WIRE_STREAMHDR_SIZE;
@@ -217,7 +220,7 @@ TS_STATE(FIN_ptsWireCacheStreamReader_START)
 		parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)errCode)));
 	/* ★ §9: result はイベントに載せた (受け手が持つ) ので手放す。バッファも空に。 */
 	result = thNULL;
-	cacheFileName = thNULL;
+	_cacheFileName = thNULL;
 	meta.length(0);
 	rec_payload.length(0);
 	return rDO|FIN_ptsObject_START;

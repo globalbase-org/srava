@@ -39,12 +39,20 @@ mf_match_never(sPtr<pigData>)
 }
 
 /* ★ descriptor.codecs が指す配列 (name==0 番兵終端)。mfatsAgent.cpp が extern 参照。 */
-extern const pigModuleCodec mf_codecs[];
-const pigModuleCodec mf_codecs[] = {
-	{ "mf-mesh",        "MFM3,MFC2", "mf-mesh3d,mf-cross2d", &mf_match,       &mf_mk_reader, &mf_mk_writer },
-	/* cg→mf downgrade 読み: CGAL の exact "MESH"(3D)/"PLY2"(2D) を double 化して mf 型へ
-	 * (cast("mf-mesh3d", cgMesh) / cast("mf-cross2d", cgCross))。create_for_meta が MESH/PLY2 を検出し
-	 * decode_mesh_exact / decode_cross_exact で有理数→double 化。読取専用 (writer=0)。 */
-	{ "mf-cg-downgrade", "MESH,PLY2", "mf-mesh3d,mf-cross2d", &mf_match_never, &mf_mk_reader, 0             },
-	{ 0, 0, 0, 0, 0, 0 },
+/* ★ 2026-08-28 (ABI v12): この階層への配線先。reader は下の codec 行が使うものと同一 —
+ *   どの行 (自型読み / foreign 昇格読み) でも reader は 1 本で、階層に帰属するため。 */
+PIG_WIRE_DEF(mfGeom, mf_mk_reader, mf_mk_writer);
+
+/* ★ 2026-08-28 (ひさ設計・ABI v16): このモジュールが提供するもの。
+ *   1 行 = (本体クラス階層, その階層について名乗る型名, 扱う 4CC)。
+ *   ⚠ **types と tags は位置対応しない** (独立した 2 本・個数も一致しない)。どのタグがどの型に
+ *     なるかは申告せず、wire->create に通して訊く (pigModule.h の pigModuleType 参照)。
+ *   ⚠ tags は **診断専用** — 読めるかを答えるのは wire->create 一本で、この欄は
+ *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
+extern const pigModuleType manifold_provides[];
+const pigModuleType manifold_provides[] = {
+	{ &mfGeom::WIRE, "mf-mesh3d,mf-cross2d",
+	  "MFM3,MFC2,MESH,PLY2,NEFB" },
+	{ 0, 0, 0 },
 };
+

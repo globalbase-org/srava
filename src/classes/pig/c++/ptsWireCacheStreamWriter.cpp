@@ -62,7 +62,6 @@ public:
 protected:
 	int	fd;
 	int	errCode;
-	sPtr<stdString>	cacheFileName;
 	uint8_t	chunkBuf[PTS_WIRE_CHUNK_BUF_SIZE];
 	int	chunkBufLen;
 
@@ -94,7 +93,6 @@ ptsWireCacheStreamWriter_::ptsWireCacheStreamWriter_(TS_ARGS0)
 {
     TS_CPARGS0
     fd = -1; errCode = 0; chunkBufLen = 0;
-    cacheFileName = _cacheFileName;
 }
 
 
@@ -216,10 +214,11 @@ TS_STATE(INI_ptsObject_START)
 	/* ファイルを作成してストリームヘッダを書く */
 	/* O_BINARY 必須(Windows): 無いと MinGW 既定のテキストモードで \n↔\r\n 変換が起き binary
 	 * mesh キャッシュが破損する(サイズもずれる)。POSIX では O_BINARY は 0(下で定義)。 */
-	fd = ::open(cacheFileName->get_str(), O_WRONLY|O_CREAT|O_TRUNC|O_BINARY, 0644);
+	fd = ::open(_cacheFileName->get_str(), O_WRONLY|O_CREAT|O_TRUNC|O_BINARY, 0644);
 	if ( fd < 0 ) { errCode = -1; return rDO|FIN_START; }
 	uint8_t hdr[WIRE_STREAMHDR_SIZE];
-	wire_put_streamhdr(hdr, osglue_getpid());
+	/* ★ pid だけでは同一プロセスを名指せない (OS が使い回す) → 起動時刻も載せる (2026-08-26)。 */
+	wire_put_streamhdr(hdr, osglue_getpid(), osglue_pid_starttime(osglue_getpid()));
 	if ( write_full(hdr, WIRE_STREAMHDR_SIZE) < 0 ) { errCode = -2; return rDO|FIN_START; }
 	return rDO|INI_ptsWireCacheStreamWriter_INIT;
 }
@@ -254,6 +253,6 @@ TS_STATE(FIN_ptsWireCacheStreamWriter_START)
 		::close(fd); fd = -1;
 	}
 	parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)errCode)));
-	cacheFileName = thNULL;   /* §9 */
+	_cacheFileName = thNULL;   /* §9 */
 	return rDO|FIN_ptsObject_START;
 }

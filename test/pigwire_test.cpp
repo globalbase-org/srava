@@ -55,12 +55,18 @@ int main(void)
   /* --- ストリームヘッダ ラウンドトリップ + 検証 --- */
   {
     uint8_t h[WIRE_STREAMHDR_SIZE];
-    wire_put_streamhdr(h, 4242);
+    /* ★ v2 (2026-08-26): pid に加えて writer プロセスの **起動時刻** を載せる。
+     *   pid だけでは同一プロセスを名指せない (OS が使い回す) ため。 */
+    wire_put_streamhdr(h, 4242, 0x0123456789abcdefULL);
     /* 先頭4バイトが 'P','W','I','G' であること */
     CHECK(h[0] == 'P' && h[1] == 'W' && h[2] == 'I' && h[3] == 'G');
     uint32_t pid = 0;
-    CHECK(wire_check_streamhdr(h, &pid) == WIRE_OK);
+    uint64_t start = 0;
+    CHECK(wire_check_streamhdr(h, &pid, &start) == WIRE_OK);
     CHECK(pid == 4242);
+    CHECK(start == 0x0123456789abcdefULL);
+    /* start を省いても読めること (呼び手が要らない場合) */
+    CHECK(wire_check_streamhdr(h, &pid) == WIRE_OK);
     /* magic を壊すと弾く */
     h[0] ^= 0xff;
     CHECK(wire_check_streamhdr(h, 0) == WIRE_ERR_MAGIC);

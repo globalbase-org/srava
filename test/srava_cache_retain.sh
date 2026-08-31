@@ -1,4 +1,9 @@
 #!/bin/sh
+# ★ #3452: 起動時 eager-load 撤去に伴い、box() 等の実行に実カーネルの明示ロードが要る。
+export SRAVA_MODULE_ALL=1
+# include "module/all.sra" の解決に要る(cmake ENVIRONMENT が SRAVA_PATH を設定していないため)。
+SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
+export SRAVA_PATH
 # SRAVA_CACHE_RETAIN の回帰テスト: 終了時クリーンアップの保持方針が切り替わること。
 #   warm で used キャッシュを作り、その複製を未使用 hash(ffff…)= stray(別プログラムの残骸を模す)として置く。
 #   stray の扱いが方針で変わることを確認:

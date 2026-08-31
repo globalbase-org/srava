@@ -7,8 +7,10 @@
  *     呼び元(pigfSequence 等)がエラー判定で compact してしまい遅延が縮退するため。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
+#include	<stdio.h>
 #include	"_ts2/c++/pigfAssign_.h"
 
 CLASS_TINYSTATE(pig/c++/pigfAssign,pig/c++/pigfFunction)
@@ -27,9 +29,9 @@ public:
 
 	sRptr<ptsObject,tinyState>		parent;
 	int		asgDestroyed;   /* rhs へ destroy を転送済み(1 回だけ) */
+	sPtr<pigData>	asgErr;         /* 分割代入のエラー(あれば FIN でこれを返す) */
 private:
 protected:
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -47,8 +49,8 @@ pigfAssign_::pigfAssign_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     asgDestroyed = 0;
+    asgErr = thNULL;
 }
 
 
@@ -66,15 +68,47 @@ TS_STATE(ACT_START)
 	 * 撤収要求が来たらそこへ送る (未起動なら no-op)。1 度だけ。 */
 	if ( is_destroyed() && ! asgDestroyed ) {
 		asgDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] assign: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] assign: destroy 転送\n");
 		if ( args.length() >= 2 && args[1].is_notNull() ) args[1]->destroy();
 	}
 	if ( args[0]->is_error() )         // 変数名の評価でエラー → 伝播
 		return rDO|FIN_START;
+	/* ★ 分割代入 `var [a,b,c] = 式;` (mode=PIG_ASSIGN_DEF_LIST)。
+	 * args[0] = 名前の配列 / args[1] = 右辺。右辺を **この地点で compact** して(DEF と同じ
+	 * レキシカルスコープの理由)配列にし、要素 0,1,2,… を順に def_var する。
+	 * 要素が足りなければエラー。余りは無視する(「N 個返す op の先頭 k 個を取る」用途)。 */
+	if ( sPtr<pigDataFunction_b>::d_cast(_front)->get_mode() == PIG_ASSIGN_DEF_LIST ) {
+		sPtr<pigDataArray> names = args[0]->obt_array();
+		sPtr<pigData>      rv    = ( args.length() >= 2 ) ? args[1]->compact()
+		                                                 : sPtr<pigData>(thNEW(pigDataNull,()));
+		if ( rv->is_error() ) { asgErr = rv; return rDO|FIN_START; }
+		sPtr<pigDataArray> vals = rv->obt_array();
+		if ( ! names.is_notNull() ) {         /* 起こらない想定(文法が配列を作る) */
+			asgErr = thNEW(pigDataError,("destructuring: bad name list", _front->get_info()));
+			return rDO|FIN_START;
+		}
+		if ( ! vals.is_notNull() ) {
+			asgErr = thNEW(pigDataError,("destructuring assignment needs an array on the right-hand side",
+			                             _front->get_info()));
+			return rDO|FIN_START;
+		}
+		if ( vals->length() < names->length() ) {
+			char buf[128];
+			::snprintf(buf, sizeof(buf), "destructuring: need %d element(s) but got %d",
+			           names->length(), vals->length());
+			asgErr = thNEW(pigDataError,(buf, _front->get_info()));
+			return rDO|FIN_START;
+		}
+		for ( int i = 0 ; i < names->length() ; ++i ) {
+			sPtr<pigData> nm = names->get_ix(thNEW(pigDataInteger,((INTEGER64)i)));
+			env->def_var(nm->get_str(), vals->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+		}
+		return rDO|FIN_START;
+	}
 	sPtr<pigData> val = ( args.length() >= 2 ) ? args[1]
 	                                           : sPtr<pigData>(thNEW(pigDataNull,()));
-	// DEF(var あり)= def_var / SET(var なし)= set_var。front のモードで分岐。
-	if ( sPtr<pigDataFunction_b>::d_cast(front)->get_mode() == PIG_ASSIGN_DEF ) {
+	// DEF(var あり)= def_var / SET(var なし)= set_var。_front のモードで分岐。
+	if ( sPtr<pigDataFunction_b>::d_cast(_front)->get_mode() == PIG_ASSIGN_DEF ) {
 		// DEF: 値を **定義地点(現 env)で compact** してから束縛 = レキシカルスコープ。
 		// 遅延束縛だと自由変数が「使用地点(force 地点)の env」で解決され、内側スコープの同名
 		// シャドウを誤って拾う(dynamic scope バグ)。定義時 compact で定義環境に固定する。
@@ -99,6 +133,6 @@ TS_STATE(FIN_START)                // pigfFunction の FIN gate を上書き
 }
 TS_STATE(FIN_pigfAssign_START)
 {
-	front->set_result(args[0]);        // 変数名を返す(値の遅延を保つ)
+	_front->set_result( asgErr.is_notNull() ? asgErr : args[0] );   // 変数名を返す(値の遅延を保つ)
 	return rDO|FIN_pigfFunction_START;
 }

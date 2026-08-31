@@ -366,6 +366,10 @@ static void test_augmented_lagrangian(){
     CHECK(res.maxClearViolation < 0.01, "AL drives violation near 0");
 }
 
+// 並列プリミティブの回帰は別 TU (tests/test_cd_parallel.cpp)。<thread> を
+// この TU に入れると namespace pipe と POSIX pipe() が衝突するため。
+int test_cd_parallel();
+
 int main(){
     test_arclength();
     test_partition_of_unity();
@@ -379,6 +383,7 @@ int main(){
     test_radius_coupling();
     test_ccd();
     test_augmented_lagrangian();
+    g_fail += test_cd_parallel();
     printf("\n%s (%d failure(s))\n", g_fail==0?"ALL PASS":"FAILED", g_fail);
     return g_fail==0 ? 0 : 1;
 }

@@ -28,6 +28,16 @@ public:
 	static int	exit_sweep(const char *dir, const INTEGER64 *used, int nused,
 	                       int retain_mode, INTEGER64 cutoff_epoch);
 
+	/* dir 内の *.cache を **数えるだけ**(掃除も touch もしない)。戻り = 完了キャッシュ数。
+	 *   complete   : W_END 番兵まで到達したもの(= 次の run が HIT で拾える「完成品」)
+	 *   incomplete : 番兵未到達(writer が書きかけ / 中断で死んだ)
+	 *   broken     : PWIG ヘッダでない・短すぎて判定できない
+	 * 各ポインタは 0 可(要らないものは渡さなくてよい)。
+	 * ★ 存在理由(#3419 ゲート入場順序の実験・2026-08-23): 「中断時に完成キャッシュが何個残ったか」を
+	 *   測るのに、**判定基準を外部スクリプトへ再実装させない**ため。ファイル数を数えるだけでは
+	 *   書きかけの死体まで数えてしまい、指標が嘘になる。判定は sweep と同じ cache_has_end を使う。 */
+	static int	count_caches(const char *dir, int *complete, int *incomplete, int *broken);
+
 	/* <dir>/<16hex(h)>.cache を buf へ書く(キャッシュファイル名の正規形)。 */
 	static void	make_path(char *buf, size_t bufsz, const char *dir, INTEGER64 h);
 };

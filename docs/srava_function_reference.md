@@ -55,6 +55,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 
 ## カテゴリ
 
+0. [**モジュール対応表**](#module-matrix)（op × モジュールの ○× 表）
 1. [演算子](#演算子) 2. [3D プリミティブ](#prim3d) 3. [2D プリミティブ](#prim2d)
 4. [スイープ・2D⇄3D](#スイープ2d3d) 5. [ブール演算](#ブール演算) 6. [アフィン変換](#アフィン変換) · [カーネル・型変換](#kernel-conv)
 7. [計測・検査・修復](#計測検査修復) 8. [近接](#近接2-メッシュ間3d-専用) 9. [配列・数値ユーティリティ](#配列数値ユーティリティ)
@@ -63,12 +64,115 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 
 ---
 
+## モジュール対応表（op × モジュール）{#module-matrix}
+
+★ **この表は記述子（各モジュールの `ops[]`）から機械生成したもの**（2026-08-27 時点）。
+「○ = そのモジュールがその op を申告している」であって、**どのモジュールが実際に呼ばれるかは
+入力 mesh の型で決まる**（型が決まらない生成 op だけ `module(..., {priority})` で選ぶ）。
+
+⚠ **モジュールは `module("<name>.so", {})` で名指さないとロードされない**
+（`include "module/all.sra";` または `SRAVA_MODULE_ALL=1` で一括）。表に ○ があっても、
+そのモジュールをロードしていなければ使えない。
+
+| op | cgal | manifold | nef ※1 | geogram | cherchi | occt | occt_mf ※2 | openvdb | openvdb 橋渡し ※3 | pipe_proximity |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **生成（3D）** | | | | | | | | | | |
+| `box` | ○ | ○ | ○ | ○ | ○ | ○ | × | × | × | × |
+| `boxa` | ○ | ○ | ○ | ○ | ○ | × | × | × | × | × |
+| `sphere` | ○ | ○ | ○ | ○ | ○ | ○ | × | × | × | × |
+| `icosphere` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `prism` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `pyramid` | ○ | × | × | × | × | × | × | × | × | × |
+| `cylinder` | × | × | × | × | × | ○ | × | × | × | × |
+| `torus` | × | × | × | × | × | ○ | × | × | × | × |
+| `empty3d` | ○ | ○ | × | × | × | × | × | × | × | × |
+| **生成（2D）** | | | | | | | | | | |
+| `rect` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `ngon` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `circle` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `polygon` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `line` | ○ | × | × | × | × | × | × | × | × | × |
+| `empty2d` | ○ | ○ | × | × | × | × | × | × | × | × |
+| **スイープ・2D⇄3D** | | | | | | | | | | |
+| `extrude` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `revolve` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `tube` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `section` | ○ | ○ | × | × | × | × | × | × | × | × |
+| **ブール** | | | | | | | | | | |
+| `union` | ○ | ○ | ○ | ○ | ○ | ○ | × | ○ | × | × |
+| `intersection` | ○ | ○ | ○ | ○ | ○ | ○ | × | ○ | × | × |
+| `difference` | ○ | ○ | ○ | ○ | ○ | ○ | × | ○ | × | × |
+| `combine` | ○ | ○ | × | × | × | × | × | × | × | × |
+| **アフィン変換** | | | | | | | | | | |
+| `translate` | ○ | ○ | ○ | ○ | ○ | × | × | × | × | × |
+| `rotate` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `mirror` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `scale` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `transform` | ○ | ○ | × | × | × | × | × | × | × | × |
+| **加工** | | | | | | | | | | |
+| `offset` | ○ | ○ | ○ | × | × | ○ | × | ○ | × | × |
+| `minkowski` | × | × | ○ | × | × | × | × | × | × | × |
+| `fillet` | × | × | × | × | × | ○ | × | × | × | × |
+| `chamfer` | × | × | × | × | × | ○ | × | × | × | × |
+| `solidify` | × | × | ○ | ○ | × | × | × | × | × | × |
+| `unify` | × | × | ○ | × | × | × | × | × | × | × |
+| `complement` | × | × | ○ | × | × | × | × | × | × | × |
+| `convex_decomposition` | × | × | ○ | × | × | × | × | × | × | × |
+| `part` | × | × | ○ | × | × | × | × | × | × | × |
+| `repair` | ○ | × | × | × | × | × | × | × | × | × |
+| `renormalize` | × | × | × | × | × | × | × | ○ | × | × |
+| **計測・検査** | | | | | | | | | | |
+| `volume` | ○ | ○ | ○ | ○ | ○ | ○ | × | ○ | × | × |
+| `area` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `perimeter` | ○ | × | × | × | × | × | × | × | × | × |
+| `centroid` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `bbox` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `nverts` | ○ | ○ | ○ | ○ | ○ | × | × | × | × | × |
+| `nfaces` | ○ | ○ | ○ | ○ | ○ | ○ | × | × | × | × |
+| `nparts` | × | × | ○ | × | × | × | × | × | × | × |
+| `voxels` | × | × | × | × | × | × | × | ○ | × | × |
+| `valid` | ○ | ○ | × | × | × | × | × | × | × | × |
+| `thin_spots` | ○ | × | × | × | × | × | × | × | × | × |
+| `distance` | ○ | × | × | × | × | × | × | × | × | × |
+| `closest` | ○ | × | × | × | × | × | × | × | × | × |
+| `farthest` | ○ | × | × | × | × | × | × | × | × | × |
+| **型変換・表現変換** | | | | | | | | | | |
+| `cast` | ○ | ○ | ○ | ○ | ○ | × | × | × | × | × |
+| `voxelize` | × | × | × | × | × | × | × | × | ○ | × |
+| `isosurface` | × | × | × | × | × | × | × | × | ○ | × |
+| `triangulate` | × | × | × | × | × | × | ○ | × | × | × |
+| **I/O・付随** | | | | | | | | | | |
+| `import` | ○ | ○ | × | × | × | ○ | × | × | × | × |
+| `export` | ○ | ○ | ○ | ○ | ○ | ○ | × | × | × | × |
+| `export_vox` | ○ | × | × | × | × | × | × | × | × | × |
+| `color` | ○ | ○ | × | × | × | × | × | × | × | × |
+| **近接（解析モジュール）** | | | | | | | | | | |
+| `pipe_proximity` | × | × | × | × | × | × | × | × | × | ○ |
+| `pipe_adjust` | × | × | × | × | × | × | × | × | × | ○ |
+| `pipe_sample` | × | × | × | × | × | × | × | × | × | ○ |
+| `pipe_scene_proximity` | × | × | × | × | × | × | × | × | × | ○ |
+| `pipe_scene_adjust` | × | × | × | × | × | × | × | × | × | ○ |
+
+- ※1 **nef** は同じソースから `nef_snc.so`（SNC 表現）と `nef_hybrid.so`（境界表現ハイブリッド）の
+  2 変種をビルドする。op の顔ぶれは同じ。
+- ※2 **occt_mf** は occt とメッシュ系の橋渡し（`triangulate` 1 op だけ）。occt 本体を manifold に
+  依存させないために分けてある（`triangulate` を使うにはこれをロードする）。
+- ※3 **openvdb 橋渡し** は `openvdb_mf.so` / `openvdb_cg.so` / `openvdb_gg.so`。
+  ボリューム（`vd-grid3d`）とメッシュ（`mf-` / `cg-` / `gg-mesh3d`）の間を渡す 2 op だけを持ち、
+  「どのメッシュ型と行き来するか」で分かれている（openvdb 本体を manifold や CGAL に依存させないため）。
+- **既定でビルドされるのは cgal / manifold / nef / pipe_proximity**。geogram / cherchi / occt /
+  openvdb（と橋渡し）は `-DSRAVA_MODULE_<名前>=ON` の opt-in。
+- 表に無い関数（`sin` / `map` / `print` など）は**モジュールではなく組込 or stdlib**。
+  各エントリの **実装** 行を参照。
+
+---
+
 ## 演算子
 
 ### `>>>` — 平行移動（transform シュガー）
 `2D・3D` · → `mesh` / `mesh 配列`
 
-**実装**: `cgal.so` + `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
+**実装**: `cgal.so` / `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
 
 `m >>> v` ＝ `translate(m, v)`。左辺が **mesh 配列**なら各要素へ適用し配列を返す（broadcast / zip / instancing）。
 
@@ -84,7 +188,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `<>` — 鏡像（transform シュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
+**実装**: `cgal.so` / `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
 
 `m <> axis` ＝ `mirror(m, axis)`。原点通過平面での反射。
 
@@ -100,7 +204,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `***` — 拡大縮小（transform シュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
+**実装**: `cgal.so` / `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
 
 `m *** s` ＝ `scale(m, s)`。負値＝反射。
 
@@ -116,7 +220,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `@` — 回転（transform シュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
+**実装**: `cgal.so` / `manifold.so`（= 対応する名前付き op）· 型 入力を保存（`cg-mesh3d`/`mf-mesh3d` 等）
 
 `m @ (axis, deg)` ＝ `rotate(m, axis, deg)`（度数）。2D は軸不要で `m @ (deg)`。
 
@@ -133,7 +237,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `|||` — 和（ブールシュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
 
 `a ||| b` ＝ `union(a, b)`。可換・結合。多数を畳むなら `union(配列)`（並列二分木）。
 
@@ -147,7 +251,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `&&&` — 積（ブールシュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
 
 `a &&& b` ＝ `intersection(a, b)`。可換・結合。
 
@@ -160,7 +264,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `---` — 差（ブールシュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
 
 `a --- b` ＝ `difference(a, b)`。**非可換**（`a` から `b` を引く）。`a --- {} = a`、`{} --- a = {}`。
 
@@ -173,7 +277,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `+++` — 単純合体（ブールシュガー）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 3D `cg-mesh3d`(MESH)/`mf-mesh3d`(MFM3)・2D `cg-cross2d`(PLY2)/`mf-cross2d`(MFC2)
 
 `a +++ b` ＝ `combine(a, b)`。corefinement せず連結（交差許容・軽い）。本番ブール前の確認やガイド線の重ね合わせに。
 
@@ -240,7 +344,7 @@ srava の**全関数・演算子**を統一形式で一覧する逆引きリフ�
 ### `box(w, h, d)` — 直方体
 `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
 
 w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 
@@ -258,7 +362,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `boxa([w, h, d])` — 直方体（配列版）
 `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
 
 `box` と同じだが寸法を**配列 1 個**で渡す。計算で作った寸法ベクトルをそのまま渡せる。
 
@@ -272,7 +376,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `prism(n, h, r)` — 正 n 角柱
 `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
 
 底面が正 n 角形（外接半径 r・XY 平面 z=0）、高さ h（Z 軸）。`extrude(ngon(n,r), h)` と完全に等価。
 
@@ -308,7 +412,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `sphere(r[, seg])` — 球（円周分割数指定）
 `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
 
 半径 r の測地球（正八面体を分割して球面投影）。`seg` は円周分割数（連続値）。
 
@@ -329,7 +433,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `icosphere(r[, subdiv])` — 球（細分回数指定）
 `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
 
 半径 r の測地球（正二十面体を `2^subdiv` 分割して球面投影）。旧 `sphere(r, subdiv)` の意味論はこの op が継ぐ。
 
@@ -346,6 +450,47 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 
 ---
 
+### `cylinder(r, h)` — 円柱（解析曲面）
+`3D` · → `mesh`
+
+**実装**: `occt.so` · 型 `oc-brep3d`(BREP)
+
+半径 `r`・高さ `h` の円柱。**分割数を持たない** — 側面は円筒面そのものとして保持されるので、
+体積は π·r²·h と 16 桁一致する（メッシュ系の `revolve` とは原理的に別物）。
+
+**入力**
+- `r` 半径 — `スカラ`
+- `h` 高さ — `スカラ`
+
+**出力** 円柱 — `mesh`（`oc-brep3d`）
+
+- 既定: `r=1, h=1`
+- 例: `module("occt.so",{}); volume(cylinder(1, 2))` → `6.2831853071795853`（π·2）
+- ★ `nfaces` は**三角形数ではなく Face 数**（円柱は 3 = 円筒 1 + 平面 2）。
+- 関連: `torus`, `sphere`, `triangulate`
+
+---
+
+### `torus(R, r)` — 輪環面（解析曲面）
+`3D` · → `mesh`
+
+**実装**: `occt.so` · 型 `oc-brep3d`(BREP)
+
+主半径 `R`・管半径 `r` のトーラス。`cylinder` と同じく**近似が入らない**（体積は 2π²Rr² と一致）。
+
+**入力**
+- `R` 主半径 — `スカラ`
+- `r` 管半径 — `スカラ`
+
+**出力** トーラス — `mesh`（`oc-brep3d`）
+
+- 既定: `R=1, r=0.25`
+- 例: `torus(2, 0.5)` → 体積 `9.869604401089358`
+- ★ `nfaces` は **1**（トーラス全体が 1 つの Face）。同じ形をメッシュ系に持たせれば数千面になる。
+- 関連: `cylinder`, `fillet`
+
+---
+
 ## 2D プリミティブ {#prim2d}
 
 2D 多角形（`cgMesh2D`・穴あき可）は「断面」として `extrude`/`revolve` で 3D に持ち上がる。
@@ -353,7 +498,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `rect(w, h)` — 長方形
 `2D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
 
 原点隅・軸並行の長方形（CCW）。
 
@@ -370,7 +515,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `ngon(n, r)` — 正 n 角形
 `2D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
 
 外接半径 r・原点中心・CCW の正 n 角形。
 
@@ -386,7 +531,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `circle(r[, segs])` — 円
 `2D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
 
 正多角形で近似した円。
 
@@ -403,7 +548,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `polygon(pts)` ／ `polygon(p0, p1, …)` — 塗り多角形
 `2D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
 
 明示した点列の塗り多角形（任意 n 角形）。単純なら CW を CCW に正規化。自己交差も許容（→ `valid`/`repair`）。
 
@@ -436,7 +581,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `extrude(poly, h)` — 押し出し
 `2D→3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 入力 `cg-cross2d`(PLY2)→出力 `cg-mesh3d`(MESH) / 入力 `mf-cross2d`(MFC2)→出力 `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` · 型 入力 `cg-cross2d`(PLY2)→出力 `cg-mesh3d`(MESH) / 入力 `mf-cross2d`(MFC2)→出力 `mf-mesh3d`(MFM3)
 
 2D 多角形を高さ h でまっすぐ押し出して角柱化。**穴対応**（CDT 三角化）。
 
@@ -452,7 +597,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `revolve(poly[, angle[, segs]])` — 回転体
 `2D→3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 入力 `cg-cross2d`(PLY2)→出力 `cg-mesh3d`(MESH) / 入力 `mf-cross2d`(MFC2)→出力 `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` · 型 入力 `cg-cross2d`(PLY2)→出力 `cg-mesh3d`(MESH) / 入力 `mf-cross2d`(MFC2)→出力 `mf-mesh3d`(MFM3)
 
 2D プロファイル（x=半径≥0, y=高さ）を **Y 軸**まわりに回して回転体化。
 
@@ -471,7 +616,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `tube(path[, segs])` — パス掃引（太さ可変）
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 折れ線に沿って丸断面を掃引。各頂点が `[位置, 半径]`。**位置の次元で 2D/3D を自動判別**。
 
@@ -490,7 +635,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `section(mesh, P, N)` — 断面（3 要素配列）
 `3D→2D` · → `配列[mesh]`
 
-**実装**: `cgal.so` + `manifold.so` · 型 入力 `cg-mesh3d`(MESH)→出力 `cg-cross2d`(PLY2) / 入力 `mf-mesh3d`(MFM3)→出力 `mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 入力 `cg-mesh3d`(MESH)→出力 `cg-cross2d`(PLY2) / 入力 `mf-mesh3d`(MFM3)→出力 `mf-cross2d`(MFC2)
 
 点 P を通り法線 N の平面で 3D メッシュを切り、2D 断面（塗り領域・穴検出）を返す。3D 専用。
 
@@ -505,7 +650,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 - 共面かどうかは**厳密に判定**される（座標が丸め誤差で近いだけの面は共面とみなさない）。
 - 極限側の断面がそもそも何も無い場合（立体の最上面を切ったときの `[2]` など）はその要素が空集合になる。
 - 空要素は `empty2d()` と同じ **空集合のメッシュ**。`{}`（fold の中立元）ではないので、`intersection` に渡せば正しく空になる。空判定は `area(s[0]) == 0` で足りる。
-- 3 つの要素は**並列に計算される**（配列リテラルの要素は一斉に起動される）。
+- 3 つの要素は**並列に計算される**（3 引数形は `[section(…,0), section(…,-1), section(…,+1)]` の配列リテラルに展開され、要素が一斉に起動される）。
 
 **入力**
 - `mesh` 対象 — `mesh`（3D）
@@ -520,7 +665,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `section(mesh, P, N, mode)` — 断面（単一）
 `3D→2D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 上と同じ
+**実装**: `cgal.so` / `manifold.so` · 型 上と同じ
 
 `mode` を明示して**断面 1 枚**を返す形。3 要素配列が要らない場面（共面が起きないと分かっている、あるいは片側の極限だけ欲しい）で使う。
 
@@ -537,7 +682,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `empty2d()` / `empty3d()` — 空集合
 `2D` / `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `->cg-cross2d` / `->cg-mesh3d`（manifold では `mf-cross2d` / `mf-mesh3d`）
+**実装**: `cgal.so` / `manifold.so` · 型 `->cg-cross2d` / `->cg-mesh3d`（manifold では `mf-cross2d` / `mf-mesh3d`）
 
 **値としての空集合**（領域・頂点を 1 つも持たないメッシュ）を作る。`box()` などと同じ leaf。
 
@@ -563,9 +708,9 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `union(a, b)` ／ `union([a,…])` ／ `a ||| b` — 和
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so` / `openvdb.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
-ブール和（corefinement）。**配列 1 引数は並列二分木で畳み込み**（直列 fold の最大 23x）。可換。`union([])`＝`{}`（単位元）。
+ブール和（corefinement）。**配列 1 引数は並列二分木で畳み込む**（左 fold の直線ではなく段数 log₂N の木にする）。可換。`union([])`＝`{}`（単位元）。
 
 **入力** `a, b` 被演算 — ともに `mesh`（同次元）。または引数 1 個に `mesh 配列`
 
@@ -577,7 +722,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `intersection(a, b)` ／ `a &&& b` — 積
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so` / `openvdb.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 ブール積（corefinement）。可換。配列 1 引数で並列畳み込み。
 
@@ -591,7 +736,7 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 ### `difference(a, b)` ／ `a --- b` — 差
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so` / `openvdb.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 `a` から `b` を引く。**非可換**（n-ary は左 fold `((a-b)-c)…`）。
 
@@ -603,10 +748,10 @@ w×h×d の軸並行直方体（原点隅・8 頂点 / 12 三角形）。
 - **`+++`(combine)被演算子の分配則**: 被演算子が構文的に `+++` の時だけパース時展開。`(a +++ b) --- c` = `(a---c) +++ (b---c)`（左 combine は成分ごとに引いて束ね）。`c --- (a +++ b)` = `c --- a --- b`（右 combine は逐次差）。`|||` 結果等は分配しない。
 - 関連: `union`, `combine`
 
-### `combine(a, b)` ／ `a +++ b` — 単純合体
+### `combine(a, b)` ／ `a +++ b` — 単純合体 {#combine}
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 corefinement せず連結（別連結成分）。軽い。
 
@@ -644,7 +789,7 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 ### `translate(m, v)` ／ `translate(m, x, y, z)` ／ `m >>> v` — 平行移動
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 平行移動（EPECK 厳密）。
 
@@ -660,7 +805,7 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 ### `rotate(m, axis, deg)` ／ `rotate(m, deg)` ／ `m @ (axis, deg)` — 回転
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 原点まわりの回転（度数）。2D は軸不要（面内回転）。
 
@@ -678,7 +823,7 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 ### `mirror(m, axis)` ／ `m <> axis` — 鏡像
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 原点通過平面での反射（面の向きは自動復元）。
 
@@ -694,7 +839,7 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 ### `scale(m, s)` ／ `scale(m, sx, sy, sz)` ／ `m *** s` — 拡大縮小
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 原点中心の拡大縮小。負値＝反射。
 
@@ -711,7 +856,7 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 ### `transform(m, matrix)` — 一般アフィン
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)
 
 行優先の同次行列で一般アフィン変換。
 
@@ -727,9 +872,14 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 ### `offset(m, d[, n])` — オフセット
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so`(2D+3D) + `manifold.so`(2D 専用) · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `occt.so` / `openvdb.so`（→ [対応表](#module-matrix)） · 型 2D `cg-cross2d`(PLY2) / `mf-cross2d`(MFC2)・3D `nf-mesh3d`(NEF3) / `nfb-mesh3d`(NEFB)
+⚠ `cgal.so` / `manifold.so` は **2D のみ**。**3D は `nef_snc.so` / `nef_hybrid.so`** が引き受ける。
 
 `d>0` で膨張、`d<0` で収縮。2D＝straight skeleton（面取り）/ 3D＝半径 d の球との Minkowski 和（重い）。
+
+★**3D は nef モジュールが持つ**。中身が Minkowski 和（Nef + 凸分解）なので、実装を持つモジュールに置いてある。
+3D で使うときは nef モジュールをロードし、結果を cg で続けたければ `cast("cg-mesh3d", …)` を書く。
+`cg`/`mf` の 3D mesh をそのまま渡してもよい（昇格読み・結果は `nf` 型）。
 
 **入力**
 - `m` 対象 — `mesh`
@@ -740,13 +890,236 @@ mesh を変換して新 mesh を返す（位相不変）。演算子シュガー
 
 - 既定: `n=1`
 - 注: 肉厚 ＝ `offset(m, t) --- m`（外殻）/ `m --- offset(m, -t)`（内殻）
-- 例: `offset(rect(20,10), 2)`
-- 関連: `difference`
+- 例: `offset(rect(20,10), 2)` (2D) / `module("nef_hybrid.so"); offset(box(2,2,2), 0.5)` (3D)
+- 3D の `d<0`（収縮）は補集合トリック `A − dilate(bbox − A, |d|)`。角は鋭いまま残る
+- 関連: `difference`, `minkowski`
+
+### `minkowski(a, b)` — ミンコフスキー和
+`3D` · → `mesh`
+
+**実装**: `nef_snc.so` / `nef_hybrid.so` · 型 `nf-mesh3d`(NEF3) / `nfb-mesh3d`(NEFB)
+
+`A ⊕ B = { p + q | p ∈ A, q ∈ B }`。**Nef 幾何カーネルだけが持つ op**（cgal.so / manifold.so には無い）。
+`offset(m, d)` はこの特殊形（半径 `d` の球との和）＝ こちらがプリミティブ。
+
+**入力** `a, b` 被演算 — ともに `mesh`（3D・**両方とも有界**であること）。`nf` / `cg` / `mf` の
+**全 9 組**を受ける（`minkowski(mfBody, cgBody)` のような**異カーネル混成**も可）。`cg`/`mf` は
+昇格読みで `nf` になる（cgal.so / manifold.so に `minkowski` は無いので曖昧にならない）
+
+**出力** Minkowski 和 — `mesh`（型は `nf` 系。cg で続けたいときは `cast("cg-mesh3d", …)`）
+
+- ★**重い**: 両者を凸分解して m×n ペアの和を取り、全部 union する（CGAL は最悪 O(n³m³)）。
+  凸どうしなら頂点対の和の凸包で済むので軽い
+- **非有界**（`complement` の結果など）は**明示エラー**。CGAL 自身は片方をそのまま返すので、その前に弾く
+- 例: `module("nef_hybrid.so"); minkowski(box(2,2,2), box(1,1,1))` → `box(3,3,3)`（体積 27）
+- 関連: `offset`, `union`
+
+### `nverts(m)` ／ `nfaces(m)` — 頂点数・面数
+`2D・3D` · → `値`
+
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so`（→ [対応表](#module-matrix)）
+
+mesh の**頂点数**と**面数**。2D は面を持たないので `nfaces` は 0、`nverts` は点の総数（外周 + 穴 + ガイド）。
+
+  頂点数・面数は三角形メッシュ固有の語彙で、planner（カーネル中立）が持つべき概念ではない。
+  実害も出ていた — 表示は cg の `MESH` 形式を決め打ちで読んでおり、nef の cache では**嘘の数**が出ていた
+- `nef` 系は境界表現に落としてから数える（非有界は境界を持たないので明示エラー）
+- 例: `var m = box(2,2,2); print("NVF", nverts(m), nfaces(m));` → `NVF 8 12`
+- 関連: `area`, `volume`, `bbox`
+
+### `convex_decomposition(m)` — 凸分解
+`3D` · → `mesh`
+
+**実装**: `nef_snc.so` / `nef_hybrid.so` · 型 `nf-mesh3d`(NEF3) / `nfb-mesh3d`(NEFB)
+
+凹形状を**凸片の集まり**へ分解する（`CGAL::convex_decomposition_3`）。`minkowski` が内部で使うのと
+同じ分解で、3D `offset` が重いのはここの片数が m×n で効くため。物理エンジンの凸コリジョン形状・
+3D プリントのサポート生成などに使う。
+
+**入力** `m` 対象 — `mesh`（3D・**有界**であること）
+
+**出力** 分解した形状 — `mesh`（`nf` 系。**凸片は 1 つの mesh の中に別々の連結成分として入る**）
+
+- ★片は **`nparts(d)` で数えて `part(d, i)` で 1 つずつ取り出せる**（mesh の配列を返す仕組みが無いので
+  「数 + n 番目」の 2 本で扱う）。`export` すると片が別成分としても書かれる
+- ★分解しても**体積は変わらない**（片は内部で交わらない）
+- ★結果は**内壁を持つ**ので `cast("cg-mesh3d", …)` はできない。内壁を消すなら `unify`
+- 関連: `nparts`, `part`, `unify`, `minkowski`
+
+### `fillet(s, r)` — 稜を丸める
+`3D` · → `mesh`
+
+**実装**: `occt.so` · 型 `oc-brep3d`(BREP)
+
+**すべての稜**を半径 `r` で丸める（`BRepFilletAPI_MakeFillet`）。解析曲面のまま丸めるので、
+丸めた分の体積は Steiner の公式と 15 桁で照合できる。
+
+**入力**
+- `s` 対象 — `mesh`（`oc-brep3d`）
+- `r` 半径 — `スカラ`（0 以上）
+
+**出力** 丸めた立体 — `mesh`（`oc-brep3d`）
+
+- `r=0` は入力をそのまま返す。**負値はエラー**（収縮は `offset` の仕事）。
+- ⚠ 半径が大きすぎて自己交差する等で OCCT が「作れない」と言ったら **明示エラー**になる
+  （黙って入力を返さない）。
+- 例: `fillet(box(2,2,2), 0.2)`
+- 関連: `chamfer`, `offset`
+
+---
+
+### `chamfer(s, d)` — 稜を面取りする
+`3D` · → `mesh`
+
+**実装**: `occt.so` · 型 `oc-brep3d`(BREP)
+
+**すべての稜**を距離 `d` で 45 度に面取りする（`BRepFilletAPI_MakeChamfer`）。
+
+**入力**
+- `s` 対象 — `mesh`（`oc-brep3d`）
+- `d` 距離 — `スカラ`（0 以上）
+
+**出力** 面取りした立体 — `mesh`（`oc-brep3d`）
+
+- `d=0` は入力をそのまま返す。負値はエラー。
+- ⚠ **角（3 稜が集まる点）の扱いには流儀が 2 つある**。OCCT は「角にも平面を立てる」方で、
+  素朴に「稜だけ削る」と仮定した式とは 0.25% ずれる（数値積分で確認済み）。
+- 例: `chamfer(box(2,2,2), 0.2)`
+- 関連: `fillet`, `offset`
+
+---
+
+### `complement(m)` — 補集合
+`3D` · → `mesh`
+
+**実装**: `nef_snc.so` / `nef_hybrid.so` · 型 `nf-mesh3d`(NEF3) / `nfb-mesh3d`(NEFB)
+
+内外を入れ替える。**Nef 多面体だから書ける op** で、結果は**非有界**になる。
+
+**入力** `m` 対象 — `mesh`（`nf-` のほか `cg-` / `mf-` / `gg-mesh3d` も受け、Nef へ昇格して解く）
+
+**出力** 補集合 — `mesh`（`nf-mesh3d`）
+
+- ⚠ 非有界な値は **体積や書き出しでエラー**になる（`is_simple()` は有界性の判定ではない）。
+  有界な形に戻してから測ること
+  （例: `intersection(complement(a), box(...))`）。
+- 関連: `difference`, `unify`, `part`
+
+---
+
+### `nparts(m)` ／ `part(m, i)` — 塊の数・n 番目の塊
+`3D` · → `値` ／ `mesh`
+
+**実装**: `nef_snc.so` / `nef_hybrid.so`
+
+mesh に含まれる**塊（part）の数**と、**i 番目の塊**（0 始まり）。塊 = 独立した立体で、
+**空洞は塊に数えない**（空洞つき立体は 1 つの塊）。
+
+- ★**mesh の配列を返す仕組みが無い**ので、「数を返す op」と「n 番目を返す op」の 2 本で塊を扱う
+- `convex_decomposition(m)` の結果に使えば**凸片を 1 つずつ**取り出せる（物理エンジンの凸コリジョン
+  形状など、片ごとに使いたい用途向け）
+- 範囲外の `i` は明示エラー
+- 例:
+  ```
+  module("nef_hybrid.so");
+  var d = convex_decomposition(m);
+  var n = nparts(d);            // 片の数
+  export("piece0.stl", part(d, 0));
+  ```
+- 関連: `convex_decomposition`, `unify`
+
+### `unify(m)` — 内壁除去
+`3D` · → `mesh`
+
+**実装**: `nef_snc.so` / `nef_hybrid.so` · 型 `nf-mesh3d`(NEF3) / `nfb-mesh3d`(NEFB)
+
+内部に残った**仕切り面（内壁）を消して**ソリッドを作り直す。接している複数の立体は 1 つに溶ける。
+
+**入力** `m` 対象 — `mesh`（3D・有界）
+
+**出力** 内壁を消した形状 — `mesh`（`nf` 系）
+
+- ★**`repair` とは別物**。`repair` は自己交差を幾何的に解消するだけで**形を変えない**が、`unify` は
+  内壁と低次元の破片が落ちるので**体積が変わりうる**。同じ名前にすると「直すつもりが形が変わっていた」
+  が起きるので分けてある
+- ★**空洞は保たれる**（空洞の境界は片側が立体でないので本物の境界）
+- ★**自動ではやらない**（黙って形を変えない・Nef の再構築は重い・部品が残っているなら `union` で書けばよい）
+- ★**自己交差した 1 枚のメッシュ**（自分自身を貫く tube など）はこれでは直らない。`unify` は
+  正則化（内壁の除去）であって、面どうしの交差を解くものではない。それは `solidify` の仕事
+- 例: `unify(convex_decomposition(m))` は分解を元の形へ戻す（内壁だけ消える）
+- 関連: `repair`, `solidify`, `convex_decomposition`
+
+### `solidify(m)` — 壊れた境界からソリッドを組み直す
+`3D` · → `mesh`
+
+**実装**: `nef_snc.so` / `nef_hybrid.so` / `geogram.so`（→ [対応表](#module-matrix)） · 型 `nf-mesh3d`(NEF3) / `nfb-mesh3d`(NEFB)
+／ `geogram.so` · 型 `gg-mesh3d`(MFM3)
+
+**自分自身を貫くメッシュ**（とぐろを巻いた tube など）から、面が囲む領域を正しいソリッドとして
+作り直す。**同じ答えを出す実装が 2 つある**:
+
+| モジュール | やり方 |
+|---|---|
+| `nef_*` | 面 1 枚ごとに Nef を作って n 項 union し、**有界セルを「中身」として塗る**（`CGAL::Mark_bounded_volumes`）。面どうしの交差線は union の過程で実エッジになる |
+| `geogram` | mesh arrangement で交差を解き（`MeshSurfaceIntersection`）、radial sort して**外側のシェルだけ残す** |
+
+★ 2 つは**独立実装で同じ値を出す**（自己交差 tube で 48.608763289596638 と 48.608763289596624・
+相対 3e-16）。片方のバグなら一致しないので、この一致自体が答えの裏取りになっている。
+
+★★ **どちらが実行するかは入力の精度クラスで決まる**（2026-08-25 にこう整理した）:
+
+| 入力の型 | 実行 | |
+|---|---|---|
+| `cg-mesh3d` / `nf-mesh3d`（厳密な有理数） | `nef_*` | 厳密のまま |
+| `mf-mesh3d` / `gg-mesh3d`（double） | `geogram` | double のまま・**桁で速い** |
+
+**昇格も降格も起きない**のがこの振り分けの狙い。効かせ方は priority の梯子で、`geogram` を
+`nef` の上（6 > 5）に置いてある。⚠ `geogram` は既定 OFF のビルドオプションなので、**積んでいない
+ビルドでは `mf-mesh3d` も `nef` が拾う**（`nef` 側の `(mf-mesh3d)` 行を残してある = 後退させない）。
+
+double の mesh を**厳密に**解き直したいときは、落とす向きを明示するのと同じ作法で書く:
+
+```
+solidify(cast("cg-mesh3d", m))     # 厳密へ上げてから nef で解く
+```
+
+**入力** `m` 対象 — `mesh`（`nf` 系 / `cg` / `mf`。自己交差したまま入っていてよい）
+
+**出力** 組み直したソリッド — `mesh`（`nf` 系）
+
+- ★**なぜ必要か**: 自己交差した閉メッシュは cgal / manifold / nef のどれも**エラーにせず、
+  重なりを二重に数えた体積を黙って返す**（自分を貫く tube では、交差部が二重に数えられる）。
+  Nef 構築は面どうしの交差を検査しない（局所の接続だけから SNC を組む）ので素通りする
+- ⚠ **自動では検査しない**（設計判断）。`does_self_intersect` は正常なメッシュにも O(n log n) が
+  乗るので、変換のたびに払う形にはしない（`modules/nef/c++/nfMesh.cpp` の `nf_try_build`）。
+  ★ 自己交差は **`valid(m)` で判る**（3D は 閉 ∧ 自己交差なし）。疑わしい形——掃引で作った管、
+  外部から読み込んだ mesh、生成器を自作した形——は、`valid` を通してから使うか、
+  `solidify` を明示的に噛ませる。★ **`valid` が `0` を返しても op はエラーにならない**ので、
+  「落ちなかった＝正しい」とは読めないことに注意
+- ★**cg / mf の mesh もそのまま渡せる**（`nef_*` の all-foreign sig）。実体は codec が nf へ
+  昇格読みする。自己交差したメッシュも cg→nf / mf→nf の変換自体は**通る**（Nef 構築は面
+  どうしの交差を検査しないので、壊れた形のまま入り、面は保たれる）。cg 入力でも mf 入力でも
+  同じ答えになる（mf を `nef` で解くには上表のとおり `geogram` を
+  積んでいないか、`module("nef_snc.so",{priority:120})` のように明示的に上げる）
+- ★**`repair` を前段に置かないこと**。`repair`（`autorefine`）の出力は**開いた**メッシュなので
+  Nef にできず、そこでエラーになる。`solidify` は細分を必要としない（生でも細分済みでも同じ答え）
+- ★**空洞は保たれる**。`Mark_bounded_volumes` は有界セルを無差別に塗るので単純に適用すると
+  空洞が埋まるが、`solidify` は**連結成分ごとに**組み直し、成分どうしを**入れ子の深さ**で
+  合成する（外殻は和・空洞は差）
+- ★**重い**。面 1 枚ごとに Nef を作って union するので、**面数に比例して**コストが伸びる
+  （通常の Nef 構築より桁で重い）。だから**既定の変換経路には無く**、明示的に呼んだときだけ払う
+- 健全な立体に対しては**不変**（箱も中空箱も体積が変わらない）
+- ★**geogram 版はコスト特性が違う**。Nef 版が面数に比例して重いのに対し、geogram 版は
+  arrangement を 1 回作るだけで済む。★ **`mf-mesh3d` はそのまま渡せる**
+  （`gg` と 4CC が同じ `MFM3` = 変換すら起きない）。cgal で作った厳密な mesh を geogram で解きたい
+  ときだけ `cast("gg-mesh3d", …)` を明示する — ⚠ これは**厳密 → double の降格**なので、
+  `geogram` の sig には書いていない（表現力の高い型から低い型へ落とすのは `cast` だけ）
+- 関連: `repair`, `unify`, `valid`, `cast`
 
 ### `color(m, c)` — 面に色をつける
 `3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` · 型 `cg-mesh3d`(MESH) / `mf-mesh3d`(MFM3)
 
 mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f:color`、manifold は頂点プロパティ ch3..5。どちらも全体を一様に塗るので見え方は同じ）。`+++`（combine）で重ねたとき**各成分の色が保持される**ので、要素ごとの色分けに使う（本体グレー＋ものさし赤、など）。色は**色対応フォーマットで出力**される。
 
@@ -773,7 +1146,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `cast(target_type, mesh)` — 目標型への明示変換 {#cast}
 `3D`/`2D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)（目標型を産出できるモジュールへ routing）
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)・`mf-cross2d`(MFC2)（目標型を産出できるモジュールへ routing）
 
 `mesh` を目標**型** `target_type` へ明示的に移す（rev4 型ディスパッチ）。無損失方向（Manifold→CGAL の昇格）は
 自動でも `cast` でも起こせる。損失方向（CGAL→Manifold のダウングレード）は `cast` で明示する。
@@ -801,36 +1174,196 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
   - **降格**（cg→mf）: `mf-cg-downgrade` codec。有理数→double 化で**損失**。損失を伴うため `cast` による**明示**のみ。
   - `—`: **次元（3d↔2d）は跨げない**。次元を変えるのは `extrude`（2D→3D）/ `section`（3D→2D）等の op であって `cast` ではない。
 - `"cg-…"`: → CGAL(厳密)。Manifold(double)入力は**無損失で厳密化**（double は 2 進有理数）。
-- 目標型は**次元を含む**（3d/2d）ので、旧 `cast("exact")`（次元非依存）と違い曖昧さがない。
+- 目標型は**次元を含む**（3d/2d）ので曖昧さがない。
 - 既に目標型なら実質 no-op（再エンコードのみ）。
 - 例: `var m = cast("cg-mesh3d", box(40,40,40) ||| sphere(20));  // Manifold で速く作り無損失で厳密化`
 - 例: `export("fast.stl", cast("mf-mesh3d", box(2,2,2) ||| box(1,1,3)));  // 厳密 3D→高速へ（損失）`
-- ⚠ 旧 `cast("exact")` / `cast("manifold")`（カーネル名指し）は**廃止**（後方互換なし・rev4）。
 - 関連: `valid`, `volume`
 
-### `module(so[, {priority, exec_default}])` — モジュールの選択・実行方式の上書き
-文 · → `null`
+### `module(so[, opts])` — モジュールのロード / 設定の上書き
+文 · → `文字列`
 
 **実装**: 組み込み · 型 -
 
-.so **モジュール**をロードし、その選択優先度・実行方式を**上書き**する planner 側関数。**省略可能**——
-呼ばなくても各モジュールは既定設定（記述子の priority / exec_default）で動く。既定の挙動を変えたい
-ときだけ書く。設定上書きのない軽量ロードは `load(so)`。
+モジュールを**ロード**し、必要なら**選択優先度・実行方式を上書き**する planner 側関数。
+
+★ **モジュールは `module()` で名指したときにロードされる**（起動時の一括ロードは無い）。一度も
+呼ばなければ、そのモジュールの op は `no module can execute op` または `undefined variable` で
+明示エラーになる。実カーネル一式をまとめて欲しいときは `include "module/all.sra";`
+（→ [モジュールリファレンス](srava_module_reference.html)）。
+
+★ **`module` はロード順を変えない**。既にロード済みなら記述子の内容を書き換えるだけで、
+`.so` そのものの差し替えにはならない（差し替えは下記 `module_reload`）。
 
 **入力**
-- `so` モジュール — `文字列`（`"cgal.so"` / `"manifold.so"` / `"pipe_proximity.so"` 等）
-- `{priority, exec_default}` 上書き設定 — `ハッシュ`（省略可）
-  - `priority` 選択優先度 — `整数`。同じ型/op を複数モジュールが提供するとき、どれを既定に寄せるか（大きいほど優先）
-  - `exec_default` 実行方式 — `文字列`（`"process"` 別プロセス / `"thread"` 同一プロセス内スレッド）。op ごとの重さに応じて上書き
+- `so` モジュール — `文字列`（`"cgal.so"` / `"manifold.so"` / `"nef_snc.so"` 等。ファイル名だけなら探索路から解決）
+- `opts` 上書き設定 — 省略可
+  - `"off"` — `文字列`。**アンロードする**（`dlclose`）。以後 `module(so, {})` で読み直せる。
+    ★ 文字列オプションは `"off"` **だけ**（`"on"` は無い。ロード / 再ロードは `module(so)` か `module(so, {…})`）。
+    ★ 未ロードへの `"off"`、および**一度でも op を実行した**モジュールへの `"off"` は、黙って無視せず
+    **明示エラー**になる（前者は名前の打ち間違いに気づけるように、後者はその `.so` 由来のメッシュや
+    agent が生きている可能性があるため）。落とせるか先に確かめるなら `module_loaded`
+  - `{priority, exec_default, arity}` — `ハッシュ`
+    - `priority` 選択優先度 — `整数`。同じ型/op を複数モジュールが提供するとき、どれを既定に寄せるか（大きいほど優先）。
+      ★**同点の勝敗は不定**（ロード順 = ディレクトリ走査順に依存）。確実に切り替えるなら既存の最大値より大きい値を指定する
+    - `exec_default` 実行方式 — `文字列`（`"process"` 別プロセス / `"thread"` 同一プロセス内スレッド）。op ごとの重さに応じて上書き
+    - `arity` 多オペランド評価の項数 — `2 以上の整数`。`union(a,b,c,…)` を木に分解するとき、
+      **1 ノードあたり何項まとめるか**の上限（既定 2 = 従来どおりの二項の木）。大きくすると
+      中間ノードが減り、カーネルによっては n 個をまとめて 1 回の交差計算にできる
+      （geogram は最大 32・manifold / OCCT は上限なし・cgal は二項のみ）。
+      ★ **モジュールが受けられる上限を超えては効かない**（cgal に `arity: 8` を書いても二項のまま）
+  - **省略** — `module(so, {})` と同じ（ロードのみ・記述子は触らない）
 
-**出力** — `null`（副作用でモジュール登録・設定を書き換える）
+**出力** — `文字列`（モジュール名。`"cgal.so"` を渡すと `cgal`）
 
-- 例: `module("manifold.so", {priority: 20});`（既定幾何カーネルを Manifold 寄りにする）
+- 例: `module("manifold.so", {priority: 99});`（既定幾何カーネルを Manifold へ）
 - 例: `module("cgal.so", {exec_default: "thread"});`（cgal の op を同一プロセスで実行）
-- `load(so)` は設定上書きなしの軽量版（ロードのみ）。
-- 構文は `ns_sravaParser.y:457-468`（`load`/`module`）で確認可。
+- 例: `module("cgal.so", "off"); … module("cgal.so", {});`（落としてから読み直す）
+- 例: `module("geogram.so", {arity: 8}); var m = union([b1, b2, …, bN]);`
+  （8 個ずつまとめて畳む。★ **式は書き換えずに** 1 パラメータだけで分解の粒度が変わる。
+  ⚠ `arity` を変えると中間ノードのキャッシュキーも変わる（別の木になるため）。切り替えて比べるときはキャッシュ dir を分ける）
 - 詳細な引数仕様・記述子 ABI は[**モジュールリファレンス**](srava_module_reference.html)へ。
-- 関連: `cast`, `load`
+- 関連: `cast` · `module_loaded` · `module_reload`
+
+---
+
+### `module_loaded(so)` — ロード済みか
+文 · → `値`
+
+**実装**: 組み込み · 型 -
+
+その `.so` が**いまロードされているか**を返す。引数の書き方は `module()` と同じで、ファイル名だけなら
+探索路から解決される。
+
+`module(so, "off")` が実アンロードになり、未ロードへの `"off"` が明示エラーになったので、
+**落とす前に確かめる**手段として要る。
+
+**入力**
+- `so` モジュール — `文字列`
+
+**出力** — `値`（ロード済みなら `1`・未ロードなら `0`）
+
+```
+print("F1", module_loaded("cgal.so"));      // → F1 0
+module("cgal.so", {});
+print("F2", module_loaded("cgal.so"));      // → F2 1
+```
+
+- 関連: `module` · `module_reload`
+
+---
+
+### `module_reload(path, opts)` — 落として読み直す  〔stdlib: module/reload〕
+文 · → `文字列`
+
+**実装**: stdlib（`include "module/reload.sra";`）· 型 -
+
+`module(path, "off")` してから `module(path, opts)` する定型を 1 行にまとめたヘルパ。
+未ロードなら単にロードする。
+
+1 つのモジュール名につき `dlopen` は 1 回なので、`module(so, {…})` では**ロード済みの `.so` 自体を
+差し替えられない**（できるのは記述子の上書きだけ）。落としてから読み直すことで差し替えになる。
+
+**入力**
+- `path` モジュール — `文字列`（探索路の外の絶対パスも可）
+- `opts` 上書き設定 — `ハッシュ`（`module()` と同じ）
+
+**出力** — `文字列`（モジュール名）
+
+```
+include "module/reload.sra";
+module_reload("cgal.so", {priority:99});
+module_reload("/tmp/experimental/cgal.so", {});   // 開発中の .so に差し替える
+```
+
+⚠ **差し替えはそのモジュールで op を実行する前に行うこと**。一度でも使われた `.so` は落とせない。
+⚠ `reload.sra` は `module/all.sra` には**入っていない**（ヘルパを使うためだけに 6 本ロードされるのを避けるため）。
+⚠ 落とさずに同名で別パスを指すと「同名で別ファイル」の明示エラーになる。
+
+- 関連: `module` · `module_loaded`
+
+---
+
+### `triangulate(s, deflection)` — B-rep をメッシュへ
+`3D` · → `mesh`
+
+**実装**: `occt_mf.so`（occt とメッシュ系の**橋渡しモジュール**） · 型 `oc-brep3d`(BREP) → `mf-mesh3d`(MFM3)
+
+解析曲面（B-rep）を三角形メッシュに落とす。`deflection` は**弦の最大距離**（世界座標の長さ）で、
+小さいほど細かい。★ **高→低への降格**なので、この op を通した後は解析曲面の利点（分割数に依存しない
+厳密な体積など）は無くなる。
+
+**入力**
+- `s` 対象 — `mesh`（`oc-brep3d`）
+- `deflection` 弦の最大距離 — `スカラ`（**必須・0 より大**）
+
+**出力** メッシュ — `mesh`（`mf-mesh3d`）
+
+- ⚠ **`occt_mf.so` をロードすること**（`occt.so` 単体には入っていない）。occt 本体を manifold に
+  依存させないために分けてある。
+- 例: `module("occt.so",{}); module("occt_mf.so",{}); volume(triangulate(sphere(1), 0.01))`
+- 関連: `cast`, `voxelize`, `isosurface`
+
+---
+
+### `voxelize(mesh, dx)` — メッシュをボリューム（level set）へ
+`3D` · → `mesh`
+
+**実装**: `openvdb_mf.so` / `openvdb_cg.so` / `openvdb_gg.so`（入力のメッシュ型ごとに 1 本）
+· 型 `mf-` / `cg-` / `gg-mesh3d` → `vd-grid3d`(`VDB `)
+
+三角形メッシュを **narrow-band level set**（符号付き距離場）へ変換する。
+
+**入力**
+- `mesh` 対象 — `mesh`（3D）
+- `dx` **ボクセル間隔**（世界座標の長さ） — `スカラ`（**必須・0 より大**）
+
+**出力** ボリューム — `mesh`（`vd-grid3d`）
+
+- ⚠ 第 2 引数は**分割数ではなく間隔**。半分にすると格子は 8 倍になる。
+- ⚠ **ボリューム系のブールは 2 つの grid の `dx` が同じであることを前提にする**。
+  別の `dx` で作った grid を混ぜない。
+- 例: `module("openvdb_mf.so",{}); var v = voxelize(sphere(8,64), 0.05);`
+- 関連: `isosurface`, `renormalize`, `voxels`
+
+---
+
+### `isosurface(v[, iso])` — ボリュームからメッシュへ
+`3D` · → `mesh`
+
+**実装**: `openvdb_mf.so` / `openvdb_cg.so` / `openvdb_gg.so` · 型 `vd-grid3d`(`VDB `) → `mf-` / `cg-` / `gg-mesh3d`
+
+等値面 `iso` を三角形メッシュとして取り出す（四角形で取り出してから分割する上流推奨の手順）。
+
+**入力**
+- `v` ボリューム — `mesh`（`vd-grid3d`）
+- `iso` 等値 — `スカラ`（省略可）
+
+**出力** メッシュ — `mesh`
+
+- 既定: `iso=0`（level set の表面）
+- ⚠ 帯（narrow band）の外の等値を指定すると**空になり明示エラー**。
+- 例: `isosurface(v)` / `isosurface(v, 0.1)`（0.1 だけ太った面）
+- 関連: `voxelize`, `renormalize`
+
+---
+
+### `renormalize(v[, halfWidth])` — level set を張り直す
+`3D` · → `mesh`
+
+**実装**: `openvdb.so` · 型 `vd-grid3d`(`VDB `)
+
+符号付き距離場としての性質が崩れた grid（大きな `offset` の後など）を張り直す
+（`levelSetRebuild`）。`halfWidth` は帯の半幅（**ボクセル単位**）。
+
+**入力**
+- `v` ボリューム — `mesh`（`vd-grid3d`）
+- `halfWidth` 帯の半幅 — `スカラ`（省略可・0 以下は既定扱い）
+
+**出力** 張り直した grid — `mesh`（`vd-grid3d`）
+
+- 既定: `halfWidth=3`（OpenVDB の `LEVEL_SET_HALF_WIDTH`）。`offset` を帯より大きく取るときに広げる。
+- 関連: `offset`, `voxelize`, `isosurface`
 
 ---
 
@@ -841,7 +1374,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `area(m)` — 面積
 `2D・3D` · → `スカラ`
 
-**実装**: `cgal.so` + `manifold.so` · 型: value
+**実装**: `cgal.so` / `manifold.so` · 型 value
 
 2D＝囲み面積（外周−穴）/ 3D＝表面積。
 
@@ -854,7 +1387,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `volume(m)` — 体積
 `3D` · → `スカラ`
 
-**実装**: `cgal.so` + `manifold.so` · 型: value
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so` / `openvdb.so`（→ [対応表](#module-matrix)） · 型 value
 
 囲む体積（閉メッシュ・発散定理）。2D はエラー。
 
@@ -865,7 +1398,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `perimeter(m)` — 周長
 `2D` · → `スカラ`
 
-**実装**: `cgal.so` · 型: value
+**実装**: `cgal.so` · 型 value
 
 境界長（外周＋穴の周長）。3D はエラー。
 
@@ -876,7 +1409,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `centroid(m)` — 重心
 `2D・3D` · → `ベクトル`
 
-**実装**: `cgal.so` + `manifold.so` · 型: value
+**実装**: `cgal.so` / `manifold.so` · 型 value
 
 面積/体積重心。
 
@@ -889,7 +1422,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `bbox(m)` — バウンディングボックス
 `2D・3D` · → `配列`
 
-**実装**: `cgal.so` + `manifold.so` · 型: value
+**実装**: `cgal.so` / `manifold.so` · 型 value
 
 軸平行 AABB を `[min隅, max隅]` で返す。
 
@@ -904,7 +1437,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `valid(m)` — 検証
 `2D・3D` · → `整数`(0/1)
 
-**実装**: `cgal.so` + `manifold.so` · 型: value
+**実装**: `cgal.so` / `manifold.so` · 型 value
 
 `1`=正常 / `0`=問題。3D＝閉∧自己交差なし / 2D＝全リング単純。
 
@@ -913,20 +1446,57 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 **出力** 正常か — `整数`（`1`/`0`）
 
 - 例: `if (valid(m) == 1) { export("ok.stl", m); }`
-- 関連: `repair`
+- ★ `0` が返っても**下流の op はエラーにならない**。自己交差した閉メッシュは各カーネルの
+  ブール演算を素通りして**黙って誤った体積**を返す（自分を貫く tube では交差部が二重に数えられる）。
+  面が囲む本当のソリッドが欲しいときは `solidify` を明示的に呼ぶ
+- 関連: `repair`, `solidify`
 
 ### `repair(m)` — 修復
 `2D・3D` · → `mesh`
 
 **実装**: `cgal.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2)
 
-2D＝`Polygon_repair`（even-odd 正規化・完全）/ 3D＝`autorefine`（自己交差をエッジ化・best-effort）。
+2D＝`Polygon_repair`（even-odd 正規化・**完全**）/ 3D＝`autorefine`（**交差線を実エッジ化するだけ**）。
 
 **入力** `m` 対象 — `mesh`
 
 **出力** 修復後 — `mesh`
 
-- 関連: `valid`, `polygon`
+- ★**3D の `repair` は自己交差を「直さない」**。`valid()` は自己交差を見るので、自己交差した形状は
+  `repair` の後も **`valid()` = 0 のまま**（軽い/深い自己交差 tube・重なる 2 立体の `+++`、
+  いずれも 0）。細分は効いている（自己交差 tube で 86v/168f → 726v/792f）が、交わっていた 2 枚の面は
+  エッジで接したまま残るため
+- 3D で `repair` が役に立つのは「交点を実エッジにした mesh が欲しい」場合。**汚れた mesh を有効な
+  ソリッドにする用途には使えない**。それをやるのは `solidify`
+  （自己交差した tube の体積は重なりの二重計上になっている。`solidify` で組み直せば直る）
+- ★**`solidify` の前段に `repair` を置いてはいけない**。`autorefine` は内部で
+  `duplicate_non_manifold_edges_in_polygon_soup` を通すので出力が**閉じていない**（交差線が穴の縁に
+  変わる）。閉じていないメッシュは Nef にできないので、そこで明示エラーになる
+- ★注意: 「**分割して `union` すれば正しい値になる**」は**誤り**（旧記述を訂正）。分割すると継ぎ目が
+  マイター接合から**平らな蓋どうしの重ね合わせ**に変わり、角が太る。自己交差の無い tube でも
+  一本物 52.23 に対し、同じ点列を 2 本に割って `union` すると 54.48（差 2.25 は継ぎ目の分で、
+  自己交差とは無関係）。自己交差 tube でも 2 本に割った `union` は 50.51 で、面が囲む本当の体積
+  48.61 より太い
+- 2D は even-odd 正規化なので**完全に修復できる**（3D と非対称なことに注意）
+- 関連: `valid`, `polygon`, `unify`
+
+---
+
+### `voxels(v)` — 有効ボクセル数
+`3D` · → `整数`
+
+**実装**: `openvdb.so` · 型 `vd-grid3d`(`VDB `)
+
+grid の**有効ボクセル数**（narrow band に値を持つボクセルの数）。ボリュームの「重さ」の目安で、
+`dx` を半分にすると面積比でおよそ 4 倍になる。
+
+**入力** `v` ボリューム — `mesh`（`vd-grid3d`）
+
+**出力** 個数 — `整数`
+
+- ⚠ **体積ではない**。体積は `volume(v)`。
+- 例: `voxels(voxelize(sphere(8,64), 0.05))`
+- 関連: `volume`, `voxelize`
 
 ---
 
@@ -937,7 +1507,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `distance(a, b)` — 最近接距離
 `3D` · → `スカラ`
 
-**実装**: `cgal.so` · 型: value
+**実装**: `cgal.so` · 型 value
 
 2 メッシュ間の最近接距離（AABB 近似・頂点↔面の双方向最小）。
 
@@ -951,7 +1521,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `closest(a, b)` — 最近接点対
 `3D` · → `配列`
 
-**実装**: `cgal.so` · 型: value
+**実装**: `cgal.so` · 型 value
 
 **入力** `a, b` 対象 — ともに `mesh`（3D）
 
@@ -963,7 +1533,7 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `farthest(a, b)` — 最遠点対
 `3D` · → `配列`
 
-**実装**: `cgal.so` · 型: value
+**実装**: `cgal.so` · 型 value
 
 頂点ペア総当り（距離値は厳密・大メッシュで重い O(|VA|·|VB|)）。
 
@@ -976,13 +1546,13 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 ### `thin_spots(m, t_min [, rays [, cone]])` — 肉厚解析（薄肉検出）
 `3D` · → `配列`
 
-**実装**: `cgal.so` · 型: value
+**実装**: `cgal.so` · 型 value
 
 **肉厚 SDF（Shape Diameter Function）**で「薄すぎて 3D プリントで割れる箇所」を位置つきで拾う。各面で内向きに錐状のレイ（全角 `cone`°・`rays` 本）を飛ばし、反対側の壁までの距離の加重平均＝その場所の**肉厚**を測り、`t_min` 未満の面だけを返す。値は絶対距離（モデル単位＝mm 等）。入力は閉じた三角形メッシュ前提（`valid` で前段確認可）。
 
 🔑 **`cone`（コーン全角）が肝**。既定 **45°** は「壁にほぼ垂直方向の肉厚」を測るので、ダクトや壁の**角（複数の薄壁が収束する所）でも過小評価しない**。CGAL 既定の **120°** は広角で形状診断向きだが、角で周囲の壁を拾って 1.5mm 壁を 0.6mm 等と**過小評価**する（＝偽陽性）。角の誤検出が気になるなら 30〜45°、なだらかな曲面の薄肉も拾いたいなら広めに。
 
-⚙️ **マルチスレッド並列**（面ごと独立・AABB ツリー共有）。10 万面級でも数秒（24 コアで約 8 万面 ≈ 1 秒）。計算量 ≈ 面数 × `rays`。`rays` を下げると速いが取りこぼす。
+⚙️ **マルチスレッド並列**（面ごと独立・AABB ツリー共有）。計算量 ≈ 面数 × `rays`。`rays` を下げると速いが取りこぼす。
 
 **入力**
 - `m` 対象 — `mesh`（3D）
@@ -1047,6 +1617,31 @@ mesh の**全面に色 `c`** を付ける（cgal は per-face プロパティ `f
 
 - 例: `m +++ thin_markers_band(m, 0.5, 1.0, 0.4)`
 - 関連: `thin_markers`, `thin_spots_band`
+
+---
+
+### `pipe_proximity` ／ `pipe_adjust` ／ `pipe_sample` ／ `pipe_scene_proximity` ／ `pipe_scene_adjust` {#pipe-proximity}
+`3D` · → `配列` / `ハッシュ`
+
+**実装**: `pipe_proximity.so`（**解析モジュール**・幾何型を持たず値だけをやり取りする） · 型 value
+
+可変太さ配管（tube）の**自己接近の検出**と、接近を解消するための**制御点の調整**。
+幾何カーネルに依存しない（CGAL も Manifold も使わない）ので、mesh ではなく
+**制御点の配列と半径**を受け取り、値（配列・ハッシュ）を返す。
+
+| op | 役割 |
+|---|---|
+| `pipe_proximity(ctrl_pts, radius, report_gap)` | 1 本の配管の自己接近を検出して当たりの一覧を返す |
+| `pipe_adjust(ctrl_pts, radius, params)` | 接近を解消するように制御点を動かす（`.ctrl` をそのまま `tube` に渡せる） |
+| `pipe_sample(...)` | 中心線のサンプリング（半径キーポイントを保つ） |
+| `pipe_scene_proximity(bodies, report_gap)` | **N 体**の相互接近を検出 |
+| `pipe_scene_adjust(bodies, movableIdx, params)` | **N 体**のうち可動 body の制御点を動かす |
+
+- ★ **引数と `params` の全キー（`dMin` / `maxIter` / `fixEnds` / `solver` …）と返り値の構造は
+  [モジュールリファレンスの pipe_proximity の節](srava_module_reference.html#pipe_proximity)**に
+  一覧がある（ここに二重には書かない）。
+- 例: `var res = pipe_adjust(pts, 0.8, { dMin: 0.6, maxIter: 400, fixEnds: 1 }); tube(res.ctrl, 12);`
+- 関連: `tube`, `distance`, `thin_spots`
 
 ---
 
@@ -1174,7 +1769,7 @@ planner 側 op（agent 不要・CGAL に触れない）。
 **出力** 最後の引数の値（そのまま）
 
 - 例: `var m = print(box(2,2,2));`（途中デバッグ）
-- ⚠ `print(…, volume(m), bbox(m))` のように独立な計測を並べても、引数は**左から1つずつ評価**され**直列**になる（並列にしたいなら引数を配列 `[..]` にして評価するか `async` を使う）。
+- ★ `print(…, volume(m), bbox(m))` のように独立な計測を並べると、引数は**一斉に起動**されてから解決される。⚠ **2026-08-24 より前のビルドでは直列**だった（左から 1 つずつ評価）。
 
 ### `print_async(x, …)` — 非ブロッキング表示
 任意 · → `null`
@@ -1205,15 +1800,14 @@ planner 側 op（agent 不要・CGAL に触れない）。
 
 **出力** なし（即リターン。完了はプログラム末尾の drain か `flush()` で待つ）
 
-- **約束**：制御文（`{}`/`if`/`while`/`for`）は直列、関数引数と `[..]` は並列、並列な制御は `async`。
+- **名前を付けて並列に受けたい**ときは**分割代入** `var [a, b] = [volume(m1), volume(m2)];`（1 文なので並列。→ 言語リファレンス「分割代入」）。
+- **約束**：制御文（`{}`/`if`/`while`/`for`）と**文の並び**は直列。1 つの文の中に書いた独立な計算は並列（`async` / `map` / 配列リテラル / 演算子 / `print`・`concat` の引数）。⚠ **値の計算を別々の文に分けると直列**（mesh は文を分けても並列）。→ 言語リファレンス「並列に走るもの・走らないもの」。
 - `sync:` は**順序付き出力**であって順序付き実行ではない。`body` の計算は並列、`sync:` 文の**出力**だけが順序付く。
 - `sync:` 文は `body` の**後**に走るので、`async { export("a.stl", m); sync: print("saved a"); }` の "saved a" は **a.stl 書き込み完了後**に出る（`export_async`+`gate` の「計算完了 ≠ 書込完了」問題が無い）。
 - **エラーは continue-and-collect**：`body`/`sync:` でエラーが出ても他の `async` は止まらず、エラーは末尾でまとめて報告され終了コードに反映（当該 `async` の `sync:` はスキップ）。チェーンは必ず前進するのでデッドロックしない。
 - 例（並列計算・順序表示）: `async { var v = volume(m); sync: print("vol", v); }` を複数並べる。
 - 例（`par` の代替）: `var ab = [volume(part), bbox(part)]; print("vol", ab[0], "bbox", ab[1]);`（`[..]` が並列評価）
 - 関連: `print_async`, `export_async`, `flush`, `gate`
-
-> **`par` は撤去**：`par(a,b,c)` は配列リテラル `[a,b,c]` と同義。配列リテラル `[..]` が全要素を並列評価するので、`par` の代わりに `[..]` を使う。
 
 ### `gate(inp1, inp2)` — 完了フック
 任意 · → `inp1`
@@ -1261,7 +1855,7 @@ planner 側 op（agent 不要・CGAL に触れない）。
 ### `export(path, mesh[, unit])` ／ `export(mesh)` — 書き出し
 `2D・3D` · → `mesh`/`null`
 
-**実装**: `cgal.so` + `manifold.so` · 型: value（cgal は cg-/mf- 全型を引受＝universal reader）
+**実装**: `cgal.so` / `manifold.so` / `nef_snc.so` / `nef_hybrid.so` / `geogram.so` / `cherchi.so` / `occt.so`（→ [対応表](#module-matrix)） · 型 value（cgal は cg-/mf- 全型を引受＝universal reader）
 
 mesh をファイルへ書き出し（形式は拡張子で自動判別）。引数 1 個は passthrough（書き出さず継続を値化）。
 
@@ -1297,7 +1891,7 @@ manifold.so が直接書けるのは `stl` / `off` / **`3mf` / `amf`**（3MF/AMF
 ### `export_vox(path, params, mesh…)` — ボクセル化して vox.h5 を書く
 `3D` · → `null`
 
-**実装**: `cgal.so` · 型: value（HDF5 vox.h5）
+**実装**: `cgal.so` · 型 value（HDF5 vox.h5）
 
 複数の領域メッシュを共通の Cartesian 格子へボクセル化し、各領域を名前付きマスクとして中立フォーマット **vox.h5**（格子 + マスク）へ書き出す。k-Wave 等の格子ソルバ連携用（→ [シミュレーション（k-Wave）](srava_kwave.html)）。
 
@@ -1315,7 +1909,6 @@ manifold.so が直接書けるのは `stl` / `off` / **`3mf` / `amf`**（3MF/AMF
 - **内外判定は厳密（v1.1.0-rc2 以降）**。判定・交点は厳密有理数で行い、サンプル点が面の辺・頂点・鉛直面にちょうど載る縮退は記号的摂動で一貫して解く。したがって**結果はメッシュの幾何だけで決まり**、実行のたびに変わったり、同じ形状でも内部表現の違いで変わったりしない。
   - サンプル点は**セル中心** `origin + (i+1/2)·dx`。格子に整列した設計値（`dx` の整数倍の半径・平面）と縮退しにくく、格子面上に軸を持つ対称形状では**鏡像対称が保たれる**。
   - z 方向の充填は半開区間 `[z_lo, z_hi)`。接する立体どうしが**隙間なく・二重なく**敷き詰まる。
-  - ⚠ **rc1 以前とは voxel 数が変わる**（rc1 以前は浮動小数の丸め任せで、縮退時に ±1 voxel ずれ・実行ごとの揺れがあった）。既存の出力を基準値にしている場合は再取得すること。
 - **メッシュは位置引数**（`combine` と同じく）。srava ではメッシュ（cache）と値（ハッシュ/配列）が別経路で渡るため、`regions` の中にメッシュは入れられない。
 - vox.h5 スキーマ: `Nx/Ny/Nz`(int64)・`dx/dy/dz`(float64)・`origin`(float64[3])・`masks/<name>`(uint8[Nx,Ny,Nz])。属性 `format="srava-vox"`。
 - 例:
@@ -1342,7 +1935,7 @@ manifold.so が直接書けるのは `stl` / `off` / **`3mf` / `amf`**（3MF/AMF
 ### `import(path)` — 読み込み
 `2D・3D` · → `mesh`
 
-**実装**: `cgal.so` + `manifold.so` · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)
+**実装**: `cgal.so` / `manifold.so` / `occt.so`（→ [対応表](#module-matrix)） · 型 `cg-mesh3d`(MESH)・`cg-cross2d`(PLY2) / `mf-mesh3d`(MFM3)
 
 外部メッシュを DAG の葉に読み込む（`(path,size,mtime)` でキャッシュ）。失敗は明示エラー。
 

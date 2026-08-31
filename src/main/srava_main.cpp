@@ -8,7 +8,12 @@
  *   srava                env SRAVA_SOURCE か既定ソースを実行
  * シェバング例:  #!/usr/bin/env srava   をスクリプト先頭に置き chmod +x すれば ./file.sra で実行可。 */
 #include	"ts2/c++/tsApplication.h"
+#include	"pig/c++/osglue.h"
+#if defined(__GLIBC__)
+#include	<malloc.h>
+#endif
 #include	"cg/c++/cgptsPlanner.h"
+#include	"pig/c++/pigCacheManager.h"    /* --count-cache: 完成キャッシュ数の集計 */
 #include	"pig/c++/pigModule.h"           /* --modules: 記述子 (priority/exec_default/n_ops) */
 #include	"pig/c++/pigModuleRegistry.h"   /* --modules: 診断用ローカルレジストリ (#3427 ③) */
 
@@ -90,6 +95,86 @@ raise_fd_limit(void)
 /* `srava --modules` の出力。探索路 → ロード済み → 失敗、の 3 節。
  * 「どこを見たか」を (存在しない dir も含めて) 出すのが要点で、ユーザが探索路を誤解している
  * ケースがこれで一発で分かる。 */
+/* ★ 2026-08-28 (ひさ要望): `srava --module-info [name ...]` — 記述子の申告を **省略せず**出す。
+ *   ★ --modules とは **別コマンドにした** (ひさ判断)。問いが違うため:
+ *       --modules      … 「どの .so が効いているか」= 配置の問い (探索路・勝者・失敗)。37 行
+ *       --module-info  … 「このモジュールは何を申告しているか」= 中身の問い。全部で 544 行
+ *     混ぜると 37 行の表が 500 行の申告に埋もれ、本来の切り分けができなくなる (cgal 1 本で 98 行)。
+ *   op が routing に乗るかは **sig** で決まるので、n_ops の数だけでは中身の切り分けに足りない。
+ *   ★ 出すのは記述子そのもの (推測も要約もしない)。sig は長いものがあるが折り返さない —
+ *     grep で拾えることのほうが揃って見えることより大事。 */
+static void
+print_module_detail(const srava_module_descriptor *d)
+{
+	/* ★ 実行方式。exec_caps は **できること** の bitmask、exec_default は **既定でどちらを使うか**。
+	 *   2 つは別物 — caps に THREAD があっても既定が PROCESS ということはある (cgal がそれ)。
+	 *   module(so,{exec_default:"thread"}) で上書きしたときに、ここで実際の値を確認できる。 */
+	{
+		char caps[32];
+		::snprintf(caps, sizeof caps, "%s%s%s",
+		           ( d->exec_caps & EXEC_THREAD )  ? "thread" : "",
+		           ( ( d->exec_caps & EXEC_THREAD ) && ( d->exec_caps & EXEC_PROCESS ) ) ? "|" : "",
+		           ( d->exec_caps & EXEC_PROCESS ) ? "process" : "");
+		::printf("    exec_caps=%s(0x%x)  exec_default=%s  make_agent=%s\n",
+		         caps[0] ? caps : "-", d->exec_caps,
+		         ( d->exec_default & EXEC_THREAD )  ? "thread"
+		         : ( d->exec_default & EXEC_PROCESS ) ? "process" : "-",
+		         d->make_agent ? "yes" : "no");
+	}
+	::printf("    arity=%d  import=%s  export=%s  hash_salt=%s  initialize=%s  configure=%s\n",
+	         d->arity,
+	         ( d->import_exts && d->import_exts[0] ) ? d->import_exts : "-",
+	         ( d->export_exts && d->export_exts[0] ) ? d->export_exts : "-",
+	         d->hash_salt ? "yes" : "no",
+	         d->initialize ? "yes" : "no",
+	         d->configure  ? "yes" : "no");
+
+	/* op 表: 名前 / sig / 引数の形。★ routing は sig で決まるので sig を主役にする。 */
+	::printf("    ops (%d):\n", d->n_ops);
+	for ( int i = 0 ; i < d->n_ops ; ++i ) {
+		const pigOpEntry &e = d->ops[i];
+		::printf("      %-18s nin=%d%s%s%s wire=%d\n", e.op ? e.op : "(null)", e.nin,
+		         e.variadic    ? " variadic"    : "",
+		         e.commutative ? " commutative" : "",
+		         e.vtail_value ? " vtail=value" : "",
+		         ( e.wiring != 0 ) ? e.wiring->nwant : 0);
+		::printf("        sig = %s\n", e.sig ? e.sig : "(none - this op is not routable)");
+	}
+
+	/* ★ ABI v16: 1 行 = (本体クラス階層, 名乗る型名, 扱う 4CC)。旧 codecs + wires の統合。
+	 *   ★ tags は **診断専用の申告**なので、ここで **実際に create へ通して検証**する。
+	 *     読めるかを答えるのは create_for_meta 一本で、tags はその答えを列挙するための候補。
+	 *     申告と実装がずれたら "(NOT accepted)" として表に出る (黙って残らない)。 */
+	if ( d->provides != 0 ) {
+		::printf("    provides (hierarchy / declared type names / tags probed against create):\n");
+		for ( const pigModuleType *c = d->provides ; c->wire != 0 ; ++c ) {
+			::printf("      %-18s types = %s\n",
+			         c->wire->name ? c->wire->name : "(unnamed)", c->types ? c->types : "");
+			::printf("      %-18s create=%s reader=%s writer=%s match=%s\n", "",
+			         c->wire->create   ? "yes" : "no", c->wire->mkReader ? "yes" : "no",
+			         c->wire->mkWriter ? "yes" : "no", c->wire->match    ? "yes" : "no");
+			for ( const char *q = ( c->tags ? c->tags : "" ) ; *q != '\0' ; ) {
+				const char *comma = ::strchr(q, ',');
+				size_t len = comma ? (size_t)(comma - q) : ::strlen(q);
+				unsigned char tg[4] = { ' ', ' ', ' ', ' ' };
+				for ( size_t k = 0 ; k < len && k < 4 ; ++k ) tg[k] = (unsigned char)q[k];
+				const char *res = ( c->wire->create == 0 )
+				    ? "(no create - this hierarchy is not instantiated from a 4CC)"
+				    : "(NOT accepted - declaration does not match create_for_meta)";
+				sPtr<pigData> probe;
+				if ( c->wire->create != 0 ) probe = c->wire->create(tg, 4);
+				if ( probe != thNULL ) {
+					const char *tn = probe->type_name();
+					res = ( tn != 0 ) ? tn : "(accepted, untyped)";
+				}
+				::printf("      %-18s tag '%.4s' -> %s\n", "", (const char*)tg, res);
+				if ( comma == 0 ) break;
+				q = comma + 1;
+			}
+		}
+	}
+}
+
 static void
 print_module_report(const sPtr<pigModuleRegistry> &reg)
 {
@@ -164,7 +249,7 @@ main(int argc, char** argv)
 {
 	::signal(SIGPIPE, SIG_IGN);   /* agent が先に閉じた後の write を EPIPE 化(即死回避) */
 	unsigned long nofile = raise_fd_limit();   /* シェルの低い fd 上限(macOS 256)を自前で引き上げる */
-	if ( ::getenv("PIG_FD_VERBOSE") != 0 && nofile > 0 )
+	if ( osglue_env_int("PIG_FD_VERBOSE", 0) && nofile > 0 )
 		::fprintf(stderr, "[pig] open files limit (RLIMIT_NOFILE) = %lu\n", (unsigned long)nofile);
 
 	/* ★ .so 化 Phase 3c: カーネル .so を探索路 (docs §1.3) からロードする。これで planner は
@@ -190,6 +275,54 @@ main(int argc, char** argv)
 		std::string mlerr;
 		(void) reg->load_search_path(&mlerr);
 		print_module_report(reg);
+		return 0;
+	}
+
+	/* ★ 2026-08-28 (ひさ要望): `srava --module-info [name ...]` = 記述子の申告ダンプ。
+	 *   op ごとの sig 全リスト・codec の型名登録簿・wires の能力・arity・拡張子・フックを出す。
+	 *   name を与えると **そのモジュールだけ**に絞る (全部だと 500 行を超えるため)。
+	 *   --modules と同じく app は起こさない (診断専用のローカルレジストリ)。 */
+	if ( argc >= 2 && ::strcmp(argv[1], "--module-info") == 0 ) {
+		sPtr<pigModuleRegistry> reg = thNEW(pigModuleRegistry,());
+		std::string mlerr;
+		(void) reg->load_search_path(&mlerr);
+		int shown = 0;
+		for ( int id = 0 ; id < reg->count() ; ++id ) {
+			const srava_module_descriptor *d = reg->descriptor(id);
+			if ( d == 0 ) continue;
+			if ( argc >= 3 ) {         /* 名前で絞る (複数可) */
+				int hit = 0;
+				for ( int a = 2 ; a < argc ; ++a )
+					if ( d->name != 0 && ::strcmp(argv[a], d->name) == 0 ) { hit = 1; break; }
+				if ( ! hit ) continue;
+			}
+			const char *path = reg->descriptor_path(id);
+			::printf("%s  (abi=%d prio=%d %s)\n", d->name ? d->name : "(null)",
+			         d->abi_version, d->priority,
+			         ( path != 0 && path[0] != '\0' ) ? path : "(built-in)");
+			print_module_detail(d);
+			::printf("\n");
+			++shown;
+		}
+		if ( shown == 0 ) {
+			if ( argc >= 3 )
+				::printf("no such module is loaded (see `srava --modules` for the names)\n");
+			else
+				::printf("no modules are loaded\n");
+		}
+		return 0;
+	}
+
+	/* ★ 2026-08-23 (#3419 ゲート入場順序の実験): `srava --count-cache <dir>` = キャッシュ dir の
+	 *   内訳を数えて終了する。app は起こさない (--modules と同じ扱い)。
+	 *   「中断 (SIGINT) した時点でいくつ完成品が残ったか」を測る指標のために用意した。
+	 *   ⚠ ファイル数を数えるだけでは書きかけの死体まで数えて嘘になるので、**判定は sweep と同じ
+	 *   cache_has_end (W_END 番兵まで歩く)** を使う = 外部スクリプトに基準を再実装させない。
+	 *   出力は 1 行・機械可読: `complete=<n> incomplete=<n> broken=<n>` */
+	if ( argc >= 3 && ::strcmp(argv[1], "--count-cache") == 0 ) {
+		int nc = 0, ni = 0, nb = 0;
+		pigCacheManager::count_caches(argv[2], &nc, &ni, &nb);
+		::printf("complete=%d incomplete=%d broken=%d\n", nc, ni, nb);
 		return 0;
 	}
 
@@ -222,6 +355,24 @@ main(int argc, char** argv)
 	 * シェルには 0 が返る = srava_async_err 等の失敗の正体)。ここに来る時点で app teardown は
 	 * 完了しているので、stdout/stderr を flush してから _exit で終了コードを確実に反映する。
 	 * 他環境(Linux/MinGW)は return が正しく反映されるので従来どおり。 */
+	/* ★ 一時計装 (2026-08-22・#3419 §15.3): app teardown 完了後のメモリを見る。
+	 *   RSS だけでは「まだ生きている」と「free 済みだが allocator が返していない」が
+	 *   区別できないので、mallinfo2 の実使用バイトを並べ、malloc_trim の前後で比べる。 */
+	if ( osglue_env_int("SRAVA_EXIT_MEMPROBE", 0) ) {
+		unsigned long long rss = 0;
+		osglue_proc_memory(osglue_getpid(), &rss);
+#if defined(__GLIBC__)
+		struct mallinfo2 mi = ::mallinfo2();
+		::fprintf(stderr, "[memprobe] teardown 後: RSS=%.0fMB 実使用(uordblks)=%.0fMB "
+		                  "mmap(hblkhd)=%.0fMB 未使用だが保持(fordblks)=%.0fMB\n",
+		          rss/1e6, (double)mi.uordblks/1e6, (double)mi.hblkhd/1e6, (double)mi.fordblks/1e6);
+		::malloc_trim(0);
+		rss = 0; osglue_proc_memory(osglue_getpid(), &rss);
+		::fprintf(stderr, "[memprobe] malloc_trim 後: RSS=%.0fMB\n", rss/1e6);
+#else
+		::fprintf(stderr, "[memprobe] teardown 後: RSS=%.0fMB (mallinfo2 無し)\n", rss/1e6);
+#endif
+	}
 	::fflush(stdout);
 	::fflush(stderr);
 #ifdef __CYGWIN__

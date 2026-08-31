@@ -23,6 +23,7 @@
 #include	"ts2/c++/tsApplication.h"    /* ctor の parent 型 sPtr<tsApplication> */
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigModuleRegistry.h"   /* 既定カーネル = priority 最大 (K6・Phase2-5) */
+#include	"pig/c++/ptsFireAndForget.h"   /* 「起動して待たない」(#3419) */
 #include	"cg/c++/pigcgOperators.h"   /* export/export_async/flush 演算子(srava I/O シンク・pigcg 命名) */
 #include	"pig/c++/pigfFunction.h"    /* pigDataFunction<pigfPrintAsync>(print_async チェーン) */
 #include	"pig/c++/pigfAsync.h"       /* async 文の統一 helper(body 直列 + sync 発行順チェーン) */
@@ -40,11 +41,10 @@
 #include	<stdint.h>
 #include	<unistd.h>
 #include	<dirent.h>
-#include	<strings.h>
+#include	<strings.h>                /* strcasecmp(SRAVA_CACHE_RETAIN 解釈) */
+#include	<string>                   /* #3452: SRAVA_MODULE_ALL のプレリュード合成 */
 
-#ifndef SRAVA_AGENT_DEFAULT
-#define SRAVA_AGENT_DEFAULT "/usr/local/bin/srava_agent"   /* install 既定 (CMake で上書き) */
-#endif               /* strcasecmp(SRAVA_CACHE_RETAIN 解釈) */
+#include	"pig/c++/pigInstallPaths.h"   /* srava_agent のパス解決 (env → exe 相対 → install 既定) */
 #include	<time.h>                  /* time/mktime(キャッシュ保持期日の算出) */
 #include	<sys/stat.h>
 #ifndef _WIN32
@@ -83,9 +83,7 @@ static void compute_cache_fingerprint(char *out, size_t outsz)
 	if ( ::uname(&u) == 0 )
 		::snprintf(os, sizeof os, "os=%s/%s", u.sysname, u.machine);   /* 例 os=Linux/x86_64 / os=Darwin/arm64 */
 #endif
-	const char *agent = ::getenv("SRAVA_AGENT");
-	if ( agent == 0 )
-		agent = SRAVA_AGENT_DEFAULT;   /* 起動側 (pigfModuleAgent) と同じ既定を使う */
+	const char *agent = srava_agent_path();   /* 起動側 (pigfModuleAgent) と同じ解決を使う (#3431) */
 	long asz = -1, amt = -1;
 	struct stat st;
 	if ( ::stat(agent, &st) == 0 ) { asz = (long)st.st_size; amt = (long)st.st_mtime; }
@@ -94,50 +92,17 @@ static void compute_cache_fingerprint(char *out, size_t outsz)
 }
 
 
-/* 完了キャッシュ(3D mesh バイナリ)の先頭 D_CHUNK から [u32 nv][u32 nf] を読む(CGAL 不要・検証用)。
- * NB: A_SAVE_BEGIN は body 書込**前**に送られる(read-while-write, step15a)ので、最終結果の
- *   キャッシュ handle が確定した直後でも D_CHUNK 本体が未着のことがある。**書込中(W_END 未着)の間だけ**
- *   ポーリング待ちする。W_END 到達(=書込完了)で nv/nf が無ければ即あきらめる(3D mesh 以外=D_REF の
- *   export 出力 / 2D 等では nv/nf D_CHUNK が無いので、ここで 2 秒粘らない)。1=取得, 0=なし。 */
-static int read_mesh_counts(const char *path, uint32_t *nv, uint32_t *nf)
-{
-	for ( int attempt = 0 ; attempt < 1000 ; ++attempt ) {   /* 書込中のみ最大 ~2s 待つ */
-		FILE *f = ::fopen(path, "rb");
-		int complete = 0;   /* W_END を見た = 書込完了。待っても nv/nf は増えない */
-		if ( f != 0 ) {
-			uint8_t buf[65536];
-			size_t n = ::fread(buf, 1, sizeof buf, f);
-			::fclose(f);
-			size_t off = WIRE_STREAMHDR_SIZE;
-			while ( n >= (size_t)WIRE_STREAMHDR_SIZE && off + WIRE_RECHDR_SIZE <= n ) {
-				uint16_t type, flags; uint32_t len;
-				wire_get_rechdr(buf + off, &type, &flags, &len);
-				off += WIRE_RECHDR_SIZE;
-				if ( type == W_END ) { complete = 1; break; }
-				if ( type == D_CHUNK ) {
-					if ( off + 8 <= n ) {            /* D_CHUNK 本体着信(nv/nf は先頭) */
-						const uint8_t *p = buf + off;
-						*nv = (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
-						*nf = (uint32_t)p[4] | ((uint32_t)p[5]<<8) | ((uint32_t)p[6]<<16) | ((uint32_t)p[7]<<24);
-						return 1;
-					}
-					break;   /* ヘッダのみ着・本体未着 → 再試行 */
-				}
-				off += len;
-			}
-		}
-		if ( complete )       /* 書込完了したが nv/nf D_CHUNK なし → 待っても無駄(即終了) */
-			return 0;
-		::usleep(2000);   /* 2ms(書込中のレース待ち) */
-	}
-	return 0;
-}
-
-/* v1 のデフォルトソース(env SRAVA_SOURCE で上書き可)。1.2.2 パーズで pigData ツリーへ。 */
+/* v1 のデフォルトソース(env SRAVA_SOURCE で上書き可)。1.2.2 パーズで pigData ツリーへ。
+ * ★ #3452: 起動時 eager-load 撤去に伴い、引数無し起動(このソース)でも実カーネルの明示ロードが
+ * 要る。「何も指定せず srava を叩く」という最も基本的な経路なので、ここは include で
+ * 自己完結させる (呼び出し側に SRAVA_MODULE_ALL 等を要求しない)。 */
 static const char *DEFAULT_SOURCE =
+	"include \"module/all.sra\";\n"
 	"var a = box(2,2,2);\n"
 	"var b = box(1,1,3);\n"
-	"export(a ||| b);\n";
+	"var m = export(a ||| b);\n"
+	/* ★ #3443: 頂点数 / 面数は **op が答える** (planner は幾何の語彙を持たない)。 */
+	"print(\"NVF\", nverts(m), nfaces(m));\n";
 
 #if 0
 
@@ -174,6 +139,14 @@ public:
 	int			flush_async();                      /* flush(): 全 async をその地点で待ちエラー報告・チェーン reset */
 	int			drain_async();                      /* 末尾(全 agent 完了後): 全 async を待ちエラー報告 */
 	int			async_error_total();                /* async の累積エラー数(終了コード判定用) */
+	/* ★ agent が出した理由を **末尾でまとめて列挙**する (2026-08-26・ひさ提案。async の
+	 * continue-and-collect と同じ考え方)。
+	 * ★なぜ要るか: エラーの帰属は「最初に promise 連鎖を取った agent」で決まるので、
+	 *   **落ちた本人とは限らない**。agent がシグナルで死ぬ形では、正常終了した傍観者が
+	 *   "agent closed unexpectedly" を先に返し、本人の具体的な理由が捨てられることがある。
+	 *   誰が勝つかを決めにいく代わりに **全部出す**。
+	 * ⚠ 既に表示した文言 (shownError) は飛ばす = 主エラーとの二重表示を避ける。 */
+	void			show_other_agent_errors();
 protected:
 	sPtr<pigEnvironment>	env;
 	sPtr<stdString>		cacheDir;
@@ -185,6 +158,13 @@ protected:
 	sArray<sPtr<pigData> >	asyncList;        /* async helper front(末尾 drain でエラー集積) */
 	sPtr<pigData>		syncTail;         /* async の sync 発行順チェーン末尾(初回は解決済み null) */
 	int			asyncErrors;      /* async の累積エラー数 */
+	/* ★ **表示済みの文言を全部**覚える (列挙で二重に出さないため)。
+	 * ⚠ 「最後の 1 件」だけでは足りない: async は flush/drain で複数出すので、
+	 *   1 件しか覚えないと先に出した分を列挙が再表示してしまう。
+	 * ⚠ ここを **static にしない** — planner はプロセスに 1 つだが、可変な大域を増やさない
+	 *   (モジュール側の lint と同じ方針・ひさ指示 2026-08-26)。 */
+	sArray<sPtr<stdString> >	shownErrors;
+	void			show_error_m(sPtr<stdString> m);   /* 表示 + 記録 */
 	unsigned		sig_abort_flag : 1;   /* INT/TERM/HUP のいずれかを受けた */
 	unsigned		eval_error : 1;       /* 評価結果がエラー値だった(キャッシュ掃除を抑止) */
 	int			sig_abort_num;        /* 最初に受けたシグナル番号(exit code/メッセージ用) */
@@ -280,13 +260,20 @@ static sPtr<cgptsPlanner> caller_planner() {
 /* export(x) ダミー: 単一引数。エラーはそのまま吸収。継続なら実値(cdr=promise)を、でなければ
  * 引数をそのまま result へ(car()/cdr() は compact ゲートで上流を起動・解決する)。レジストリ不使用。 */
 void pigcgOperatorExport::_start() {
-  if (args.length() == 0) { result = thNEW(pigDataNull, ()); return; }
+  /* ★ #3450 (ひさ規則 2026-08-29): **helper を呼ぶ op はその helper (の FIN) が clean() の責任を
+   * 持つ。helper を呼ばない同期 op は _start() の末尾で自分で clean() する。**
+   * この op は helper を作らない (result を同期に決めるだけ) ので後者。clean() が無いと args が
+   * 誰にも切られず、args[0] の継続 pair から中間結果の pigDataCache までがプログラム終了まで残る
+   * (in-proc ではメッシュ実体ごと = 実測で N+3 個の常駐)。result は clean() では触らないので
+   * 呼び手の観測は壊れない。 */
+  if (args.length() == 0) { result = thNEW(pigDataNull, ()); clean(); return; }
   sPtr<pigData> a = args[0];
-  if (a->is_error()) { result = a; return; }
+  if (a->is_error()) { result = a; clean(); return; }
   if (pig_is_delayed(a))
     result = a->cdr()->cdr();   /* 継続の実値(結果。"begin" 段を飛ばす) */
   else
     result = a;
+  clean();
 }
 
 /* ---- async 文: 統一プリミティブ(sync 発行順チェーン + drain) ---- */
@@ -297,17 +284,17 @@ int           cgptsPlanner_::async_error_total()            { return asyncErrors
 
 /* flush(): その地点で全 async を待つ明示バリア(export_async の完了を後続 system()/import() が観測
  * できるように)。mid-program なので compact が yield しうる → pass を分けて二重出力を防ぐ:
- *   pass0 全 trigger / pass1 全 compact(解決まで・print は冪等再走で無害)/ pass2 エラーを 1 度報告。
- * 待ち終えたらリストを空にしチェーン末尾を reset(以降の async は新チェーン)。 */
+ *   pass1 全 compact(解決まで・print は冪等再走で無害)/ pass2 エラーを 1 度報告。
+ * 待ち終えたらリストを空にしチェーン末尾を reset(以降の async は新チェーン)。
+ * ⚠ かつて pass0 で全 trigger していたが、**登録される f は生成時 (pigcgOperatorAsync::_start) に
+ *   既に起動済み**なので何もしていなかった (外して ctest 289/289・async は 1 波のまま)。撤去 (#3419)。 */
 int cgptsPlanner_::flush_async() {
-  for ( int i = 0 ; i < asyncList.length() ; ++i )
-    asyncList[i]->trigger();                 /* pass0: 全部 spark(並列ディスパッチ) */
   for ( int i = 0 ; i < asyncList.length() ; ++i )
     (void) asyncList[i]->compact()->is_error();   /* pass1: 全解決(未解決なら yield→先頭から再走) */
   int errs = 0;
   for ( int i = 0 ; i < asyncList.length() ; ++i ) {
     sPtr<pigData> r = asyncList[i]->compact();     /* pass2: 全解決済み→エラーを 1 度だけ報告 */
-    if ( r->is_error() ) { show_error(r->get_str()->get_str()); ++errs; }
+    if ( r->is_error() ) { show_error_m(r->get_str()); ++errs; }
   }
   asyncList.length(0);
   syncTail = thNEW(pigDataNull,());          /* チェーン reset(flush 後の async は独立した発行順) */
@@ -315,15 +302,42 @@ int cgptsPlanner_::flush_async() {
   return errs;
 }
 
-/* 末尾(全 agent 完了後): 登録済み async helper を全部 trigger してから compact し、結果に載った
- * エラー(continue-and-collect)を 1 度だけ報告する。全 agent 完了後に呼ぶので yield しない。 */
+/* 末尾(全 agent 完了後): 登録済み async helper を compact し、結果に載ったエラー
+ * (continue-and-collect)を 1 度だけ報告する。全 agent 完了後に呼ぶので yield しない。
+ * ⚠ かつて先頭で全 trigger していたが、f は生成時に既に起動済みなので無意味だった。撤去 (#3419)。 */
+/* 主エラー以外に agent が出した理由を列挙する (宣言側にねらいを記載)。 */
+/* 表示して「表示済み」に積む。列挙 (show_other_agent_errors) がこれを見て重複を避ける。 */
+void cgptsPlanner_::show_error_m(sPtr<stdString> m) {
+  if ( ! m.is_notNull() ) return;
+  shownErrors.push(m);
+  show_error(m->get_str());
+}
+
+void cgptsPlanner_::show_other_agent_errors() {
+  int n = agent_error_count();
+  int shown = 0;
+  for ( int i = 0 ; i < n ; ++i ) {
+    sPtr<pigData> e = agent_error_at(i);
+    if ( ! e.is_notNull() ) continue;
+    sPtr<stdString> m = e->get_str();
+    if ( ! m.is_notNull() ) continue;
+    int dup = 0;
+    for ( int j = 0 ; j < shownErrors.length() ; ++j )
+      if ( ::strcmp(shownErrors[j]->get_str(), m->get_str()) == 0 ) { dup = 1; break; }
+    if ( dup ) continue;                                   /* 既に表示済み */
+    if ( shown == 0 )
+      ::fprintf(stderr, "[srava] other agents reported:\n");
+    ::fprintf(stderr, "  - %s\n", m->get_str());
+    ++shown;
+  }
+  if ( shown > 0 ) ::fprintf(stderr, "\n");
+}
+
 int cgptsPlanner_::drain_async() {
-  for ( int i = 0 ; i < asyncList.length() ; ++i )
-    asyncList[i]->trigger();                 /* 全部 spark(body の値返し依存も一斉ディスパッチ) */
   int errs = 0;
   for ( int i = 0 ; i < asyncList.length() ; ++i ) {
     sPtr<pigData> r = asyncList[i]->compact();
-    if ( r->is_error() ) { show_error(r->get_str()->get_str()); ++errs; }
+    if ( r->is_error() ) { show_error_m(r->get_str()); ++errs; }
   }
   asyncList.length(0);
   asyncErrors += errs;
@@ -342,11 +356,21 @@ void pigcgOperatorAsync::_start() {
       f->pushArg(args[i]);                        /* body 文(+ hasSync なら末尾 sync 文) */
     f->set_mode(get_mode());                      /* hasSync を helper へ伝える(front->get_mode) */
     f->set_info(get_info());
-    f->trigger();                                /* 非ブロック起動(body が並列に走り出す) */
+    /* ★ #3419 (ひさ設計 2026-08-24): 非ブロック起動 (body が並列に走り出す)。
+     * ⚠ かつては `f->trigger()` だった。trigger は pigData の契約の外の意味論なので撤去し、
+     * **待つ役の状態機械 (ptsFireAndForget) を 1 個生やして compact させる**形にした。
+     * async 文はここで即 null を返して先へ進む = 非ブロックのまま。 */
+    /* ★ 0 = ここでは報告しない。直後の register_async で drain 対象に入れ、
+     * **末尾の drain_async が continue-and-collect で報告する** (二重報告を避ける)。 */
+    (void) thNEW(ptsFireAndForget,(sPtr<ptsObject>::d_cast(sCallSection::key->caller()), f, 0));
     pl->register_async(f);                        /* drain 対象に登録(エラー集積) */
     pl->set_sync_tail(f);                         /* 次の prev = この front */
   }
   result = thNEW(pigDataNull, ());
+  /* ★ #3450 (ひさ規則): helper が付くのは上で作った f であって自分ではない = 自分は同期 op。
+   * body は f へコピー済みなので、自分の args はここで手放す (でないとパース木の async ノードが
+   * body 全体を掴んだままプログラム終了まで残る)。 */
+  clean();
 }
 
 /* flush(): planner のレジストリを掃き出して未完了 async(export_async 含む)を全部待つ。詳細は flush_async。 */
@@ -355,6 +379,7 @@ void pigcgOperatorFlush::_start() {
   if (pl.is_notNull())
     (void) pl->flush_async();
   result = thNEW(pigDataNull, ());
+  clean();   /* ★ #3450 (ひさ規則): helper を呼ばない同期 op は _start 末尾で clean */
 }
 
 
@@ -393,6 +418,32 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 	 * 即時終了したい場合は組込 exit(n) を使う。既定 0 = 成功 (POSIX 慣行)。
 	 * 反映は CLEANUP。**エラー終了時はエラーコード (1 / 128+signum) が優先** する。 */
 	env->def_var(thNEW(stdString,("EXIT_CODE")), thNEW(pigDataInteger,((INTEGER64)0)));
+
+	/* ★ #3419 §17.3 (ひさ案 2026-08-24): **負荷コントロール / ゲート / 実験用の口を srava 変数にする**。
+	 * CACHE_DIR / CACHE_RETAIN と同じ流儀: **環境変数を初期値に事前定義**し、プログラムからの
+	 * 代入が優先される。`LOAD_CPU = 50;` と書けば env SRAVA_LOAD_CPU=50 と同じ意味になる。
+	 *
+	 * ★ 空文字を既定にしてある = 「指定なし」。使う側 (ptsApplication::cfg_int) は
+	 *   **変数 → 環境変数 → 既定** の順に解決するので、未代入なら従来どおり環境変数が効く。
+	 * ⚠ **反映は co_ptsConfigWatch の周期チェック (250ms) 経由**。起動時にしか読まれない
+	 *   設定 (LOAD_CPU_MS) に代入すると「効きません」と警告が出る (§17.3)。
+	 *   ★ LOAD_RAMP_START は #3451 で「最初の pigfAgent 入場まで」に緩和済み — script 冒頭の
+	 *   代入は間に合う。それより後の代入は同様に「効きません」の対象。
+	 * ⚠ srava 変数側は SRAVA_ を落とした名前にする (CACHE_DIR の流儀)。 */
+	{
+		/* ★ 表から **実効値** (環境変数 → 既定) で事前定義する。
+		 * ⚠ 空文字で定義すると `print(LOAD_CPU)` が空欄になり「読めるようにする」が
+		 *   半分しか満たせない (2026-08-24 に一度そうしてしまった)。実効値を入れる。 */
+		const struct pigCfgEntry *t = pigcfg_table();
+		for ( int i = 0 ; t[i].var != 0 ; ++i ) {
+			const char *e = ::getenv(t[i].env);
+			const char *v = ( e != 0 && e[0] != 0 ) ? e : t[i].def;
+			env->def_var(thNEW(stdString,(t[i].var)), thNEW(pigDataString,(v)));
+		}
+	}
+	/* ★ 設定の解決に使うので、app に根 env を預ける (§17.3)。 */
+	if ( ptsApp.is_notNull() )
+		ptsApp->set_root_env(env);
 	/* ★ .so 化 Phase 4c: 言語変数 DEFAULT_OUTPUT と env SRAVA_DEFAULT_OUTPUT を撤去した。
 	 *   既定カーネルは registry の priority 最大 (default_module_name・既定 cgal)。
 	 *   切替は `module("manifold.so", {priority: N})` / 個別指定は `cast("manifold", …)` (docs §2.4)。 */
@@ -424,12 +475,23 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 	/* 優先順: コマンドラインのソースファイル(ctor 引数 srcText) > env SRAVA_SOURCE > 既定。 */
 	const char *srcEnv = ::getenv("SRAVA_SOURCE");
 	const char *srcSel = srcText ? srcText : ( srcEnv ? srcEnv : DEFAULT_SOURCE );
+	/* ★ #3452: SRAVA_MODULE_ALL=1 で `include "module/all.sra";` を実ソースの前に合成する。
+	 * #3452 で起動時 eager-load を撤去した移行期の便宜口 (旧挙動に近い状態へ一括で戻す)。
+	 * 個々のスクリプトを書き換えずに済ませたい既存テスト・env 常設運用向け。
+	 * script 本体を書き換えるより「呼び出し環境で全ロードを要求する」方が自然な用途では
+	 * こちらを使う (script 内で完結させたいなら include を直接書く)。 */
+	std::string srcPrelude;
+	if ( osglue_env_int("SRAVA_MODULE_ALL", 0) ) {
+		srcPrelude = "include \"module/all.sra\";\n";
+		srcPrelude += srcSel;
+		srcSel = srcPrelude.c_str();
+	}
 	sPtr<stdString> src = thNEW(stdString,(srcSel));
 
 	/* テスト用: 自分に終了系シグナルを送る(self-pipe 経由で次の yield 時に TSE_SIGNAL 配送)。
 	 * tsSignal 設置後に呼ぶこと(既定動作回避)。PIG_TEST_SLOW と併用で確実に評価中に届く。
 	 * PIG_TEST_RAISE_SIGINT=後方互換。PIG_TEST_RAISE_SIGNAL=<番号> で任意シグナル(TERM/HUP 検証)。 */
-	if ( ::getenv("PIG_TEST_RAISE_SIGINT") != 0 )
+	if ( osglue_env_int("PIG_TEST_RAISE_SIGINT", 0) )
 		::raise(SIGINT);
 	const char *rsEnv = ::getenv("PIG_TEST_RAISE_SIGNAL");
 	if ( rsEnv != 0 )
@@ -452,10 +514,11 @@ TS_STATE(ACT_cgptsPlanner_PARSE)
 {
 	if ( ev->type == TSE_RETURN && ev->source == parser ) {
 		tree = sPtr<pigData>::d_cast(ev->msg_obj);
-		/* 1.2.3 可変ソート: 可換 op(union/intersection)の引数を recipe_hash 順に正規化する
-		 * 純静的パス(評価=dispatch を起こさない)。a|||b と b|||a が同一キャッシュキーに。 */
-		if ( tree != thNULL )
-			tree->normalize();
+		/* ★ #3452 で判明した回帰の修正: 可変ソート(可換 op の引数正規化)は旧 tree->normalize() が
+		 * parse 直後にここで 1 回だけ行っていたが、その時点ではモジュールが 1 本もロードされて
+		 * おらず op_commutative() が常に false を返していた(#3452 で起動時 eager-load を撤去した
+		 * ため)。normalize() は撤去し、モジュール登録が済んでいる eval 時の 2 箇所
+		 * (pigfModuleAgent::try_decompose / pigfAgent::compute_arg_hash) へソートを移設した。 */
 		if ( is_destroyed() )
 			return rDO|FIN_START;   /* 撤収中: 評価には進まない */
 		return rDO|ACT_cgptsPlanner_EVAL;
@@ -519,7 +582,7 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 			tree->destroy();
 			return rDO|ACT_cgptsPlanner_WAITAGENTS;
 		}
-		show_error(tree->get_str()->get_str());
+		show_error_m(tree->get_str());
 		(*exitCodeOut) = 1;
 		eval_error = 1;   /* キャッシュ掃除を抑止(評価が途中で失敗 → usedCaches 不完全の恐れ) */
 		/* 確定的な型/プログラムエラー(fatal: mesh+mesh・未定義変数・引数不一致等)は待つ意味がないので、
@@ -531,8 +594,7 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 	} else {
 		/* ★ 2026-08-11 修正: ここで **スクリプトの結果値を終了コードにしていた** のは不具合。
 		 * 数値結果は値がそのまま漏れ (300 → exit 44 / 256 → exit 0)、文字列など非数値では
-		 * get_int() が不定値を返し **同一入力で毎回変わる** (実測: print("DONE") だけの
-		 * スクリプトで 160/32/32/224/96/160)。旧 7/24 版は 0 を返していたので退行だった。
+		 * get_int() が不定値を返し **同一入力で毎回変わる**。旧 7/24 版は 0 を返していたので退行だった。
 		 * 成功 = 0 (POSIX 慣行) に戻す。明示指定は予約変数 EXIT_CODE (CLEANUP で反映)。 */
 		(*exitCodeOut) = 0;
 	}
@@ -545,7 +607,7 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
  * 起こし役は最後の pigfAgent の FIN(agent_leave→wakeup)。 */
 TS_STATE(ACT_cgptsPlanner_WAITAGENTS)
 {
-	if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] planner WAITAGENTS count=%d\n", agent_count());
+	if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] planner WAITAGENTS count=%d\n", agent_count());
 	/* 待機中に終了系シグナル → まだ未集約なら set_agentError して in-flight agent を撤収させる。 */
 	if ( sig_abort_flag && get_agentError() == thNULL )
 		return rDO|ACT_cgptsPlanner_INTERRUPT;
@@ -654,11 +716,18 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 		/* eval_error 済み(EVAL で実エラーを表示済み)なら、ここで撤収トリガの内部マーカ
 		 * ("aborted: fatal error")を二重表示しない。SIGINT 等(eval_error 無し)は表示する。 */
 		if ( !eval_error )
-			show_error(ae->get_str()->get_str());
+			show_error_m(ae->get_str());
+		show_other_agent_errors();   /* ★ 主エラー以外に agent が出した理由を列挙 */
 		if ( (*exitCodeOut) == 0 )
 			(*exitCodeOut) = 1;
+	} else if ( eval_error ) {
+		/* ★ 評価がエラーで終わったが agentError は無い経路 (promise 連鎖でエラーが伝わった
+		 * 場合)。**ここが本題**: 連鎖を取ったのが傍観者だと、落ちた本人の理由はここでしか
+		 * 出せない (2026-08-26)。 */
+		show_other_agent_errors();
 	} else if ( async_err > 0 ) {
 		/* エラー本文は flush()/drain が既に出力済み。ここでは終了コードだけ立てる。 */
+		show_other_agent_errors();   /* ★ drain が拾えなかった agent 由来の理由を足す */
 		if ( (*exitCodeOut) == 0 )
 			(*exitCodeOut) = 1;
 	} else {
@@ -668,12 +737,13 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 		 * 返すようになったため、非キャッシュ値も完走マーカーとして出す。 */
 		sPtr<pigData> v = tree->compact();
 		if ( v->is_cache() ) {
-			const char *path = v->get_str()->get_str();
-			uint32_t nv = 0, nf = 0;
-			if ( read_mesh_counts(path, &nv, &nf) )
-				::printf("[srava] result cache=%s nv=%u nf=%u\n", path, nv, nf);
-			else
-				::printf("[srava] result cache=%s (counts unavailable)\n", path);
+			/* ★ #3443: かつてここで cache の先頭バイトを読んで "nv=.. nf=.." を表示していたが、
+			 *   撤去した。頂点数・面数は **三角形メッシュという幾何モデル固有の語彙** であって、
+			 *   planner が持ってよい概念ではない (planner はカーネル中立・型中立が設計)。
+			 *   実害も出ていた: 読み方が cg の "MESH" 形式決め打ちで、先頭 1 バイトが形式である
+			 *   NEFB では 1 バイトずれ、素の nef の箱が nv=2049 と表示されていた。
+             *   → 数が要るときは **モジュールの op** に聞く: nverts(m) / nfaces(m)。 */
+			::printf("[srava] result cache=%s\n", v->get_str()->get_str());
 		} else if ( ! v->is_error() ) {
 			::printf("[srava] result value=%s\n", v->serialize()->get_str());
 		}
@@ -716,11 +786,49 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 	/* キャッシュ HIT/MISS サマリ: hit=既存キャッシュ再利用 / miss=agent 起動して計算。
 	 * 2 度目の実行で全部 hit なら再利用が効いている(計算は走っていない)。 */
 	::fprintf(stderr, "[srava] cache: %d hit(s), %d miss(es)\n", cache_hits(), cache_misses());
-	if ( gate_cap_dyn() < gate_cap() )
-		::fprintf(stderr, "[srava] worker gate: cap=%d → fork 上限により %d に自動調整(PIG_MAX_WORKERS で変更可)\n",
-		          gate_cap(), gate_cap_dyn());
-	else
-		::fprintf(stderr, "[srava] worker gate: cap=%d (PIG_MAX_WORKERS で変更可)\n", gate_cap());
+	/* ⚠ 2026-08-21: かつてここは「fork 上限により自動調整」と書いていたが、**もう嘘になった**。
+	 * §13.7 のランプが入り、セマフォの limit は「緩やかな立ち上がり」でも動くようになったため。
+	 * 表示は**事実だけ**にする (何が原因かはここでは分からない)。 */
+	/* ★ 2026-08-30: 上限の口が SRAVA_LOAD_CPU 一本になったので文言を合わせた。
+	 * 「初期上限」= ランプ開始値 (SRAVA_LOAD_RAMP_START)。天井そのものではない。 */
+	/* ★ 2026-08-30: 「実効」を**ピーク同時数**に変えた。以前は gate_cap_dyn() =
+	 * **終了時点のセマフォ limit** を「実効」と呼んでおり、走行中の同時数と誤読された
+	 * (CGALP が #3456 の切り分けで踏んだ)。終了時の上限も情報として残すが、
+	 * 先に出すのは「実際に何本同時に走ったか」。 */
+	::fprintf(stderr, "[srava] worker gate: ピーク同時 %d (終了時の上限 %d・初期 %d・"
+	                  "上限は SRAVA_LOAD_CPU=%% または SRAVA_LOAD_CPU=0 + SRAVA_LOAD_AGENT=個数)\n",
+	          gate_peak(), gate_cap_dyn(), gate_cap());
+	/* ★ #3419 (2026-08-23): 走行中の **ピーク実使用** (mallinfo2 uordblks) と **ピーク RSS**。
+	 * ⚠ ピーク RSS は allocator の未返却・arena 分散・断片化を含むので、「同時にどれだけ生きていたか」
+	 *   の代役としては水増しされる。uordblks は allocator を経由しない実使用そのもの。
+	 * ★ 2 つの差がそのまま allocator の水増し (§15.6 の定量化)。
+	 * 標本はゲートの入退場ごと (実効上限が小さいので十分に密)。入場順序の実験の主指標の 1 つ。
+	 * ⚠⚠ **planner のプロセスだけ**を見ている (mallinfo2 は自プロセス・/proc/self/statm)。
+	 *   agent プロセスは 1 バイトも含まれない。**process 実行が主体の構成ではほぼ空を測る**ので、
+	 *   「実使用が小さい = メモリを使っていない」と読むと完全に誤る (実体は agent 側にある)。
+	 *   → その場合の主指標は **外部サンプラの合計 RSS (srava + srava_agent)**。
+	 * ⚠ さらに **uordblks は mmap 済みチャンクを数えない** (それらは hblkhd)。
+	 *   MALLOC_MMAP_THRESHOLD_ / MALLOC_TRIM_THRESHOLD_ を設定すると glibc の動的 mmap 閾値
+	 *   調整が止まり、大きい確保が mmap へ回って **実使用が実態より桁違いに小さく出る**。
+	 *   その条件下で実使用を読むなら uordblks + hblkhd で見ること。 */
+	/* ★ #3419 §16.14: 枠を握ったまま入力を待っていた延べ時間。
+	 * 「1 引数完了 + 残り begin」でゲートを取る設計 (SRAVA_GATE_WHEN=first) の代償を直接測る。
+	 * ⚠ agent の起動 (fork/thread) と C_OP 送信も含む = 「純粋な待ち」ではなく「握ってから使えるまで」。 */
+	{
+		long long isum = 0, imax = 0; int n = 0, nw = 0;
+		gate_idle_stats(&isum, &imax, &n, &nw);
+		if ( n > 0 )
+			::fprintf(stderr, "[srava] gate idle: 延べ %lld ms (報告 %d agent・うち待った %d・最大 %lld ms)\n",
+			          isum, n, nw, imax);
+	}
+	{
+		unsigned long long pl = 0, pr = 0;
+		gate_peak_memory(&pl, &pr);
+		if ( pr > 0 )
+			::fprintf(stderr, "[srava] peak(planner のみ): 実使用 %.0fMB / RSS %.0fMB "
+			                  "(差 %.0fMB = allocator 保持)\n",
+			          pl/1e6, pr/1e6, (pr > pl ? (pr - pl) : 0)/1e6);
+	}
 	/* 全結果取得 + sweep 完了 = プランナーの仕事は終わり → 通常 teardown(FIN_START)へ。
 	 * 旧: ここで ::_exit(最終保険)していた。理由は ts2System の `sh -c` 経由起動で実 agent が孫
 	 * (オーファン)化し pid kill が届かず、中断時に待機中 agent が do_select に残ってハングし得たため

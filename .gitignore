@@ -6,6 +6,7 @@ core
 __pycache__/
 *.pyc
 docs/_site/
+docs/_site-draft/
 
 # 生成エクスポート(CM4writer 等の export 出力。コミットしない)
 *.stl
@@ -17,3 +18,4 @@ a.out
 
 # 実行時キャッシュ dir (planner の既定 CACHE_DIR=$PWD/tmp)。7/22 に誤って cache が commit された掃除跡
 tmp/
+Testing/Temporary/

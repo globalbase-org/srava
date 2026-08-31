@@ -28,6 +28,9 @@
 #include	"ts2/c++/stdEvent.h"
 #include	"_ts2/c++/ptsCalcBody_.h"
 
+#include	<stdexcept>
+#include	<stdio.h>
+
 CLASS_TINYSTATE(pig/c++/ptsCalcBody,pig/c++/ptsObject)
 
 #if 0
@@ -94,7 +97,31 @@ ptsCalcBody_::compute()
 
 TS_THREAD(ACT_START)   /* 重い計算は専用スレッドで(基底 ptsObject の idle ACT_START を上書き) */
 {
-	compute();
+	/* ★★ モジュール非依存の安全網 (ひさ判断 2026-08-26)。ここは **全モジュールの compute() が
+	 * 通る唯一の入口**なので、モジュールが取りこぼした例外はここで受ける。
+	 *
+	 * ★なぜ要るか — **in-proc (EXEC_THREAD) では planner 自身が死ぬ**から:
+	 *   process 実行なら agent プロセスが terminate → SIGABRT で死ぬだけで、planner は
+	 *   生き残って理由を報告できる (agent の stderr を ptsErrSink が拾う)。ところが in-proc は
+	 *   同一プロセスの専用スレッドなので、抜けた例外は **planner ごと terminate** させる。
+	 *   manifold は既定が in-proc、openvdb 系も切替可 — そしてこの 2 者は catch を持たない。
+	 *   ⇒ 「まだ検証していないモジュールが何かを投げても、エラーとして分かり、planner は死なない」
+	 *
+	 * ⚠ ここで出せるのは **一般的な文言**まで。良いメッセージはモジュール側の catch が出す
+	 *   (cgal / nef / geogram / occt はそれぞれ持っている)。ここは最後の砦。
+	 * ⚠ OCCT の Standard_Failure は std::exception 派生ではないので下の catch(...) に落ちる
+	 *   = 型名も出せない。occt は自前の catch で理由を出している。
+	 * ⚠ 捕まえるのは例外だけ。SIGSEGV 等はここでは受けない (受けてはいけない)。 */
+	try {
+		compute();
+	} catch ( const std::exception &e ) {
+		char b[600];
+		::snprintf(b, sizeof b, "module threw an uncaught exception: %s", e.what());
+		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+	} catch ( ... ) {
+		result = thNEW(pigDataError,(thNEW(stdString,
+		    ("module threw an uncaught exception (not a std::exception)"))));
+	}
 	return rDO|ACT_FINISH;
 }
 /* 後処理フック(#3406)。基底=素通り。現在 override している派生は無い(将来用に温存。

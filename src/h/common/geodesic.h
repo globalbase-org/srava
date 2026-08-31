@@ -97,8 +97,8 @@ void make_geodesic(int seed, int n, double r, Sink& sink) {
 	/* 単位球へ投影して r 倍 → Sink に追加 (既出なら既存 index)。 */
 	// clang-format off
 	#define GEO_EMIT(px,py,pz, outid) do {                                  \
-		double _L = std::sqrt((px)*(px) + (py)*(py) + (pz)*(pz));           \
-		double _s = (_L > 0) ? (r / _L) : 0;                                \
+		double _len = std::sqrt((px)*(px) + (py)*(py) + (pz)*(pz));         \
+		double _s = (_len > 0) ? (r / _len) : 0;                            \
 		double _x = (px)*_s, _y = (py)*_s, _z = (pz)*_s;                    \
 		Key _k((float)_x, std::pair<float,float>((float)_y, (float)_z));    \
 		std::map<Key,int>::iterator _it = dedup.find(_k);                   \

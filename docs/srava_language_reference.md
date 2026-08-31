@@ -40,6 +40,7 @@ S 式相当の `pigData` DAG。キャッシュ・正規化はこの DAG レベ�
 ```
 var x = expr;          // 宣言 (DEF)。スコープに新しい束縛を作る
 var x;                 // 値なし宣言
+var [a, b, c] = expr;  // 分割代入。expr(配列)の要素 0,1,2,… を各名前へ束縛
 x = expr;              // 代入 (SET, strict)。上方スコープを探索し既存束縛を更新
 x = y = expr;          // 連鎖代入 (右結合)。expr を 1 度だけ評価し x・y 双方へ
 a[i] = expr;           // 添字代入 (配列要素・破壊的)。a を解決し set_ix
@@ -59,7 +60,7 @@ exit;                          // プログラム全体を安全に終了 (制�
 exit expr;                     // メッセージ付き終了。expr を stderr へ表示してから終了
 ```
 
-**実行モデル**: 制御文(`{}`/`if`/`while`/`for`)は**直列**、関数引数と配列リテラル `[..]` は**並列**、並列な制御は **`async`**。`async` ブロックは互いに並列に走り、内部は直列・スコープ共有。`sync:`(最終文・省略可)はその文の**出力だけ**を全 `async` 跨ぎで出現順に整列する(計算は並列のまま)。エラーは中断せず末尾でまとめて報告(continue-and-collect)。`print_async`/`export_async` は `async` のシュガー、`par` は `[..]` に統合(撤去)。詳細は [関数リファレンス](srava_function_reference.html) の `async` / 設計メモ `docs/srava_async_design.md`。
+**実行モデル**: 制御文(`{}`/`if`/`while`/`for`)と**文の並び**は**直列**。1 つの文の中に書いた独立な計算は**並列**に走る(`async` / `map` / 配列リテラル / 演算子 / agent op や `print`・`concat` の引数)。⚠ **値の計算を別々の文に分けると直列**になる(mesh は文を分けても並列)。→ 下の「並列に走るもの・走らないもの」。`async` ブロックは互いに並列に走り、内部は直列・スコープ共有。`sync:`(最終文・省略可)はその文の**出力だけ**を全 `async` 跨ぎで出現順に整列する(計算は並列のまま)。エラーは中断せず末尾でまとめて報告(continue-and-collect)。`print_async`/`export_async` は `async` のシュガー。詳細は [関数リファレンス](srava_function_reference.html) の `async` / 設計メモ `docs/srava_async_design.md`。
 
 - **`var` (DEF) と `=` (SET) は厳密に区別**。SET は未宣言変数を作らず、外側スコープの既存束縛を
   上書きする (`while`/`for` のカウンタ更新がこれ)。
@@ -101,6 +102,109 @@ exit expr;                     // メッセージ付き終了。expr を stderr 
   `export_async` は **drain(完了待ち)される**ので途中の出力は失われない。**既定の終了コードは 0**、予約変数
   **`EXIT_CODE`** で上書きできる(→ [§9 `EXIT_CODE`](#組み込み変数-exit_code))。使い方例は [§9 `ARGV`](#組み込み変数-argv) の
   引数バリデーション(`if (n < 1) exit("使い方: …");`)。
+
+---
+
+### 分割代入 `var [a, b, c] = 式;`
+
+右辺(**配列**)の要素 `0, 1, 2, …` を、左辺の名前へ順に束縛する。
+
+```
+var [a, b] = [1, 2];                      // a=1, b=2
+var [s0, s1, s2] = section(m, P, N);      // 3 断面をそれぞれ名前で受ける
+var [x, y] = [volume(m1), volume(m2)];    // ★ 1 文なので 2 つの計測が並列に走る
+```
+
+- **要素が足りなければエラー** — `var [a,b,c] = [1,2];` → `destructuring: need 3 element(s) but got 2`
+- **余りは無視** — `var [a,b] = [1,2,3];` は `a=1, b=2`(「N 個返す op の先頭 k 個を取る」用途)
+- **右辺が配列でなければエラー** — `var [a] = 5;` → `destructuring assignment needs an array …`
+- 束縛は `var`(DEF)と同じ。⚠ **`[a,b] = 式;`(`var` なしの SET 形)は未対応**
+
+★ **これは「文を分けると直列になる」(下記)の回避手段になる。**同じことを
+`var t = […]; var a = t[0]; var b = t[1];` と書いても等価だが(`t` の計算は 1 文で
+終わっているので損はしない)、分割代入なら 1 行で済む。
+
+---
+
+### 並列に走るもの・走らないもの
+
+srava の幾何 op は**別プロセス(または in-proc スレッド)の agent** が計算する。したがって
+「複数の agent が同時に走るか」が実行時間を決める。⚠ **どの書き方が並列になるかは構文で決まる**ので、
+ここを取り違えると「並列に書いたつもりが直列だった」が起きる。
+
+| 書き方 | 並列か |
+|---|---|
+| `async { … }` を複数並べる | ★ **並列** |
+| `map(arr, f)` | ★ **並列** |
+| **配列リテラルに式を直接書く** `[f(x), f(y), …]` | ★ **並列**(値でも mesh でも) |
+| agent op の引数どうし `box(..) \|\|
+| `a + b + c + d`(値の二項演算子) | ★ **並列** |
+| `[float(x), float(y), …]`(値の変換 op) | ★ **並列** |
+| `[[a,b],[c,d]]`(入れ子の配列) | ★ **並列** |
+| `a \|\|
+| `union([a,b,c,d,…])`(配列 1 引数) | ★ 葉も畳み込みも**並列**(均衡二分木) |
+| 組込関数の引数 `print(a,b,…)` / `concat(a,b,…)` | ★ **並列** |
+| ⚠ **値の計算を別々の文に分ける** | ⚠ **直列**(mesh は文を分けても並列) |
+| 文を並べる `var a = …; var b = …;` | **直列**(仕様) |
+
+#### 組込関数の引数も並列
+
+```
+// ★ 並列 — print / concat は引数を一斉に起動してから解決する
+print(volume(m1), volume(m2), volume(m3));
+var r = concat(measure(m1), measure(m2), measure(m3));
+```
+
+★ **初等関数の 2 引数形**(`atan2` `pow` `min` `max` `log`)と**添字**(`a[i]`)も同様に、
+引数を一斉に起動してから解決する:
+
+```
+print(atan2(volume(m1), volume(m2)));    // ★ 並列 (2 つの計測が同時に走る)
+var x = 重い配列式[重い添字式];             // ★ 並列 (base と添字が同時に走る)
+```
+
+⚠ **`a[i] = 式` (添字代入) は対象外**。1 つの文の中に重い式が 1 つしか無く、
+`for` ループで配列を育てる形は**文の並び = 直列**なので、手当てしても効かない。
+
+#### mesh も並列に走る
+
+```
+// ✓ 並列(mesh を返す op でも、配列リテラルに直接書けば一斉に起動する)
+var parts = [ base ||| lidA, base ||| lidB, base ||| lidC ];
+
+// ✓ 並列(書き出しまで含めて)
+async { export("a.stl", base ||| lidA); }
+async { export("b.stl", base ||| lidB); }
+```
+
+⚠ ただし**観測(表示・書き出し)の側が直列だと、そこで待たされる**。
+`print(volume(parts[0])); print(volume(parts[1])); …` と文を並べると、mesh の計算自体は
+並列に終わっていても `volume` は 1 つずつになる。**まとめて観測する**とよい:
+`var v = [volume(parts[0]), volume(parts[1]), volume(parts[2])]; print(v);`
+
+#### ⚠ 多数の mesh を畳むときは `|||` を並べず `union([..])` を使う
+
+```
+// ✗ 遅い — 左から 1 つずつ足す **直線の連鎖**。二分木ではない
+a ||| b ||| c ||| d ||| e ||| f ||| g ||| h
+
+// ✓ 速い(同じ agent 数)— 配列 1 引数は **均衡二分木**に畳まれる
+union([a, b, c, d, e, f, g, h])
+```
+
+★ どちらも**葉 (8 個) は一斉に起動する**。差は畳み込みの段で、連鎖は深さ 7 を 1 つずつ、
+配列形は深さ 3 を最大 4 並列で処理する。⚠ `a ||| b ||| c` は**二分木に見えて直線**である。
+
+#### 実際の同時数はゲートが決める
+
+上表は**構文が起動できる上限**。実際に同時に走る数は**ワーカーゲート**が
+メモリ・CPU の空き具合から決め、さらに既定では**緩やかに立ち上げる**(→ §9.0.1)。
+★ **本当に並列に走ったかは `SRAVA_GATE_TRACE=1` の `live=` で直接数えられる**:
+
+```
+[gate] enter seq=3 op=box live=8 order=fifo
+                              ^^^^^^ 同時に走っている agent 数
+```
 
 ---
 
@@ -172,7 +276,7 @@ exit expr;                     // メッセージ付き終了。expr を stderr 
   - 直接適用 `(\(x){ x+1; })(5)`
   - カリー化/連鎖 `adder(a)(b)`
 - **引数は call-by-value** (呼び出し側 env で eager に評価してから束縛)。再帰で自己束縛に
-  捕捉される問題を回避。再帰・factorial 動作可。
+  捕捉される問題を回避。再帰は自己適用形 (下記) で書く。
 - **クロージャは「値捕捉」(by-value)**: `\(..){..}` を**評価した瞬間**に、その地点で**解決できる自由変数の値を
   凍結**する(env スナップショット)。以後その変数を `=`(再代入)しても、クロージャの見る値は変わらない。
   ```
@@ -185,17 +289,25 @@ exit expr;                     // メッセージ付き終了。expr を stderr 
   - **遅延評価との関係**: 「実行時参照」ではなく**生成時に値が確定**するので、遅延 force のタイミング
     (print/export がいつ走るか)に結果が左右されない。スナップショットしないと、map の前後どちらの
     再代入も漏れ込む footgun があった(値捕捉で解消)。
-  - **再帰は維持**: 生成時にまだ束縛されていない名前(自己再帰の関数名 `f` 等)は凍結されず、apply 時に
-    定義済みの env で遅延解決される(「**解決できるものだけ凍る**」)。
+  - **前方参照は不可**: 生成時にまだ束縛されていない名前は凍結されず、apply 時に「undefined
+    variable」の明示エラーになる。凍結スナップショットは完全(親 env へのフォールバックを持たない)
+    ので、**クロージャの見る世界は生成時点で完全に確定**する。定義の並べ替えで挙動が変わることはない
+    (かつては前方参照だけ apply 時に遅延解決され、束縛順で凍結の有無が変わった)。
+  - **再帰は自己適用で書く**: 自分自身を引数として受け取り、呼ぶときに自分を渡す。
+    ```
+    var f = \(f,x){ if ( x == 1 ) { 1; } else { x * f(f,x-1); } };
+    print(f(f,5));   // => 120
+    ```
+    引数は後方束縛なので凍結と干渉しない。相互再帰も同様に相手を引数で渡す。
   - **凍結の粒度**: スカラ/メッシュ/lambda は不変なので**共有**(ポインタ捕捉=値捕捉)。**配列/ハッシュは
     spine を deep copy** して葉(中の数値/メッシュ)は共有 → 捕捉後の `base[i]=v`(破壊的代入)もクロージャに
     漏れない。メッシュ継続は共有なので再計算/キャッシュ重複は起きない。
 - body 再評価はメモ衝突回避のため apply 時に `body->clone()` する。
 
-例 (再帰):
+例 (再帰・自己適用形):
 ```
-var f = \(n){ if (n < 1) { box(5,5,5); } else { box(n,n,9) ||| f(n - 1); } };
-export(f(2));
+var f = \(f,n){ if (n < 1) { box(5,5,5); } else { box(n,n,9) ||| f(f, n - 1); } };
+export(f(f,2));
 ```
 
 ---
@@ -294,7 +406,7 @@ export("trace.svg", ribbon2d(bezier([[0,0],[20,20],[40,0],[60,15]], 16), 5), "mm
 
 **`union(配列)` / `intersection(配列)` / `combine(配列)`(単一引数が mesh 配列)= 並列一括畳み込み**:
 mesh の配列を 1 個だけ渡すと、**評価時に均衡二分木へ分解**して一気に畳む。独立なサブツリーが並列に走るので、
-`pat = pat ||| x` の**直列 fold より桁違いに速い**(実測: 64 円で 61s → 2.7s ≈ 23x)。`concat` で集めて一括が定石:
+`pat = pat ||| x` の**直列 fold より桁違いに速い**(直線 N 段が木の log₂N 段になる)。`concat` で集めて一括が定石:
 
 ```
 var pat = [];
@@ -333,8 +445,8 @@ corefinement を回避するので軽い。`+++` の優先順位・結合は他�
 
 **同一平面(coplanar)/接触(tangent)の注意**: 3D ブール(corefinement)は、2 つの立体が**面で重なる**
 **辺で接する**と非多様体/自己交差になり失敗する(`boolean failed …` エラー)。接した結果(例: `box ||| prism` で
-面がぴったり接触)は **valid()=0** の不正メッシュになり、それをさらにブールすると以前は **agent がクラッシュ**していたが、
-現在は `is_closed` ゲート + `throw_on_self_intersection` で**クラッシュせず明示エラー**にする(`valid()` で確認を案内)。
+面がぴったり接触)は **valid()=0** の不正メッシュになる。それをさらにブールした場合は
+`is_closed` ゲート + `throw_on_self_intersection` が**明示エラー**にする(`valid()` で確認を案内)。
 **対策は「わざと少し重ねる」**(`>>> [0,0,-0.01]` や寸法 `+0.01`・接する代わりに 0.01 食い込ませる。OpenSCAD と同じ定石)。
 分断(B が A を 2 つに切る)は問題なし=複数連結成分として残る(空にならない)。
 
@@ -565,7 +677,7 @@ transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])  // 3x4 行列で +x 平行�
 
 - **`export` vs `export_async`**: `export` は書き出し完了まで**ブロック**(その文で同期)。複数の `export` を挟むと、それぞれが
   バリアになって**直列化**し、独立な計算どうしが並列化されない(漏斗が連なる)。`export_async` は起動だけして進むので、
-  複数の出力の計算が**重なって並列**に走る(実測: 独立 2 群で 2.5s→1.4s)。
+  複数の出力の計算が**重なって並列**に走る。
   - 書き出し完了は **(a) `flush()` で明示的に待つ / (b) プログラム終了時に必ず待つ**(全 agent 完了待ち)。
   - **`system`/`import` は自動バリアにしない**(srava は依存有無を知り得ないため)。`export_async` したファイルを
     後段の `system("convert …")` 等で**読む場合は、その前に `flush()` を置く**:
@@ -599,6 +711,24 @@ transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])  // 3x4 行列で +x 平行�
 ---
 
 ## 6. 動く例 (test/srava_parse.sh より)
+
+> ⚠ **以下の例はどれも幾何モジュールを要求する**。`module()` を一度も呼ばずに `box(...)` を書くと
+> **落ちる**(モジュールは名指ししたときにロードされるため → [§5 `module`](#module-builtin))。
+>
+> ```
+> *** ERROR[<source>,1] no module can execute op 'box' on input types (none)
+>     (no module declares this op / not loaded / disabled by module(so,"off")) ***
+> ```
+>
+> **例をそのまま動かすには、冒頭に次の 1 行を置く**:
+>
+> ```c
+> include "module/all.sra";     // 実カーネル一式をロード (cgal / geogram / manifold / occt / openvdb / nef_hybrid)
+> ```
+>
+> 必要なものだけで十分なら `module("cgal.so", {});` のように名指しする方が軽い。
+> `include` の解決には `$SRAVA_PATH` か install 済みの libdir が要る
+> (→ [モジュールリファレンス](srava_module_reference.html))。以降の例ではこの 1 行を省略している。
 
 ```c
 // 呼び出し形 union → 25v46f
@@ -709,7 +839,7 @@ hash は `{"k":v,…}` (キーソート)。
 ## 8. 未実装 / 非対応 (現時点)
 
 - **2D は実装済み**(§5「2D(スケッチ層)」参照)。`rect`/`ngon`/`circle`/`polygon`・`extrude`/`revolve`・
-  3D→2D `section`・SVG/DXF I/O まで稼働する(かつて「設計方針のみ」だったが現行版で実装)。
+  3D→2D `section`・SVG/DXF I/O まで稼働する。
 - **変換も実装済み**(§5)。`translate`/`rotate`/`mirror`/`scale`/`transform` — 任意軸回転・任意法線
   ミラー・軸別スケールに対応。剪断など更に一般のアフィンは `transform(m, matrix)` で書ける。
 - **string/hash 操作関数**: 拡充未了。
@@ -722,10 +852,135 @@ hash は `{"k":v,…}` (キーソート)。
 
 ---
 
-## 9. 環境変数 (実行/テスト用)
+## 9. 設定と環境変数 (実行/テスト用) {#環境変数-実行テスト用}
 
 接頭辞で層が分かれる: **`SRAVA_*`** = srava 言語/実行設定(ソース・agent・キャッシュ置き場等)、
 **`PIG_*`** = piggybackTurtle フレームワーク機能(ワーカーゲート・リソース上限・テスト/計測)。
+
+### 9.0 設定の入口は 3 つ — **srava 変数 → 環境変数 → 既定**
+
+負荷コントロールとワーカーゲートの設定は、**同じ項目を 3 通りの入口から指定できる**。
+上にあるものが勝つ:
+
+| 優先 | 入口 | 例 |
+|---|---|---|
+| 1 | **srava 変数**(プログラム中の代入) | `LOAD_CPU = 50;` |
+| 2 | **環境変数** | `SRAVA_LOAD_CPU=50 srava m.sra` |
+| 3 | **既定値** | 下表の「既定」 |
+
+`CACHE_DIR` / `CACHE_RETAIN` と同じ流儀で、**env を汚さずプログラム単位で指定できる**のが狙い。
+
+```srava
+LOAD_CPU   = 50;          // env SRAVA_LOAD_CPU=50 と同じ意味
+GATE_ORDER = "lifo";
+print(LOAD_CPU);          // ★ 未代入でも **実効値** が読める (既定 90 が返る)
+```
+
+- **⚠ `var` を付けない**: `LOAD_CPU = 50;` と書く。`var LOAD_CPU = 50;` は**別のローカル変数**を
+  作るだけで設定には効かない(`CACHE_DIR` / `EXIT_CODE` と同じ落とし穴)。
+- **未代入でも読める**: 起動時に planner が**実効値**で事前定義するので、`print(GATE_ORDER)` で
+  「いま何が効いているか」を確認できる。
+- **既定値の置き場は 1 箇所だけ**: 変数名・環境変数名・既定値・起動時のみか、を持つ**設定表**
+  (`pigcfg_table()`)が唯一の真実。ドキュメントとコードで既定が二重管理にならない。
+
+#### ★ 効かない代入は警告が出る
+
+一部の設定は**起動時(または最初の agent が入場するまで)にしか読まれない**。それらに後から代入しても
+黙って無視されると事故になるので、**代入を検出して 1 度だけ警告**する:
+
+```
+[load] WARNING: LOAD_RAMP_START is read only until the first agent is admitted; the assignment (7) has no effect (value actually used = 2)
+```
+
+⚠ 検出は 250ms 周期のチェックに加えて、**終了時にも必ず 1 回**行う(250ms より短いスクリプトでも
+警告が消えないように)。
+
+#### 反映のタイミング
+
+| 設定 | いつ効くか |
+|---|---|
+| `GATE_ORDER` | **入場のたび**(代入した直後から) |
+| `GATE_WHEN` / `GATE_TRACE` | agent ごと / 入場ごと |
+| 負荷コントロール一式 | 250ms 周期 + 終了時 |
+| ⚠ `LOAD_RAMP_START` / `LOAD_MEM_METRIC` / `LOAD_CPU_MS` | **起動時のみ**(代入すると上の警告) |
+
+### 9.0.1 負荷コントロール / ワーカーゲートの設定一覧
+
+srava は幾何 op を agent(別プロセス or in-proc スレッド)で計算する。**同時に走らせる agent 数**を
+メモリと CPU の空き具合から決めているのがこの一群。⚠ **通常は触らなくてよい**(既定で動く)。
+
+| 変数 | 環境変数 | 既定 | 意味 |
+|---|---|---|---|
+| `LOAD_MEM` | `SRAVA_LOAD_MEM` | `50` | 使ってよいメモリ = **利用可能量 × この %** |
+| `LOAD_MEM_MB` | `SRAVA_LOAD_MEM_MB` | `0` | 上記を MB の絶対値で置く(測定用。0=無効) |
+| `LOAD_MEM_METRIC` | `SRAVA_LOAD_MEM_METRIC` | `rss` | ⚠ **起動時のみ**。Linux でのメモリの測り方。`rss`(既定・`/proc/PID/status` の VmRSS)/ `pss`(`smaps_rollup` の Pss = 共有ページを按分) |
+| `LOAD_CPU` | `SRAVA_LOAD_CPU` | `90` | 使ってよい CPU = **利用可能コア数 × この %**。これが上限 `V_CPU` を決める。`0` にすると動的 CPU 項を切り、`V_CPU` は `LOAD_AGENT` (未指定ならコア数) から決まる |
+| `LOAD_CPU_MS` | `SRAVA_LOAD_CPU_MS` | `250` | ⚠ **起動時のみ**。CPU 標本を取る周期 (ms) |
+| `LOAD_WINDOW_MS` | `SRAVA_LOAD_WINDOW_MS` | `500` | CPU 使用率を平均する窓 (ms) |
+| `LOAD_RAMP` | `SRAVA_LOAD_RAMP` | `1` | **緩やかな立ち上がり**。`0` で無効(いきなり目標値) |
+| `LOAD_RAMP_MS` | `SRAVA_LOAD_RAMP_MS` | `250` | ランプが +1 する周期 (ms) |
+| `LOAD_RAMP_START` | `SRAVA_LOAD_RAMP_START` | `2` | ⚠ **起動時のみ**。ランプの初期上限 |
+| `LOAD_AGENT` | `SRAVA_LOAD_AGENT` | `0` | 同時 agent 数の上限を**個数で直接**指定する(`0`=指定なし)。⚠ **`LOAD_CPU=0` のときだけ読まれる** (% ではなく個数で言いたいときの口)。`LOAD_CPU` が非 0 のまま指定すると無視され、stderr に警告が出る |
+| `LOAD_LOG` | `SRAVA_LOAD_LOG` | `0` | `1` で決定値(目標/実効/`C_MEM`/`C_CPU` 等)を stderr へ |
+| `GATE_ORDER` | `SRAVA_GATE_ORDER` | `fifo` | 待ち行列の入場順。`lifo` = 後着優先(深さ優先寄り) |
+| `GATE_WHEN` | `SRAVA_GATE_WHEN` | `auto` | ゲートを取る位置。`first`(1 引数解決で)/ `all`(全引数解決後)/ `auto` |
+| `GATE_TRACE` | `SRAVA_GATE_TRACE` | `0` | `1` で入場を 1 行ずつ stderr へ。**同時実行数 `live=` が直接読める** |
+
+★ **`SRAVA_GATE_TRACE=1` は「並列に書いたつもり」を検算する道具**(→ §2「並列に走るもの・走らないもの」):
+
+```
+[gate] enter seq=3 op=box live=4 order=fifo
+                              ^^^^^^^ 同時に走っている agent 数
+```
+
+⚠ **`GATE_ORDER=lifo` は既定にしていない**。深さ優先寄りに入場するので均等な木では実使用メモリが
+減るが、**木の形によっては逆に不利になる**(偏った木では増える)。効くと分かっている場合だけ使う。
+
+#### ⚠ 真偽値フラグの規約 — **正論理・値で判定**
+
+- **`1` 以上で有効・`0` で無効**。`X_OFF=1` のような**負論理の変数は作らない**。
+- **値で判定する**(「変数が存在するか」では判定しない)。⚠ 存在で判定すると **`X=0` と書いても
+  有効になり**、切ったつもりで切れない事故が起きる。
+- 既定が有効なものは既定を `1` にして、`X=0` で切らせる(例 `SRAVA_LOAD_RAMP`)。
+- ⚠ 旧名 `SRAVA_LOAD_RAMP_OFF` / `SRAVA_LOAD_CPU_OFF` / `PIG_MAX_WORKERS` は
+  **2026-08-30 にすべて撤去した**。設定しても無視される。
+  `SRAVA_LOAD_RAMP=0` / `SRAVA_LOAD_CPU=0` / `SRAVA_LOAD_CPU=0 SRAVA_LOAD_AGENT=N` を使うこと。
+  ★ 撤去した理由: これらの旧名は**起動時にしか読まれず**、設定監視 (250ms) が新名しか
+  読み直さないため、**起動 250ms 後に効果が消えていた**。「対照を取ったつもりで取れていない」
+  という、機構の検証そのものを壊す壊れ方だったので、alias を残すより消すほうが安全と判断した。
+
+**上限 `V_CPU` の決まり方** (2026-08-30 に一本化):
+
+```
+V_CPU = ( LOAD_CPU == 0 ) ? LOAD_AGENT : 利用可能コア数 * LOAD_CPU / 100
+```
+
+- `LOAD_CPU` と `LOAD_AGENT` の両方が `0` なら `V_CPU` = 利用可能コア数 (= 100%)。
+- 実際にゲートへ入る値は `V_CPU` そのものではなく `min(V_CPU, メモリ項, CPU 項)` を
+  ランプが下から追いかけた値。**`LOAD_AGENT=N` は「N で固定」ではなく「天井が N」**。
+  メモリ項が小さければそちらが勝つ (2026-08-30 の変更。以前は固定だった)。
+- ⚠ ログの**出力先パス**を取る変数(`PIG_TIMING` / `PIG_SEP_LOG` / `PIG_POLISH_LOG`)は
+  真偽値ではないのでこの規約の対象外。
+
+### 9.0.2 srava の外の環境変数 — `MALLOC_ARENA_MAX` (Linux/glibc)
+
+srava は設定していないが、**効果が大きい外部の変数**として記録しておく。
+
+```
+MALLOC_ARENA_MAX=1 srava model.sra
+```
+
+- **glibc の malloc がプロセス起動時に自分で読む**変数。srava は読み書きしていない。
+- srava は agent を環境変数ごと引き継いで起動するので、**指定すると planner と全 agent に一斉に効く**。
+- 重い in-proc ワークロードでは **peak RSS が目に見えて下がる**。⚠ ただし逆に遅くなる
+  ワークロードもある = **ワークロード依存**なので、効くかどうかは対象ごとに確かめること。
+- ⚠ **glibc 限定**。macOS / Windows では効かない。実行中に変えることもできない。
+- 新しい書き方は `GLIBC_TUNABLES=glibc.malloc.arena_max=1` (`MALLOC_ARENA_MAX` も現役)。
+
+★ 「メモリのピークが高すぎて機体が苦しい」ときの**最初に試す価値のあるつまみ**だが、
+**速度と引き換え**になりうるので、自分のワークロードで測ってから使うこと。
+
+### 9.1 その他の環境変数
 
 | 変数 | 役割 |
 |------|------|
@@ -733,12 +988,12 @@ hash は `{"k":v,…}` (キーソート)。
 | `SRAVA_VALUE` | VALUE モードで parse → serialize 表示 |
 | `SRAVA_CACHE_DIR` | キャッシュ出力先 |
 | `SRAVA_CACHE_RETAIN` | 終了時の未使用キャッシュ掃除方針。未設定/`0`=即削除(既定) / `7d`等の期間 or `2026-06-10`等の期日=古い完了のみ削除 / `all`=全保持。下記 |
-| `SRAVA_AGENT` | **幾何カーネル非依存の agent host 実行体パス**(既定 `/usr/local/bin/srava_agent`)。この単一 host が `cgal.so`/`manifold.so` 等のモジュールを dlopen する(旧 `srava_agent`/`srava_agent_mf` の 2 バイナリ体制は廃止) |
-| `SRAVA_DIRECT_EXEC` | agent 起動方式。既定(未設定/`0` 以外)は `'#'` 直接 `execvp`(sh 孫を挟まずプロセス半減・teardown が実 agent に直達)、`=0` で従来の `sh -c` に戻す(race 切り分け用) |
+| `SRAVA_AGENT` | **幾何カーネル非依存の agent host 実行体パス**(既定 `/usr/local/bin/srava_agent`)。この単一 host が `cgal.so`/`manifold.so` 等のモジュールを dlopen する |
+| `SRAVA_DIRECT_EXEC` | agent 起動方式。既定(未設定/`0` 以外)は `'#'` 直接 `execvp`(sh 孫を挟まずプロセス半減・teardown が実 agent に直達)、`=0` で従来の `sh -c` に戻す(race 切り分け用)。⚠ **Windows では `=0` は使えない** — `ts2System` の MinGW 実装は `'#'` 始まり(CreateProcess 直起動)**のみ**対応で、それ以外は `-6` を返す。srava も `_WIN32` では無条件に `'#'` を付ける。**切り分け用の逃げ道が Windows では塞がっている**ことに注意 |
 | `SRAVA_MODULE_PATH` | モジュール(`.so`)の**追加**探索パス(`:` 区切り)。既定探索路(実行体同居 dir → install SYSDIR → `~/.config/srava/modules`)に足す。→ [モジュールリファレンス](srava_module_reference.html) |
 | `SRAVA_PATH` | `include` の探索パス(`:` 区切り)。取り込み元 dir の次に探す(§5 の include を参照) |
-| `PIG_MAX_WORKERS` | **ワーカーゲート**の同時 agent プロセス上限(**固定** soft cap)。既定 `ncpu*4`。`failed to launch agent`(fork 上限超過)や OOM を防ぐ。**limit は固定**で、設定が実機の fork 上限を超え fork が EAGAIN で失敗すると、バックオフも再試行もせず**即座に致命エラーで終了**する(`fork failed (process limit): PIG_MAX_WORKERS=N exceeds this machine's fork/process limit. Lower PIG_MAX_WORKERS and re-run.`)。理由: 既に fork 済みの agent は殺せず、後から limit を縮めてもデッドロックは解けない／物理上限が増えるわけでもないため。大きすぎたら**手で下げて再実行**する |
-| `PIG_MEM_MARGIN_MB` | (**現状無効・インタフェースのみ残置**) 空きメモリがこの MB を切ったら新規 agent 起動を保留する OOM 保険の設定値。既定 1024・`0` で無効・空きは `/proc/meminfo`(Linux のみ)。**ただし現在この入場制限は呼び出しを外してあり効かない**(メモリ容量チェックもデッドロック要因になり得るため当面無効化。env のパースと判定関数 `gate_mem_wait()` は将来の整理用に残置)。実効の入場制御は `PIG_MAX_WORKERS`(プロセス数)のみ |
+| `PIG_MAX_WORKERS` | **撤去** (2026-08-30)。ワーカーゲートの上限は §9.0.1 の `LOAD_CPU` / `LOAD_AGENT` 一本に集約した。設定しても**無視される**。以前は「静的な天井」として `LOAD_AGENT` (目標値の固定) とは別物・小さい方が効く、と書いていたが、★実装では小さい方が効いておらず (ロード制御が天井を上書きしていた)、さらに旧名が起動 250ms 後に握り潰されていた。**2 つあった上限の口を 1 つにして両方の欠陥を解消した**。移行: `PIG_MAX_WORKERS=N` → **`SRAVA_LOAD_CPU=0 SRAVA_LOAD_AGENT=N`** |
+| `PIG_MEM_MARGIN_MB` | (**現状無効・インタフェースのみ残置**) 空きメモリがこの MB を切ったら新規 agent 起動を保留する OOM 保険の設定値。既定 1024・`0` で無効・空きは `/proc/meminfo`(Linux のみ)。**ただし現在この入場制限は呼び出しを外してあり効かない**(メモリ容量チェックもデッドロック要因になり得るため当面無効化。env のパースと判定関数 `gate_mem_wait()` は将来の整理用に残置)。実効の入場制御は §9.0.1 のワーカーゲート(`LOAD_CPU` / `LOAD_AGENT`)のみ |
 | `PIG_MAX_FILES` | srava が起動時に自前で上げる open-files(RLIMIT_NOFILE)ソフト上限の目標。既定 16384。シェルの低い既定(macOS は 256)に縛られず多数 agent を並列に回すため。ハード上限/カーネル上限(`kern.maxfilesperproc`)を超える分は段階的に下げて設定 |
 | `PIG_FD_VERBOSE` | 起動時に確定した open-files 上限を `[pig] open files limit = N` と表示 |
 | `PIG_TEST_SLOW` | agent を 200ms 遅延 (レース検証) |
@@ -844,8 +1099,7 @@ srava は幾何演算を**外部 agent プロセス**(または in-proc スレ�
 | **CGAL**(既定) | `cgal.so` | **厳密**(EPECK 有理数)。corefinement ブール。堅牢だが重い。全 op 対応 | 3D=`MESH` / 2D=`PLY2` |
 | **Manifold** | `manifold.so` | **高速**(double)。watertight 前提。2D は CrossSection。ライセンス寛容(Apache-2.0) | 3D=`MFM3` / 2D=`MFC2` |
 
-いずれのモジュールも単一 host 実行体 `srava_agent`(env `SRAVA_AGENT`)が dlopen する(旧 `srava_agent_mf` の
-別バイナリ体制は廃止)。Manifold は opt-in ビルド（`cmake -DSRAVA_MODULE_MANIFOLD=ON`）で `manifold.so` が
+いずれのモジュールも単一 host 実行体 `srava_agent`(env `SRAVA_AGENT`)が dlopen する。Manifold は opt-in ビルド（`cmake -DSRAVA_MODULE_MANIFOLD=ON`）で `manifold.so` が
 入るときのみ使える。
 
 ⚠ 同じ `.sra` を両カーネルで走らせたとき、**`combine`(`+++`) だけは結果が違う**: cgal は重なりを
@@ -870,19 +1124,89 @@ srava は幾何演算を**外部 agent プロセス**(または in-proc スレ�
 → 結果として既定を Manifold にすると「**Manifold でできる所は Manifold・できない所は CGAL**」の
 ハイブリッドで動く（利用者は意識しなくてよい）。
 
-### 幾何カーネル / 実行方式の切替 — `module(so[, {…}])` / `load(so)`
+### 幾何カーネル / 実行方式の切替 — `module(so[, opts])` {#module-builtin}
 
-`DEFAULT_OUTPUT` 変数・`SRAVA_DEFAULT_OUTPUT` env は撤去された(Phase 4c)。既定の幾何カーネルの切替や
-実行方式の指定は、その**代替となる planner 側組込 `module` / `load`** で行う(ソース先頭に書くのが定石):
+既定の幾何カーネルの切替や実行方式の指定は、planner 側の組込 `module` で行う(ソース先頭に書くのが定石):
 
 | 組込 | 意味 |
 |------|------|
-| `module("manifold.so", {priority:10})` | `.so` をロードし **priority を上書き** → **既定の幾何カーネルを切替**(priority 最大が既定・同値は後勝ち)。ベンチで同一 `.sra` を無改変で両カーネルへ振るのはこれ |
+| `module("manifold.so", {priority:99})` | **priority を上書き** → **既定の幾何カーネルを切替**(priority 最大が既定・★**同値の勝敗は不定**)。ベンチで同一 `.sra` を無改変で両カーネルへ振るのはこれ |
 | `module("so", {exec_default:"process"})` | 実行方式を上書き。**重い op をプロセス実行**(`"thread"`=in-proc スレッド)。CGAL は常に process、Manifold は既定 in-proc |
-| `load("manifold.so")` | **設定上書きなし**の軽量ロード(codec/descriptor だけ登録)。既存の Manifold 型 cache を読むために積むだけ、等 |
+| `module("so")` / `module("so", {})` | **ロードする**(既にロード済みなら記述子の上書きだけ)。★`module` は**ロード順を変えない**(記述子の上書き op であって、ロードとは別物) |
+| `module("so", "off")` | **アンロードする**(`dlclose`)。以後 `module("so", {})` で読み直せる |
 
-- `module(so, opts)` の第 2 引数ハッシュは `priority`(整数) / `exec_default`(`"thread"` / `"process"`)を取る。
+★ **`"off"` は実アンロードで、routing からの一時的な出し入れではない**。文字列オプションは `"off"` だけで、
+`"on"` は無い(ロード / 再ロードは `module(path)` か `module(path, {...})`)。
+
+```
+module("cgal.so", "on")     → ERROR: module: the only string option is "off" (to unload).
+                                     To load or reload, call module(path) or module(path, {...}).
+```
+
+アンロードには 2 つの条件があり、どちらも**黙って無視せず明示エラー**になる:
+
+| 状況 | 結果 |
+|------|------|
+| 未ロードのモジュールを `"off"` | `module: cannot unload "cgal.so": module is not loaded` |
+| **一度でも op を実行した**モジュールを `"off"` | `module: cannot unload "cgal.so": already used by this program (unloading is only allowed before the module runs any op)` |
+
+前者が黙認されないのは、名前を打ち間違えたときに気づけなくなるため。落とせるかを先に確かめたいときは
+`module_loaded(so)` を使う。
+
+### `module_loaded(so)` — いまロードされているか
+
+`.so` がいまロードされていれば `1`、されていなければ `0`。引数の書き方は `module()` と同じで、
+ファイル名だけなら探索路から解決される。
+
+```
+print("F1", module_loaded("cgal.so"));      // → F1 0
+module("cgal.so", {});
+print("F2", module_loaded("cgal.so"));      // → F2 1
+```
+
+### `module_reload(path, opts)` — 落として読み直す
+
+`include "module/reload.sra";` で使える stdlib のヘルパ。`"off"` してから `module(path, opts)` する
+定型を 1 行にまとめたもの(未ロードなら単にロードする)。
+
+```
+include "module/reload.sra";
+module_reload("cgal.so", {priority:99});
+module_reload("/tmp/experimental/cgal.so", {});   // 開発中の .so に差し替える
+```
+
+1 つのモジュール名につき `dlopen` は 1 回なので、`module(so,{...})` では**ロード済みの `.so` 自体を
+差し替えられない**(できるのは記述子の上書きだけ)。落としてから読み直すことで差し替えになる。
+同じファイル名のまま別の実ファイルへ差し替えたい場合も同様で、落とさずに別パスを指すと
+「同名で別ファイル」の明示エラーになる。
+
+⚠ **差し替えはそのモジュールで op を実行する前に行うこと**。一度でも使われた `.so` は落とせない
+(そのモジュール由来のメッシュ本体や agent が生きている可能性があるため)。
+
+⚠ `reload.sra` は `module/all.sra` には入っていない。ヘルパを使うためだけに 6 本ロードされるのを
+避けるため、必要なときだけ個別に `include` する。
+
+- `module(so, opts)` の第 2 引数ハッシュは `priority`(整数) / `exec_default`(`"thread"` / `"process"`) /
+  `arity`(整数 ≥2) / `optional`(真偽・下記) を取る。
   `module("manifold.so",{priority:99});` の 1 行で Manifold を既定に押し上げられる(旧 `DEFAULT_OUTPUT=manifold` の代替)。
+
+> **効いているモジュールを確かめる**: [`srava --modules`](srava_install_guide.html#modules)（配置 —
+> 探索路・勝者・shadowed・失敗）と [`srava --module-info`](srava_install_guide.html#module-info)（中身 —
+> op ごとの `sig` 全リスト・`provides`）。**モジュールが効かないときは、まず `--modules` を見る。**
+
+★ **モジュールは `module()` を呼んだときにロードされる**。`module()` を一度も呼ばなければ、どの op も
+「no module can execute op」または「undefined variable」で明示エラーになる。個々の実験・測定は
+必要なものだけ `module("manifold.so",{});` のように明示するのが最も軽い(他モジュールのロード
+コストが乗らない)。旧来の「起動時に全カーネルが使える」挙動に近い状態が欲しい場合は、便宜スクリプト
+`include "module/all.sra";` を使う(cgal/geogram/manifold/occt/openvdb/nef_hybrid を一括ロード。
+nef は hybrid のみ・d2-d5 やデモ/サードパーティプラグインは対象外なので個別に module() が要る)。
+コマンドライン一発で全スクリプトに効かせたい場合は環境変数 `SRAVA_MODULE_ALL=1` も使える
+(script 本文の先頭に `include "module/all.sra";` を差し込んだのと等価)。
+
+- `optional`(真偽・0以外で有効): 指定した .so が見つからない/ロードできなくても**エラーにせず
+  静かに諦める**。ビルド構成によっては全カーネルが揃っているとは限らないため、`module/all.sra` の
+  ような「入っているものだけ使う」便宜スクリプトで使う。既定 (`optional` 省略/0) は従来通り、
+  見つからなければ明示エラー。
 
 ### 型変換ポリシー(無損失は暗黙・損失は明示)
 
@@ -907,17 +1231,16 @@ cast("mf-cross2d", m)   // → Manifold 2D 断面
 ```
 
 - 目標型は実装型名（`cg-mesh3d` = CGAL 厳密 3D / `mf-mesh3d` = Manifold 3D / `cg-cross2d` = CGAL 2D /
-  `mf-cross2d` = Manifold 2D）。型が**次元も含む**ので、旧 `cast("exact")`（次元非依存）と違い曖昧さがない。
+  `mf-cross2d` = Manifold 2D）。型が**次元も含む**ので曖昧さがない。
 - **`cast("cg-…", …)`（float→厳密・無損失）**: 以降を厳密ブールで通したいときに。既定 Manifold で作った
   部品を要所だけ厳密化する用途。
 - **`cast("mf-…", …)`（厳密→float・損失）**: CGAL で作った厳密結果を、以降の高速な Manifold 経路に
   意図的に載せるときに。座標は double へ丸められる。
 - 既に目標型なら実質 no-op（再エンコードのみ）。
-- ⚠ 旧 `cast("exact")` / `cast("manifold")`（カーネル名指し）は**廃止**（後方互換なし・rev4）。
 
 ### ベンチ / 使い分けの実際
 
-`SRAVA_DEFAULT_OUTPUT` env は撤去されたので、既定の幾何カーネルの切替はソース先頭の `module()` 1 行で行う:
+既定の幾何カーネルの切替は、ソース先頭の `module()` 1 行で行う:
 
 ```
 // 既定 = CGAL(厳密・全 op)。この 1 行が無ければ CGAL

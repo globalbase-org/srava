@@ -436,6 +436,21 @@ static void yy_pop_parser_stack(yyParser *pParser){
 void ParseFinalize(void *p){
   yyParser *pParser = (yyParser*)p;
   while( pParser->yytos>pParser->yystack ) yy_pop_parser_stack(pParser);
+  /* ★ #3450 (2026-08-29): semantic value が参照カウント (sPtr) のとき、reduce で「アクション内で
+  ** 使われた」RHS スロットは lemon の規約により destructor が呼ばれず、参照を 1 本持ったまま
+  ** 放置される。スタックがその深さまで再度伸びれば shift の REF_SET 代入が旧値を解放するが、
+  ** **最終到達深度より深い位置で使われた値には二度と届かず、その参照が漏れる**
+  ** (実測: union(s >>> v) の arglist が ref=1・被参照ゼロで残り、map 結果配列から中間
+  ** pigDataCache まで N+1 個が芋づるでプロセス終了まで常駐した)。
+  ** スロットは確保時に memset 0 されており、REF_SET(x,0) は冪等なので、確保済み全域を掃く。 */
+  {
+    int yyi;
+#if YYSTACKDEPTH<=0
+    for(yyi=0; yyi<pParser->yystksz; yyi++) REF_SET(pParser->yystack[yyi].minor.yy0, 0);
+#else
+    for(yyi=0; yyi<YYSTACKDEPTH; yyi++) REF_SET(pParser->yystack[yyi].minor.yy0, 0);
+#endif
+  }
 #if YYSTACKDEPTH<=0
   if( pParser->yystack!=&pParser->yystk0 ) free(pParser->yystack);
 #endif

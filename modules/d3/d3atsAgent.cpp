@@ -9,6 +9,7 @@
  *   d3_nverts が使え、mesh の codec/wire-stream/cache 往復が成立する。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"d3/c++/d3Mesh.h"
 #include	"pig/c++/ptsApplication.h"    /* ptsApp 値メンバの完全型 (基底 sRptr のデストラクタ実体化用) */
 #include	"pig/c++/ptsAgent.h"
 #include	"pig/c++/ptsGenericAgent.h"   /* 共通基底 (状態機械) */
@@ -30,22 +31,20 @@
 CLASS_TINYSTATE(d3/c++/d3atsAgent,pig/c++/ptsGenericAgent)
 
 /* ---- ディスパッチテーブル (ファイルスコープ・pig 層の共通型) ---- */
-template<class T> static sPtr<ptsCalcBody>
-mkCalcT(sPtr<ptsObject> p, sArray<sPtr<pigData> > *a, sPtr<stdString> t) { return thNEW(T,(p, a, t)); }
 
 static const pigArgKind CUBE_IN[]    = { AK_INLINE };            /* d3_cube(s) */
 static const pigArgKind MERGE_IN[]   = { AK_CACHE, AK_CACHE };   /* d3_merge(a,b) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };            /* d3_nfaces/d3_nverts(m) */
 static const pigOpEntry OPS[] = {
-	{ "d3_cube",   CUBE_IN,    1, AK_CACHE,  &mkCalcT<d3aCube>,   0, "->d3-mesh3d" },                 /* leaf producer */
-	{ "d3_merge",  MERGE_IN,   2, AK_CACHE,  &mkCalcT<d3aMerge>,  0, "(d3-mesh3d,d3-mesh3d)->d3-mesh3d" },
-	{ "d3_nfaces", MEASURE_IN, 1, AK_INLINE, &mkCalcT<d3aNfaces>, 0, "(d3-mesh3d)->value" },
-	{ "d3_nverts", MEASURE_IN, 1, AK_INLINE, &mkCalcT<d3aNverts>, 0, "(d3-mesh3d)->value" },
+	{ "d3_cube",   CUBE_IN,    1, AK_CACHE,  OPWIRE(d3aCube),   0, "->d3-mesh3d" },                 /* leaf producer */
+	{ "d3_merge",  MERGE_IN,   2, AK_CACHE,  OPWIRE(d3aMerge, d3Mesh, d3Mesh),  0, "(d3-mesh3d,d3-mesh3d)->d3-mesh3d" },
+	{ "d3_nfaces", MEASURE_IN, 1, AK_INLINE, OPWIRE(d3aNfaces, d3Mesh), 0, "(d3-mesh3d)->value" },
+	{ "d3_nverts", MEASURE_IN, 1, AK_INLINE, OPWIRE(d3aNverts, d3Mesh), 0, "(d3-mesh3d)->value" },
 	/* ★ 共有 op (次元分担デモ・§9.4/§9.7 Q-E): d2 モジュールと **同じ op 名 `dcount`** を、それぞれ自分の
-	 *   次元型で申告する。2 owner なので op-owner routing は発火せず、decide_executor が入力型 (d3-mesh3d
+	 *   次元型で申告する。同名 op を 2 モジュールが持つので、decide_executor が入力型 (d3-mesh3d
 	 *   か d2-shape2d か) で正しいモジュールへ振る = (module×次元) 2 軸問題の型ディスパッチによる解決。
 	 *   3D の dcount は頂点数を返す (計算本体は d3aNverts を再利用・立方体=8)。 */
-	{ "dcount",    MEASURE_IN, 1, AK_INLINE, &mkCalcT<d3aNverts>, 0, "(d3-mesh3d)->value" },
+	{ "dcount",    MEASURE_IN, 1, AK_INLINE, OPWIRE(d3aNverts, d3Mesh), 0, "(d3-mesh3d)->value" },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -94,21 +93,31 @@ mk_d3atsAgent(sPtr<ptsObject> med)
 	return thNEW(d3atsAgent,(med));
 }
 
-/* 自己申告記述子 (単一ソース)。priority=0 (opt-in)・exec_caps THREAD|PROCESS・**exec_default=PROCESS**。
+/* 自己申告記述子 (単一ソース)。priority=-2 (opt-in)・exec_caps THREAD|PROCESS・**exec_default=PROCESS**。
  * PROCESS 既定にするのは、in-proc(THREAD)だと mesh 本体が planner 内に in-memory 共有され codec を
  * 経由しないため — PROCESS で agent プロセス跨ぎにし、d3 の codec/wire-stream/cache 往復を実走させる
  * (かつ複数 in-proc thread モジュール境界 ⑤ を踏まない)。namespace scope の const は既定で内部
  * リンケージ → manifest.cpp から extern 参照するため extern 明示。 */
-extern const pigModuleCodec d3_codecs[];   /* d3CacheCodec.cpp */
+extern const pigModuleType d3_provides[];
 extern const srava_module_descriptor d3atsAgent_descriptor;
 extern const srava_module_descriptor d3atsAgent_descriptor = {
-	SRAVA_MODULE_ABI, "d3", 0,
-	&mk_d3atsAgent, (unsigned)(EXEC_THREAD | EXEC_PROCESS), EXEC_PROCESS,
-	OPS, N_OPS, 0, 0,
-	"D3M3",   /* codec_tags */
-	d3_codecs,   /* reader/writer factory (自型 D3M3) */
-	"d3-mesh3d", "D3M3",   /* types / type_tags (#3427 で manifest.cpp から移動) */
-	"\x01" "D3M",   /* hash_salt: キャッシュキー弁別 (#3427 で manifest.cpp から移動) */
+	.abi_version   = SRAVA_MODULE_ABI,
+	.name          = "d3",
+	.priority      = -2,   /* テスト専用。既定カーネル候補としては最下位群 (負値)・同点回避 */
+	.make_agent    = &mk_d3atsAgent,
+	.exec_caps     = (unsigned)(EXEC_THREAD | EXEC_PROCESS),
+	.exec_default  = EXEC_PROCESS,
+	.ops           = OPS,
+	.n_ops         = N_OPS,
+	.import_exts   = 0,
+	.export_exts   = 0,
+	.provides      = d3_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+	.hash_salt     = "\x01" "D3M",   /* キャッシュキー弁別 (#3427 で manifest.cpp から移動) */
+	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
+	 *   テスト専用 */
+	.initialize    = 0,   /* 無し */
+	.configure     = 0,   /* ★ v10 (#3441): opts フックは未使用(このモジュールは module() の
+	                       *   opts を消費しない) */
 };
 /* ★ #3427 ③: 旧・静的初期化の register_descriptor は撤去。登録は dlopen 経路
  * (pigModuleRegistry::load_file → register_descriptor) の 1 本 = app 所有レジストリへ。 */

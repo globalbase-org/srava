@@ -44,11 +44,11 @@ CLASS_TINYSTATE(pipe/c++/ppatsAgent,pig/c++/ptsAgent)
  * in/nin/mkCalc は使わない (ppatsAgent は OPS dispatch を持たず単一 ppaCompute へ流す)。
  * variadic=1 で任意 arity を許容 (実 arity 検査は pp_compute 内)。 */
 static const pigOpEntry PP_OPS[] = {
-	{ "pipe_proximity",       0, 0, AK_INLINE, 0, 1 },
-	{ "pipe_adjust",          0, 0, AK_INLINE, 0, 1 },
-	{ "pipe_scene_proximity", 0, 0, AK_INLINE, 0, 1 },
-	{ "pipe_scene_adjust",    0, 0, AK_INLINE, 0, 1 },
-	{ "pipe_sample",          0, 0, AK_INLINE, 0, 1 },
+	{ "pipe_proximity",       0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
+	{ "pipe_adjust",          0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
+	{ "pipe_scene_proximity", 0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
+	{ "pipe_scene_adjust",    0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
+	{ "pipe_sample",          0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
 };
 static const int PP_N_OPS = (int)(sizeof(PP_OPS) / sizeof(PP_OPS[0]));
 
@@ -106,18 +106,32 @@ mk_ppatsAgent(sPtr<ptsObject> med)
 	return thNEW(ppatsAgent,(med));
 }
 
-/* 自己申告記述子。plugin なので priority=0・codec/exts なし。exec_caps=THREAD|PROCESS・既定 THREAD。
+/* 自己申告記述子。codec/exts なし。exec_caps=THREAD|PROCESS・既定 THREAD。priority は下の値を参照
+ * (2026-08-18 `439a16b` で 0 → 4。同梱モジュールの同点を避けるため)。
  * namespace scope の const は既定で内部リンケージなので manifest.cpp から extern 参照するため
  * extern を明示する (mfatsAgent と同じトラップ回避)。 */
 extern const srava_module_descriptor ppatsAgent_descriptor;
 extern const srava_module_descriptor ppatsAgent_descriptor = {
-	SRAVA_MODULE_ABI, "pipe_proximity", 0,
-	&mk_ppatsAgent, (unsigned)(EXEC_THREAD | EXEC_PROCESS), EXEC_THREAD,
-	PP_OPS, PP_N_OPS, 0, 0,
-	0,      /* codec_tags: 無し (値のみ・キャッシュ 4CC をサポートしない) */
-	0,      /* codecs: 無し */
-	0, 0,   /* types / type_tags: 解析モジュール (自前の mesh 型を持たない) */
-	0,   /* hash_salt: 基準カーネル/解析モジュールはソルト無し */
+	.abi_version   = SRAVA_MODULE_ABI,
+	.name          = "pipe_proximity",
+	.priority      = 4,
+	/* 解析モジュール (幾何カーネルではない)。★priority は
+	 *  同点を避けて全モジュールで別値にしてある = 同点の
+	 *  勝敗はロード順 (走査順) 任せ = 不定になるため。 */
+	.make_agent    = &mk_ppatsAgent,
+	.exec_caps     = (unsigned)(EXEC_THREAD | EXEC_PROCESS),
+	.exec_default  = EXEC_THREAD,
+	.ops           = PP_OPS,
+	.n_ops         = PP_N_OPS,
+	.import_exts   = 0,
+	.export_exts   = 0,
+	.provides      = 0,   /* 無し */
+	.hash_salt     = 0,   /* 基準カーネル/解析モジュールはソルト無し */
+	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
+	 *   raw pthread。⚠ ロード済みライブラリからは検出できない */
+	.initialize    = 0,   /* 無し */
+	.configure     = 0,   /* ★ v10 (#3441): opts フックは未使用(このモジュールは module() の
+	                       *   opts を消費しない) */
 };
 /* ★ #3427 ③: 旧・静的初期化の register_descriptor は撤去。登録は dlopen 経路
  * (pigModuleRegistry::load_file → register_descriptor) の 1 本 = app 所有レジストリへ。 */

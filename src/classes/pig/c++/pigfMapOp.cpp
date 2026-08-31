@@ -34,7 +34,6 @@ public:
 
 	sRptr<ptsObject,tinyState>		parent;
 private:
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -53,7 +52,6 @@ pigfMapOp_::pigfMapOp_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
 }
 
 /* 単一 op ノード(従来形)を作る: pigDataFunction<pigfModuleAgent>(op_name, args)。 */
@@ -77,9 +75,9 @@ TS_STATE(INI_pigfFunction_START)
 TS_STATE(ACT_START)
 {
 	int n = args.length();
-	if ( n < 1 ) { front->set_result(thNEW(pigDataNull,())); return rDO|FIN_START; }
-	sPtr<stdString> op = front->get_op_name();
-	sPtr<pigInfo>   info = front->get_info();
+	if ( n < 1 ) { _front->set_result(thNEW(pigDataNull,())); return rDO|FIN_START; }
+	sPtr<stdString> op = _front->get_op_name();
+	sPtr<pigInfo>   info = _front->get_info();
 
 	/* 各 arg を「コンテナ(配列)か leaf か」に分類。arg0=mesh 役(配列ならコンテナ)、
 	 * arg1..=param 役(ネスト配列ならコンテナ / flat 数値配列やスカラは leaf)。 */
@@ -87,7 +85,7 @@ TS_STATE(ACT_START)
 	int N = -1;
 	for ( int i = 0 ; i < n && i < 8 ; ++i ) {
 		sPtr<pigData> v = args[i]->compact();
-		if ( v->is_error() ) { front->set_result(v); return rDO|FIN_START; }
+		if ( v->is_error() ) { _front->set_result(v); return rDO|FIN_START; }
 		sPtr<pigDataArray> arr = v->obt_array();
 		int isCont = 0;
 		if ( arr.is_notNull() ) {
@@ -104,14 +102,14 @@ TS_STATE(ACT_START)
 			cont[i] = arr;
 			if ( N < 0 ) N = arr->length();
 			else if ( N != arr->length() ) {
-				front->set_result(thNEW(pigDataError,("array op: length mismatch (zip)", info)));
+				_front->set_result(thNEW(pigDataError,("array op: length mismatch (zip)", info)));
 				return rDO|FIN_START;
 			}
 		}
 	}
 
 	if ( N < 0 ) {                       /* コンテナなし = 従来どおり単一 op */
-		front->set_result(mk_single(op, info, args, n));
+		_front->set_result(mk_single(op, info, args, n));
 		return rDO|FIN_START;
 	}
 
@@ -131,11 +129,11 @@ TS_STATE(ACT_START)
 		 * 上流由来のエラーが来たときだけ、配列に埋もれさせず map-op 全体のエラーにする。 */
 		sPtr<pigData> e = out->push(mk_single(op, info, per, n));
 		if ( e.is_notNull() ) {
-			front->set_result(e);
+			_front->set_result(e);
 			return rDO|FIN_START;
 		}
 	}
-	front->set_result(out);
+	_front->set_result(out);
 	return rDO|FIN_START;
 }
 

@@ -25,18 +25,8 @@
  * (結果は set_result → FIN の TSE_RETURN で返すので、親の型に依存する呼び出しが無い)。 */
 typedef sPtr<ptsAgent> (*pigAgentFactory)(sPtr<ptsObject> med);
 
-class pigAgentRegistry {
-public:
-	/* module 名 (例 "cgal" / "manifold") で生成子を登録する。同名の二重登録は先勝ちで無視。 */
-	void            register_agent(const char *module, pigAgentFactory f);
-	/* module==0 または "" なら「唯一の登録」を返す (登録が 0 個/2 個以上なら 0)。 */
-	pigAgentFactory lookup(const char *module) const;
-	/* 登録数 (root が「自分は agent process 役か」を判定するのに使う)。 */
-	int             count() const;
-
-private:
-	struct Entry { std::string module; pigAgentFactory fn; };
-	std::vector<Entry> entries_v;
-};
+/* ★ #3439 ⑤: class pigAgentRegistry (派生テーブル) は削除した。生成子の検索は
+ * pigModuleRegistry::agent_factory() が **記述子 (make_agent) を is_enabled を見ながら走査**する。
+ * このヘッダは上の pigAgentFactory 型だけを提供する。 */
 
 #endif

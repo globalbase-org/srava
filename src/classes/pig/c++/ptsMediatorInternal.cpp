@@ -51,7 +51,10 @@ public:
 
 	sRptr<ptsObject,tinyState>		parent;
 
-	virtual int	enable();
+	virtual int	enable(sPtr<pigData> env);
+	virtual sPtr<stdString>	module_name();   /* ★ 担当モジュール名 (pig_current_module_id が使う) */   /* ★ #3441: in-proc は使わない (module() が直接
+	 *   configure() を呼んで完結するため)。base 呼び出し(thread 経路)は既定引数 thNULL 任せ。
+	 *   override はここで無視する。パラメタ名を省略しないのは「意図的に無視」を明示するため。 */
 	virtual int	pl_write_arg(int idx, sPtr<pigData> d);
 	virtual int	pl_write_end(sPtr<pigDataCache> outCache);
 protected:
@@ -65,6 +68,9 @@ protected:
 	sPtr<pigData>		agentResult;
 	sPtr<pigDataCache>	outCache;
 	int			retSent;   /* parent への TSE_RETURN を必ず 1 回・2 回以上送らない (§2.2.1) */
+	/* ★ #3419 §14.9: load control へ in-proc として登録済みか (External の retPid>0 と同じ役割。
+	 * enable 失敗時に teardown で二重解除しないための印)。 */
+	int			inprocCredited;
 private:
 	int		a_write(int cmd, sPtr<pigData> d);   /* 結果を parent へ投函 (private・§2.1) */
 	TS_DEFARGS
@@ -73,6 +79,7 @@ private:
 TS_END_IMPLEMENT
 
 TS_BEGIN_INTERFACE
+class pigDataHash;   /* #3419 */
 #include	"ts2/c++/sRptr.h"
 #include	"pig/c++/ptsAgent.h"   /* sPtr<ptsAgent> agent 値メンバの完全型 */
 class ptsObject;
@@ -90,6 +97,7 @@ ptsMediatorInternal_::ptsMediatorInternal_(TS_ARGS0)
 {
     TS_CPARGS0
     retSent = 0;
+    inprocCredited = 0;
 }
 
 
@@ -97,25 +105,39 @@ ptsMediatorInternal_::ptsMediatorInternal_(TS_ARGS0)
 	INSTANCE FUNCTIONS
 ********************************************/
 
-int
-ptsMediatorInternal_::enable()
+sPtr<stdString>
+ptsMediatorInternal_::module_name()
 {
+	return moduleName;
+}
+
+int
+ptsMediatorInternal_::enable(sPtr<pigData> env)
+{
+	(void)env;   /* ★ #3441: in-proc は module() 実行時に直接 configure() 済み。ここでは不要。 */
 	if ( moduleName == thNULL )
 		return -1;
 	/* ★ #3427 ③: app 所有レジストリから引く。 */
 	pigAgentFactory f = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
-	    ? ptsApp->module_registry->agents.lookup(moduleName->get_str()) : 0;
+	    ? ptsApp->module_registry->agent_factory(moduleName->get_str()) : 0;
 	if ( f == 0 )
 		return -1;   /* 実行体未リンク (呼び元は External へフォールバックせずエラー。選択は LAUNCH 側) */
+	/* ★ #3419 §7: そのモジュールの初期化を 1 回だけ走らせる。**TS_STATE 内なので排他は不要**。 */
+	ptsApp->module_registry->ensure_initialized(moduleName->get_str());
 	agent = f(ifThis);
 	if ( agent == thNULL )
 		return -1;
 	/* handshake: External は pipe の streamhdr 交換後に TSE_ASSERT を転送する。Internal は確立に
 	 * 待ちが無いので即 parent へ。呼び元 (pigfAgent LAUNCH) は state_lock 中なのでキューに積まれ、
 	 * HELLO 状態が受ける (見え方は External と同一)。 */
+	/* ★ #3419 §14.9: in-proc で走ることが**確定するのはここ** (LAUNCH は失敗すると External へ
+	 * フォールバックするので、gate 入場の時点ではまだ種別が分からない)。External が pid を
+	 * 登録するのと同じ位置づけ。解除は teardown。 */
+	if ( ptsApp != thNULL ) { ptsApp->load_inproc_add(); inprocCredited = 1; }
 	parent->eventHandler(thNEW(stdEvent,(TSE_ASSERT, ifThis, (INTEGER64)0)));
 	return 0;
 }
+
 
 int
 ptsMediatorInternal_::pl_write_str(int cmd, sPtr<stdString> s)
@@ -180,6 +202,10 @@ ptsMediatorInternal_::a_write(int cmd, sPtr<pigData> d)
 void
 ptsMediatorInternal_::teardown()
 {
+	if ( inprocCredited ) {   /* ★ #3419 §14.9 */
+		inprocCredited = 0;
+		if ( ptsApp != thNULL ) ptsApp->load_inproc_del();
+	}
 	if ( agent.is_notNull() ) {
 		sPtr<ptsAgent> a = agent;
 		agent = thNULL;   /* 以後 実行体の FIN 通知 (TSE_RETURN) は ACT_START が無視する */
@@ -240,7 +266,7 @@ TS_STATE(ACT_ptsMediatorInternal_SAVEBEGIN)   /* メタ書込済 = 下流が att
 	 * get_body() は sException で yield し得るので、ここまでこの状態関数は冪等。 */
 	sPtr<pigData> body = outCache->get_body();
 	if ( body != thNULL && ptsApp != thNULL && ptsApp->module_registry != thNULL
-	     && ! ptsApp->module_registry->codecs.is_stream_body(body) )
+	     && ! ptsApp->module_registry->is_stream_body(body) )
 		a_write(A_SAVE_BEGIN, body);
 	else
 		a_write(A_SAVE_BEGIN, thNULL);

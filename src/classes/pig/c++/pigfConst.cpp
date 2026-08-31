@@ -1,6 +1,6 @@
 /*
  * pigfConst — 最小の非同期 helper(3-3a の async 機構検証用)。
- * ACT で front->set_result(定数 42)して終了するだけ。pigDataFunction<pigfConst> ノードを
+ * ACT で _front->set_result(定数 42)して終了するだけ。pigDataFunction<pigfConst> ノードを
  * compact すると、caller は preprocess で yield → pigfConst 終了(TSE_DESTROY)で再開 → 42 を得る。
  */
 #include	"pig/c++/pigfFunction.h"
@@ -25,7 +25,6 @@ public:
 	sRptr<ptsObject,tinyState>		parent;
 private:
 protected:
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -43,7 +42,6 @@ pigfConst_::pigfConst_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
 }
 
 
@@ -57,7 +55,7 @@ TS_STATE(INI_pigfFunction_START)   // pigfFunction の INI gate を上書き(初
 }
 TS_STATE(ACT_START)                // 結果を非同期にセット(定数 42)して終了
 {
-	front->set_result(thNEW(pigDataInteger,((INTEGER64)42)));
+	_front->set_result(thNEW(pigDataInteger,((INTEGER64)42)));
 	return rDO|FIN_START;
 }
 TS_STATE(FIN_START)                // pigfFunction の FIN gate を上書き

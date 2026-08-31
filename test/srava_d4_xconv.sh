@@ -23,6 +23,7 @@ EXP_V=8
 
 SRC='
 module("manifold.so", {priority:99, exec_default:"thread"});
+module("d4.so", {});
 var m = box(2,2,2);
 var f = d4_nfaces(m);
 var v = d4_nverts(m);

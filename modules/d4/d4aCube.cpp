@@ -9,6 +9,9 @@
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d4aCube_.h"
 
+#include	<stdexcept>
+#include	<stdlib.h>
+
 CLASS_TINYSTATE(d4/c++/d4aCube,pig/c++/ptsCalcBody)
 
 #if 0
@@ -63,6 +66,15 @@ d4aCube_::d4aCube_(TS_ARGS0)
 void
 d4aCube_::compute()
 {
+
+	/* ★ ホスト側の安全網 (ptsCalcBody の try/catch) の**テスト用フック** (2026-08-26)。
+	 * d4 は **exec_default=EXEC_THREAD = in-proc** なので、ここで投げると planner と同じ
+	 * プロセスの専用スレッドで例外が飛ぶ。網が無ければ **planner ごと terminate (SIGABRT)**、
+	 * 網があれば「module threw an uncaught exception: ...」というエラーで planner は生き残る。
+	 * ⚠ 既存の PIG_TEST_* フック (PIG_TEST_SLOW / PIG_TEST_RAISE_SIGNAL) と同じ位置づけ。
+	 *   実モジュールに置くと本番経路に試験用の分岐が残るので、**テスト用の d4 に置く**。 */
+	if ( ::getenv("PIG_TEST_MODULE_THROW") )
+		throw std::runtime_error("deliberate throw from d4_cube (PIG_TEST_MODULE_THROW)");
 	int na = ( args != 0 ) ? args->length() : 0;
 	double s = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	mesh = d4Mesh::cube(s);

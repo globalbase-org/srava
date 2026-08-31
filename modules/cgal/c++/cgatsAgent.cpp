@@ -75,7 +75,9 @@
 #include	"cg/c++/cgaTube.h"        /* 3D 折れ線まわりの掃引管 */
 #include	"cg/c++/cgaRevolve.h"
 #include	"cg/c++/cgaOffset.h"
-#include	"cg/c++/cgaArea.h"        /* 計測(値返し op): area(m) */
+#include	"cg/c++/cgaArea.h"
+#include	"cg/c++/cgaNverts.h"
+#include	"cg/c++/cgaNfaces.h"        /* 計測(値返し op): area(m) */
 #include	"cg/c++/cgaValid.h"       /* 検査(値返し op): valid(m) */
 #include	"cg/c++/cgaRepair.h"      /* 修復(mesh 返し op): repair(m) */
 #include	"cg/c++/cgaVolume.h"      /* 計測(値返し op): volume(m) */
@@ -106,8 +108,6 @@ typedef pigOpEntry cgaOpEntry;
 /* テンプレート thunk: 各クラスに static New を書かずコンストラクタ呼びを生成。
  * 入力は **ポインタ** で渡す(親 cgatsAgent が所有・寿命中生存。sArray の値渡し/コピーは避ける)。
  * 戻り型は pigCalcFactory と一致 (OPS の mkCalc へそのまま入る)。 */
-template<class T> static sPtr<ptsCalcBody>
-mkCalcT(sPtr<ptsObject> p, sArray<sPtr<pigData> > *a, sPtr<stdString> t) { return thNEW(T,(p, a, t)); }
 
 static const ArgKind SHAPE3_IN[] = { AK_INLINE, AK_INLINE, AK_INLINE };  /* box/prism/pyramid */
 static const ArgKind SHAPE2_IN[] = { AK_INLINE, AK_INLINE };             /* rect(w,h) 2D */
@@ -125,51 +125,60 @@ static const ArgKind CAST_IN[] = { AK_INLINE, AK_CACHE };  /* cast(type_string, 
 static const cgaOpEntry OPS[] = {
 	/* ★ rev4 Phase B spike: 代表 op に型シグネチャ (実装型・cg-mesh3d/cg-cross2d) を付与。
 	 *   残りの op と decide_executor 消費は Q-A 書き味確認後 (B-1 全注釈 + B-2)。 */
-	{ "box",          SHAPE3_IN, 3, AK_CACHE, &mkCalcT<cgaBox>,          0, "->cg-mesh3d" },  /* leaf 3D 生成 (mesh 入力なし) */
-	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, &mkCalcT<cgaBox>, 0, "->cg-mesh3d" },  /* 寸法を array(構造 inline)で */
-	{ "import",       SHAPE1_IN, 1, AK_CACHE, &mkCalcT<cgaImport>, 0, "->cg-mesh3d;->cg-cross2d" },  /* import(path): 外部ファイル読み */
-	{ "prism",        SHAPE3_IN, 3, AK_CACHE, &mkCalcT<cgaPrism>, 0, "->cg-mesh3d" },
-	{ "pyramid",      SHAPE3_IN, 3, AK_CACHE, &mkCalcT<cgaPyramid>, 0, "->cg-mesh3d" },
-	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, &mkCalcT<cgaSphere>, 0, "->cg-mesh3d" },  /* sphere(r, seg): seg=円周分割数(既定 32 相当) */
-	{ "icosphere",    SHAPE2_IN, 2, AK_CACHE, &mkCalcT<cgaIcosphere>, 0, "->cg-mesh3d" },  /* icosphere(r, subdiv): subdiv=細分回数(既定0=20面) */
-	{ "union",        BINMESH_IN,2, AK_CACHE, &mkCalcT<cgaUnion>,        0, "(cg-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-mesh3d,mf-mesh3d)->cg-mesh3d;(mf-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-cross2d,cg-cross2d)->cg-cross2d;(cg-cross2d,mf-cross2d)->cg-cross2d;(mf-cross2d,cg-cross2d)->cg-cross2d" },  /* 二項 3D */
-	{ "combine",      BINMESH_IN,2, AK_CACHE, &mkCalcT<cgaCombine>, 0, "(cg-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-mesh3d,mf-mesh3d)->cg-mesh3d;(mf-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-cross2d,cg-cross2d)->cg-cross2d;(cg-cross2d,mf-cross2d)->cg-cross2d;(mf-cross2d,cg-cross2d)->cg-cross2d" },  /* +++ 交差許容の単純合体(viewer 用) */
-	{ "intersection", BINMESH_IN,2, AK_CACHE, &mkCalcT<cgaIntersection>, 0, "(cg-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-mesh3d,mf-mesh3d)->cg-mesh3d;(mf-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-cross2d,cg-cross2d)->cg-cross2d;(cg-cross2d,mf-cross2d)->cg-cross2d;(mf-cross2d,cg-cross2d)->cg-cross2d" },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, &mkCalcT<cgaDifference>, 0, "(cg-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-mesh3d,mf-mesh3d)->cg-mesh3d;(mf-mesh3d,cg-mesh3d)->cg-mesh3d;(cg-cross2d,cg-cross2d)->cg-cross2d;(cg-cross2d,mf-cross2d)->cg-cross2d;(mf-cross2d,cg-cross2d)->cg-cross2d" },
-	{ "export",       EXPORT_IN, 3, AK_CACHE, &mkCalcT<cgaExport>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value;(mf-mesh3d)->value;(mf-cross2d)->value" },  /* 出力=D_REF。mf 入力も引受 (Stage2: export の読解 capability を sig 化・cgal は universal reader) */
+	{ "box",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaBox),          0, "->cg-mesh3d" },  /* leaf 3D 生成 (mesh 入力なし) */
+	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaBox), 0, "->cg-mesh3d" },  /* 寸法を array(構造 inline)で */
+	{ "import",       SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaImport), 0, "->cg-mesh3d;->cg-cross2d" },  /* import(path): 外部ファイル読み */
+	{ "prism",        SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaPrism), 0, "->cg-mesh3d" },
+	{ "pyramid",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaPyramid), 0, "->cg-mesh3d" },
+	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaSphere), 0, "->cg-mesh3d" },  /* sphere(r, seg): seg=円周分割数(既定 32 相当) */
+	{ "icosphere",    SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaIcosphere), 0, "->cg-mesh3d" },  /* icosphere(r, subdiv): subdiv=細分回数(既定0=20面) */
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(cgaUnion, cgMesh, cgMesh),        0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },  /* 二項 3D */
+	{ "combine",      BINMESH_IN,2, AK_CACHE, OPWIRE(cgaCombine, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },  /* +++ 交差許容の単純合体(viewer 用) */
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(cgaIntersection, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(cgaDifference, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d" },
+	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(cgaExport, cgMesh), 0, "(cg-mesh3d)->ref;(cg-cross2d)->ref;(mf-mesh3d)->ref;(mf-cross2d)->ref;(gg-mesh3d)->ref" },  /* 出力=D_REF。mf 入力も引受 (Stage2: export の読解 capability を sig 化・cgal は universal reader) */
 #ifdef SRAVA_HAVE_HDF5
-	{ "export_vox",   EXPORTVOX_IN,2,AK_CACHE, &mkCalcT<cgaVoxelize>, 1, "(cg-mesh3d)->value;(mf-mesh3d)->value" },  /* voxel化→vox.h5(出力=D_REF)。末尾メッシュ可変(variadic=1)。HDF5 必須・mf 入力も引受 */
+	{ "export_vox",   EXPORTVOX_IN,2,AK_CACHE, OPWIRE(cgaVoxelize, cgMesh), 1, "({cg-mesh3d,mf-mesh3d,gg-mesh3d}...)->ref" },  /* voxel化→vox.h5(出力=D_REF)。末尾メッシュ可変(variadic=1)。HDF5 必須。★#3436 P4: 繰り返し形 {…}… で混在受理を 1 行に明示 (旧 3 行 + sig_repeat_accepts の行跨ぎ合体) */
 #endif
-	{ "translate",    MESH1ARG_IN,2,AK_CACHE, &mkCalcT<cgaTranslate>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
-	{ "rotate",       ROTATE_IN, 3, AK_CACHE, &mkCalcT<cgaRotate>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
-	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, &mkCalcT<cgaMirror>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
-	{ "scale",        MESH1ARG_IN,2,AK_CACHE, &mkCalcT<cgaScale>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
-	{ "transform",    MESH1ARG_IN,2,AK_CACHE, &mkCalcT<cgaTransform>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
-	{ "color",        MESH1ARG_IN,2,AK_CACHE, &mkCalcT<cgaColor>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-mesh3d)->cg-mesh3d;(mf-cross2d)->cg-cross2d" },  /* 面色 f:color (mf 入力も引受=cgal 専用) */
-	{ "rect",         SHAPE2_IN, 2, AK_CACHE, &mkCalcT<cgaRect>,        0, "->cg-cross2d" },  /* leaf 2D 生成 */
-	{ "ngon",         SHAPE2_IN, 2, AK_CACHE, &mkCalcT<cgaNgon>, 0, "->cg-cross2d" },  /* 2D 正 n 角形 */
-	{ "circle",       SHAPE2_IN, 2, AK_CACHE, &mkCalcT<cgaCircle>, 0, "->cg-cross2d" },  /* circle(r, segs): segs=多角形辺数(既定32) */
-	{ "polygon",      SHAPE1_IN, 1, AK_CACHE, &mkCalcT<cgaPolygon>, 0, "->cg-cross2d" },  /* 2D 明示点列 */
-	{ "line",         SHAPE1_IN, 1, AK_CACHE, &mkCalcT<cgaLine>, 0, "->cg-cross2d" },  /* 2D ガイド(寸法線・開ポリライン) */
-	{ "extrude",      MESH1ARG_IN,2,AK_CACHE, &mkCalcT<cgaExtrude>,     0, "(cg-cross2d)->cg-mesh3d" },  /* 2D→3D 角柱 (次元変化・Q-C) */
-	{ "tube",         SHAPE2_IN, 2, AK_CACHE, &mkCalcT<cgaTube>, 0, "->cg-mesh3d;->cg-cross2d" },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (3D=掃引立体 / 2D=帯)。import と同じ多出力注釈 */
-	{ "revolve",      ROTATE_IN, 3, AK_CACHE, &mkCalcT<cgaRevolve>, 0, "(cg-cross2d)->cg-mesh3d" },  /* revolve(m,angle,segs): 2D→3D 回転体 */
-	{ "offset",       ROTATE_IN, 3, AK_CACHE, &mkCalcT<cgaOffset>,      0, "(cg-cross2d)->cg-cross2d;(cg-mesh3d)->cg-mesh3d;(mf-mesh3d)->cg-mesh3d" },  /* ★2D+3D + mf 3D の gap 埋め (manifold は 2D offset のみ・3D は cgal が引き受ける = 旧 coercion の明示 sig 化) */
-	{ "area",         MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaArea>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* area(m): 値返し(2D 面積 / 3D 表面積) */
-	{ "valid",        MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaValid>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* valid(m): 値返し(1=正常/0=問題) */
-	{ "repair",       MEASURE_IN,1, AK_CACHE, &mkCalcT<cgaRepair>, 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-mesh3d)->cg-mesh3d;(mf-cross2d)->cg-cross2d" },  /* repair(m): mesh 返し(3D autorefine / 2D even-odd)・mf 入力も引受 */
-	{ "section",      SECTION_IN,4, AK_CACHE, &mkCalcT<cgaSection>, 0, "(cg-mesh3d)->cg-cross2d" },  /* section(m,P,N,mode): mode 0=平面ちょうど/-1=直下/+1=直上 */
-	{ "empty2d",      0,         0, AK_CACHE, &mkCalcT<cgaEmpty2D>, 0, "->cg-cross2d" },  /* 空集合(2D)。{} は中立元なので別物 */
-	{ "empty3d",      0,         0, AK_CACHE, &mkCalcT<cgaEmpty3D>, 0, "->cg-mesh3d" },   /* 空集合(3D) */
-	{ "volume",       MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaVolume>,      0, "(cg-mesh3d)->value" },  /* 値出力 (out=value) */
-	{ "perimeter",    MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaPerimeter>, 0, "(cg-cross2d)->value;(mf-cross2d)->value" },  /* perimeter(m): 値返し(2D 境界長・3D エラー)・mf 入力も引受 */
-	{ "centroid",     MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaCentroid>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* centroid(m): 配列返し([x,y]/[x,y,z]) */
-	{ "bbox",         MEASURE_IN,1, AK_INLINE,&mkCalcT<cgaBbox>, 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* bbox(m): 入れ子配列返し([min隅,max隅]) */
-	{ "distance",     BINMESH_IN,2, AK_INLINE,&mkCalcT<cgaDistance>, 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value" },  /* distance(a,b): 値返し(3D 最近接距離・近似) */
-	{ "closest",      BINMESH_IN,2, AK_INLINE,&mkCalcT<cgaClosest>, 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value" },  /* closest(a,b): 配列返し([d,[pa],[pb]]) */
-	{ "farthest",     BINMESH_IN,2, AK_INLINE,&mkCalcT<cgaFarthest>, 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value" },  /* farthest(a,b): 配列返し(頂点総当り・厳密) */
-	{ "thin_spots",   THIN_IN,   4, AK_INLINE,&mkCalcT<cgaThinSpots>, 0, "(cg-mesh3d)->value;(mf-mesh3d)->value" },  /* thin_spots(m,t,rays,cone): 肉厚<t の面の[[x,y,z,thk],..](SDF・cone=コーン全角°)・mf 入力も引受 */
-	{ "cast",         CAST_IN,   2, AK_CACHE, &mkCalcT<cgaCast>,        0, "(cg-mesh3d)->cg-mesh3d;(mf-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-cross2d)->cg-cross2d" },  /* ★変換 op: identity + mf→cg 昇格。P2c: cast は sig 出力型で routing (目標型を産出できるモジュールへ) → 全出力型 (cg-mesh3d/cg-cross2d) を列挙 */
+	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaTranslate, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
+	{ "rotate",       ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaRotate, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
+	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaMirror, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
+	{ "scale",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaScale, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
+	{ "transform",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaTransform, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
+	{ "color",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaColor, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-mesh3d)->cg-mesh3d;(mf-cross2d)->cg-cross2d;(gg-mesh3d)->cg-mesh3d" },  /* 面色 f:color (mf 入力も引受=cgal 専用) */
+	{ "rect",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaRect),        0, "->cg-cross2d" },  /* leaf 2D 生成 */
+	{ "ngon",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaNgon), 0, "->cg-cross2d" },  /* 2D 正 n 角形 */
+	{ "circle",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaCircle), 0, "->cg-cross2d" },  /* circle(r, segs): segs=多角形辺数(既定32) */
+	{ "polygon",      SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaPolygon), 0, "->cg-cross2d" },  /* 2D 明示点列 */
+	{ "line",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaLine), 0, "->cg-cross2d" },  /* 2D ガイド(寸法線・開ポリライン) */
+	{ "extrude",      MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaExtrude, cgMesh),     0, "(cg-cross2d)->cg-mesh3d" },  /* 2D→3D 角柱 (次元変化・Q-C) */
+	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaTube), 0, "->cg-mesh3d;->cg-cross2d" },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (3D=掃引立体 / 2D=帯)。import と同じ多出力注釈 */
+	{ "revolve",      ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaRevolve, cgMesh), 0, "(cg-cross2d)->cg-mesh3d" },  /* revolve(m,angle,segs): 2D→3D 回転体 */
+	/* ★2D のみ (#3440 の 2): **3D offset は nef へ移設**した。3D の中身は Minkowski 和
+	 * (Nef + 凸分解) で、他の幾何カーネルの機能を借りて cgal の顔で出していた = モジュール境界の
+	 * 約束①違反だった (docs/srava_module_reference.md「モジュールの境界」章)。
+	 * 2D は straight skeleton (面取り) で Nef と無関係なので、ここに残る。 */
+	{ "offset",       ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaOffset, cgMesh),      0, "(cg-cross2d)->cg-cross2d" },
+	/* ★ #3443: 頂点数 / 面数。planner が cache のバイト列を直接読んで表示していたのを op へ移した。 */
+	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(cgaNverts, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },
+	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(cgaNfaces, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },
+	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(cgaArea, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* area(m): 値返し(2D 面積 / 3D 表面積) */
+	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(cgaValid, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* valid(m): 値返し(1=正常/0=問題) */
+	{ "repair",       MEASURE_IN,1, AK_CACHE, OPWIRE(cgaRepair, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-mesh3d)->cg-mesh3d;(mf-cross2d)->cg-cross2d;(gg-mesh3d)->cg-mesh3d" },  /* repair(m): mesh 返し(3D autorefine / 2D even-odd)・mf 入力も引受 */
+	{ "section",      SECTION_IN,4, AK_CACHE, OPWIRE(cgaSection, cgMesh), 0, "(cg-mesh3d)->cg-cross2d" },  /* section(m,P,N,mode): mode 0=平面ちょうど/-1=直下/+1=直上 */
+	{ "empty2d",      0,         0, AK_CACHE, OPWIRE(cgaEmpty2D), 0, "->cg-cross2d" },  /* 空集合(2D)。{} は中立元なので別物 */
+	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(cgaEmpty3D), 0, "->cg-mesh3d" },   /* 空集合(3D) */
+	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(cgaVolume, cgMesh),      0, "(cg-mesh3d)->value" },  /* 値出力 (out=value) */
+	{ "perimeter",    MEASURE_IN,1, AK_INLINE,OPWIRE(cgaPerimeter, cgMesh), 0, "(cg-cross2d)->value;(mf-cross2d)->value" },  /* perimeter(m): 値返し(2D 境界長・3D エラー)・mf 入力も引受 */
+	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(cgaCentroid, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* centroid(m): 配列返し([x,y]/[x,y,z]) */
+	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(cgaBbox, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },  /* bbox(m): 入れ子配列返し([min隅,max隅]) */
+	{ "distance",     BINMESH_IN,2, AK_INLINE,OPWIRE(cgaDistance, cgMesh, cgMesh), 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value;(cg-mesh3d,gg-mesh3d)->value;(gg-mesh3d,cg-mesh3d)->value;(gg-mesh3d,gg-mesh3d)->value" },  /* distance(a,b): 値返し(3D 最近接距離・近似) */
+	{ "closest",      BINMESH_IN,2, AK_INLINE,OPWIRE(cgaClosest, cgMesh, cgMesh), 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value;(cg-mesh3d,gg-mesh3d)->value;(gg-mesh3d,cg-mesh3d)->value;(gg-mesh3d,gg-mesh3d)->value" },  /* closest(a,b): 配列返し([d,[pa],[pb]]) */
+	{ "farthest",     BINMESH_IN,2, AK_INLINE,OPWIRE(cgaFarthest, cgMesh, cgMesh), 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value;(cg-mesh3d,gg-mesh3d)->value;(gg-mesh3d,cg-mesh3d)->value;(gg-mesh3d,gg-mesh3d)->value" },  /* farthest(a,b): 配列返し(頂点総当り・厳密) */
+	{ "thin_spots",   THIN_IN,   4, AK_INLINE,OPWIRE(cgaThinSpots, cgMesh), 0, "(cg-mesh3d)->value;(mf-mesh3d)->value;(gg-mesh3d)->value" },  /* thin_spots(m,t,rays,cone): 肉厚<t の面の[[x,y,z,thk],..](SDF・cone=コーン全角°)・mf 入力も引受 */
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(cgaCast, cgMesh),        0, "(cg-mesh3d)->cg-mesh3d;(mf-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-cross2d)->cg-cross2d;(gg-mesh3d)->cg-mesh3d"
+	                                                 ";(ch-mesh3d)->cg-mesh3d"     /* cherchi も MFM3 を名乗る = cg-mf-upgrade が読む */
+	                                                 ";(nfb-mesh3d)->cg-mesh3d"    /* cg-nf-downgrade: NEFB のみ (NEF3=SNC は読めないので申告しない) */ },  /* ★変換 op: identity + mf→cg 昇格。P2c: cast は sig 出力型で routing (目標型を産出できるモジュールへ) → 全出力型 (cg-mesh3d/cg-cross2d) を列挙 */
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -224,23 +233,32 @@ mk_cgatsAgent(sPtr<ptsObject> med)
  * manifest.cpp がこれを extern 参照して srava_module() で公開する。planner 側の meta-only 記述子
  * (pigfModuleAgent.cpp の cgal_module_descriptor) とは別物で、こちらは実行体 (agent) を含む。
  * OPS/mk_cgatsAgent は同一 TU の static なのでここで組む。exec_caps=PROCESS のみ (CGAL は
- * thread 不可)・priority=0 (< manifold 10)・拡張子は多形式。静的自己登録はしない (dlopen 時に
+ * thread 不可)・**priority=20 (> manifold 10) = cgal が既定カーネル** (下の記述子を参照)・
+ * 拡張子は多形式。静的自己登録はしない (dlopen 時に
  * ローダが register する / 静的 agent は従来どおり lookup(0) で引く)。 */
-extern const pigModuleCodec cgal_codecs[];   /* cgCacheCodec.cpp (Phase 4③') */
+extern const pigModuleType cgal_provides[];
 extern const srava_module_descriptor cgatsAgent_descriptor;
 const srava_module_descriptor cgatsAgent_descriptor = {
 	/* ★ .so 化 Phase 4c: priority 20 (> manifold 10) = **cgal を既定カーネルに** (ひさ判断
 	 * 2026-08-08: manifold は watertight 前提でサイレント破綻し得るため opt-in)。manifold は
 	 * cast("manifold",..) / module("manifold.so",{priority}) で明示選択する。 */
-	SRAVA_MODULE_ABI, "cgal", 20,
-	&mk_cgatsAgent, (unsigned)EXEC_PROCESS, EXEC_PROCESS,
-	OPS, N_OPS,
+	.abi_version   = SRAVA_MODULE_ABI,
+	.name          = "cgal",
+	.priority      = 20,
+	.make_agent    = &mk_cgatsAgent,
+	.exec_caps     = (unsigned)EXEC_PROCESS,
+	.exec_default  = EXEC_PROCESS,
+	.ops           = OPS,
+	.n_ops         = N_OPS,
 	/* ★ rev4 Phase C: import_exts を **型付き** ("ext:出力型") に。形式が出力型を決める (svg/dxf=2D・
 	 *   mesh 系=3D)。routing が import の出力型をこれで確定しスタンプする (polymorphic import 解消)。 */
-	"off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-cross2d",
-	"off,stl,obj,ply,3mf,amf,svg,dxf",   /* P2d: amf 追加 (型軸 export routing ② で解決させ arg_module fallback 依存を解消) */
-	"MESH,PLY2",   /* codec_tags: cgal がサポートする 4CC (mf の MFM3/MFC2 昇格読みは cgal_codecs の cg-mf-upgrade が担う) */
-	cgal_codecs,   /* reader/writer factory (自型 MESH/PLY2 + MFM3/MFC2 昇格読み) */
-	"cg-mesh3d,cg-cross2d", "MESH,PLY2",   /* types / type_tags (#3427 で manifest.cpp から移動) */
-	0,   /* hash_salt: 基準カーネルなのでソルト無し (既存キャッシュキーを byte 不変に保つ) */
+	.import_exts   = "off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-cross2d",
+	.export_exts   = "off,stl,obj,ply,3mf,amf,svg,dxf",   /* P2d: amf 追加 (型軸 export routing ② で解決させ arg_module fallback 依存を解消) */
+	.provides      = cgal_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+	.hash_salt     = 0,   /* 基準カーネルなのでソルト無し (既存キャッシュキーを byte 不変に保つ) */
+	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
+	 *   CGAL のブールは逐次。T1-d 実測でも TBB を引き込まない */
+	.initialize    = 0,   /* 無し */
+	.configure     = 0,   /* ★ v10 (#3441): opts フックは未使用(このモジュールは module() の
+	                       *   opts を消費しない) */
 };

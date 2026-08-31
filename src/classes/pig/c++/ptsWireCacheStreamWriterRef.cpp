@@ -34,7 +34,6 @@ public:
 
 	sRptr<ptsObject,tinyState>		parent;
 protected:
-	sPtr<pigData>	body;
 private:
 	TS_DEFARGS
 };
@@ -43,7 +42,7 @@ TS_END_IMPLEMENT
 
 TS_BEGIN_INTERFACE
 #include	"ts2/c++/sRptr.h"
-#include	"pig/c++/pigData.h"   /* sPtr<pigData> body 値メンバの完全型 */
+#include	"pig/c++/pigData.h"   /* sPtr<pigData> _body 値メンバの完全型 */
 class ptsObject;
 class stdString;
 class pigData;
@@ -57,7 +56,6 @@ ptsWireCacheStreamWriterRef_::ptsWireCacheStreamWriterRef_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    body = _body;
 }
 
 
@@ -74,7 +72,7 @@ TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* D_META"REF " + D_REF を 1 レ�
 	sPtr<stdString> path;
 	INTEGER64 size = 0, mtime = 0;
 	pHashKeyType chash = (pHashKeyType)0;
-	if ( pig_data_ref_get(body, &kind, &path, &size, &mtime, &chash) ) {
+	if ( pig_data_ref_get(_body, &kind, &path, &size, &mtime, &chash) ) {
 		if ( kind == PIG_DREF_INPUT )
 			d_ref_input(path, size, mtime, chash);
 		else

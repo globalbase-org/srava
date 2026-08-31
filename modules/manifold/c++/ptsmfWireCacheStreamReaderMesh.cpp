@@ -129,6 +129,9 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	src.r = this;
 	geom->decode(src);
 	if ( pullErr ) { errCode = -1; return rDO|FIN_START; }
+	/* ★ #3433: 形式は読めたが mf の表現力で受け取れない (SNC 形式の NEF3 等)。空 mesh を黙って
+	 *   返すと volume が 0 になるので、ここでエラーにする。 */
+	if ( geom->decode_failed() ) { errCode = -2; return rDO|FIN_START; }
 	result = geom;
 	return rDO|FIN_START;
 }

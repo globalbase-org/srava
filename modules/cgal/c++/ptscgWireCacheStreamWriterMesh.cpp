@@ -34,7 +34,6 @@ public:
 	/* cgaMeshCodec の Sink 窓口: 基底 protected の d_chunk を公開して直接ストリームさせる。 */
 	void	chunk(const uint8_t *data, int n);
 protected:
-	sPtr<cgMesh>	meshObj;
 private:
 	TS_DEFARGS
 };
@@ -57,7 +56,6 @@ ptscgWireCacheStreamWriterMesh_::ptscgWireCacheStreamWriterMesh_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    meshObj = _mesh;
 }
 
 
@@ -78,22 +76,22 @@ ptscgWireCacheStreamWriterMesh_::chunk(const uint8_t *data, int n)
 
 TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* D_META に形式タグ(mesh が供給。3D="MESH")を書く */
 {
-	if ( meshObj.is_notNull() )
-		write_d_meta((const uint8_t*)meshObj->meta_tag(), 4);
+	if ( _mesh.is_notNull() )
+		write_d_meta((const uint8_t*)_mesh->meta_tag(), 4);
 	else
 		write_d_meta((const uint8_t*)"MESH", 4);
 	return rDO|INI_ptsWireCacheStreamWriter_DONE;
 }
 TS_THREAD(ACT_START)                          /* mesh を D_CHUNK へストリーム書き込み(多態 encode) */
 {
-	if ( meshObj.is_notNull() ) {
+	if ( _mesh.is_notNull() ) {
 		/* chunk() を cgChunkSink にアダプトして mesh->encode() に渡す(次元非依存)。 */
 		struct Sink : cgChunkSink {
 			ptscgWireCacheStreamWriterMesh_ *w;
 			void chunk(const uint8_t *data, int n) { w->chunk(data, n); }
 		} sink;
 		sink.w = this;
-		meshObj->encode(sink);
+		_mesh->encode(sink);
 	}
 	return rDO|FIN_START;
 }

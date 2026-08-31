@@ -1,5 +1,5 @@
 #!/bin/sh
-# roll_min: std/roll.sra の回帰 (縮小版・約 1 分)。ctest からは -L slow で明示指定したときだけ走る。
+# roll_min: std/roll.sra の回帰 (縮小版・重い)。ctest からは -L slow で明示指定したときだけ走る。
 #   判定 (spiral 実測に基づく): ctrl と feasible は完全一致 / arc は ±1 許容 (round 済み整数なので
 #   真値が .5 近傍だと libm/FMA 差で振れうる) / clearViol は 0.003 完全一致。
 set -e

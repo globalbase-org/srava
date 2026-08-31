@@ -3,6 +3,8 @@
 //   出力: spiral_horn.3mf (テーパ反映の実形状。毎手上書き=最終形。カレントディレクトリ相対)。
 //
 // ★必須モジュール: pipe_proximity (`srava --modules` で確認できる)
+include "module/all.sra";       // #3452: cgal 等の実カーネルを一括ロード
+module("pipe_proximity.so", {}); // pipe_proximity は all.sra の対象外なので個別指定
 // ★所要時間: **real 8m48s / user 75m17s** (threads:21, parallel:1, 弧長 3000mm 到達=15手・実測値)
 //   重いので ctest には入れていない。回帰確認用の短縮版は test/ の roll_min (2手・約 1 分)。
 include "std/roll.sra";

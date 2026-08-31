@@ -13,6 +13,7 @@
  * compact は async で yield しうる(sException で本状態が再走)。prepared フラグで①〜④を一度だけ。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfApply_.h"
@@ -38,7 +39,6 @@ protected:
 	sPtr<pigEnvironment>	applyEnv;     /* params 束縛 + parent=captured env */
 	int			bodyDestroyed;   /* bodyClone へ destroy を転送済み(1 回だけ) */
 	int			argsDestroyed;   /* 実引数 args[1..] へ destroy を転送済み(1 回だけ) */
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -58,7 +58,8 @@ pigfApply_::pigfApply_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
+    /* ★ TS_CPARGS0 は撤去 (ひさ 2026-08-22): codegen が保存する _front は基底へ転送するだけで
+     * この派生では読まない。TS_DEFARGS ごと外して **ノードへの重複参照を作らない**。 */
     bodyDestroyed = 0;
     argsDestroyed = 0;
 }
@@ -84,28 +85,28 @@ TS_STATE(ACT_START)
 	 * 解決されるだけなので触らない。1 度だけ送り通常経路へ落とす。 */
 	if ( is_destroyed() && ! argsDestroyed ) {
 		argsDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] apply args: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] apply args: destroy 転送\n");
 		for ( int di = 1 ; di < args.length() ; ++di )
 			if ( args[di].is_notNull() ) args[di]->destroy();
 	}
 	if ( args.length() < 1 ) {                 /* 文法上ありえないが安全に */
-		front->set_result(thNEW(pigDataError,("apply: no callee",thNULL,1)));
+		_front->set_result(thNEW(pigDataError,("apply: no callee",thNULL,1)));
 		return rDO|FIN_START;
 	}
 	sPtr<pigData> c = args[0];
 	if ( c->is_error() ) {                     /* is_error() は compact ゲートウェイ(不動点解決) */
-		front->set_result(c->compact());
+		_front->set_result(c->compact());
 		return rDO|FIN_START;
 	}
 	/* lambda オブジェクト(params/body/env)が要るので compact して実体を取る。
 	 * compact() は result->compact() で不動点まで(varref→束縛→…→lambda 値)解決する。 */
 	sPtr<pigDataLambda> l = sPtr<pigDataLambda>::d_cast(c->compact());
 	if ( ! l.is_notNull() ) {                  /* lambda でない */
-		front->set_result(thNEW(pigDataError,("apply: callee is not a function",thNULL,1)));
+		_front->set_result(thNEW(pigDataError,("apply: callee is not a function",thNULL,1)));
 		return rDO|FIN_START;
 	}
 	if ( l->paramc() != args.length() - 1 ) {
-		front->set_result(thNEW(pigDataError,("apply: argument count mismatch",thNULL,1)));
+		_front->set_result(thNEW(pigDataError,("apply: argument count mismatch",thNULL,1)));
 		return rDO|FIN_START;
 	}
 	/* 実引数は **呼び出し側 env で評価**(call-by-value)してから束縛する。ここ(ACT_START)の
@@ -119,7 +120,7 @@ TS_STATE(ACT_START)
 	for ( int i = 0 ; i < l->paramc() ; ++i ) {
 		sPtr<pigData> av = args[i+1];
 		if ( av->is_error() ) {            /* caller env で評価(副作用でメモ化)+ エラーなら伝播 */
-			front->set_result(av);
+			_front->set_result(av);
 			return rDO|FIN_START;
 		}
 		ne->def_var(l->param(i), av);
@@ -135,13 +136,13 @@ TS_STATE(ACT_pigfApply_DO)
 {
 	/* ★ destroy の転送 (ひさ設計 2026-08-11)。`bodyClone` は **自分だけが持つ複製** なので、
 	 * 呼び元の AST (planner の tree) からは辿れない = ここで明示的に送るしかない。
-	 * 無条件巡回はしない (destroy の順序は所有者が知っている): args は front の持ち物なので触らず、
+	 * 無条件巡回はしない (destroy の順序は所有者が知っている): args は _front の持ち物なので触らず、
 	 * clone した body だけを畳む。★**1 度だけ**送って通常経路へ落とす — destroy された子は
-	 * FIN_pigfFunction_START が front をエラー解決するので、下の compact がそれを拾って
+	 * FIN_pigfFunction_START が _front をエラー解決するので、下の compact がそれを拾って
 	 * この apply も畳まれる (毎回送って return 0 にすると永久に先へ進めない)。 */
 	if ( is_destroyed() && ! bodyDestroyed ) {
 		bodyDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] apply: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] apply: destroy 転送\n");
 		if ( bodyClone.is_notNull() )
 			bodyClone->destroy();
 	}
@@ -153,7 +154,7 @@ TS_STATE(ACT_pigfApply_DO)
 	else if ( ck == CTRL_BREAK || ck == CTRL_CONTINUE )   /* ループ外の break/continue */
 		r = thNEW(pigDataError,( ck == CTRL_BREAK ? "break outside loop"
 		                                          : "continue outside loop", thNULL ));
-	front->set_result(r);
+	_front->set_result(r);
 	return rDO|FIN_START;
 }
 

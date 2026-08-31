@@ -103,6 +103,18 @@ mfCross::op_difference(sPtr<mfCross> b)
 /* ---- 計測 ---- */
 double mfCross::op_area() { return c_.Area(); }
 
+/* ---- 計測: 頂点数 / 面数 (#3443)。2D は面を持たないので 0。 ---- */
+int
+mfCross::op_nverts()
+{
+	manifold::Polygons ps = c_.ToPolygons();
+	int n = 0;
+	for ( size_t i = 0 ; i < ps.size() ; ++i ) n += (int)ps[i].size();
+	return n;
+}
+
+int mfCross::op_nfaces() { return 0; }
+
 int
 mfCross::op_bbox(double mn[3], double mx[3])
 {

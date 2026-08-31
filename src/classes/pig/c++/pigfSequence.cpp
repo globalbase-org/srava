@@ -9,6 +9,7 @@
  * 前の文の def_var を後の文の変数参照が見られる。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfSequence_.h"
@@ -33,7 +34,6 @@ protected:
 	int		seqIdx;
 	int		seqDestroyed;   /* 評価中の文へ destroy を転送済み(1 回だけ) */
 	sPtr<pigData>	seqLast;
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -52,7 +52,6 @@ pigfSequence_::pigfSequence_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     seqIdx = 0;
     seqDestroyed = 0;
 }
@@ -77,11 +76,11 @@ TS_STATE(ACT_START)   /* 文を 1 つずつ順に評価(async 文は yield → �
 {
 	/* ★ destroy の転送 (ひさ設計 2026-08-11)。無条件巡回はせず、**いま評価中の文だけ**を畳む
 	 * (未着手の文は走っていないので触る必要がない = 順序は所有者が知っている)。1 度だけ送り、
-	 * あとは通常経路へ落とす — destroy された子は FIN_pigfFunction_START が front をエラー解決
+	 * あとは通常経路へ落とす — destroy された子は FIN_pigfFunction_START が _front をエラー解決
 	 * するので、下の is_error() がそれを拾ってこの sequence も打ち切られる。 */
 	if ( is_destroyed() && ! seqDestroyed ) {
 		seqDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] sequence: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] sequence: destroy 転送\n");
 		if ( seqIdx < args.length() && args[seqIdx].is_notNull() )
 			args[seqIdx]->destroy();
 	}
@@ -91,7 +90,7 @@ TS_STATE(ACT_START)   /* 文を 1 つずつ順に評価(async 文は yield → �
 	 * seqIdx 据え置きで再走→同じ文を再評価(解決済みは即返る)→ 前進。エラーなら即その値で打ち切り。 */
 	seqLast = args[seqIdx];
 	if ( seqLast->is_error() ) {
-		front->set_result(seqLast);
+		_front->set_result(seqLast);
 		return rDO|FIN_START;
 	}
 	seqIdx++;
@@ -103,7 +102,7 @@ TS_STATE(ACT_pigfSequence_DONE)
 	/* 最後の文の値を結果に(空シーケンスは null)。 */
 	if ( seqLast == thNULL )
 		seqLast = thNEW(pigDataNull,());
-	front->set_result(seqLast);
+	_front->set_result(seqLast);
 	return rDO|FIN_START;
 }
 

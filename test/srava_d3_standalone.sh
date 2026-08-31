@@ -24,11 +24,15 @@ cp "$SRAVA" "$WORK/$SRAVA_BIN" || { echo "D3_STANDALONE_FAIL: cp srava";       e
 cp "$AGENT" "$WORK/$AGENT_BIN" || { echo "D3_STANDALONE_FAIL: cp srava_agent"; exit 1; }
 cp "$D3SO"  "$WORK/$D3_BIN"    || { echo "D3_STANDALONE_FAIL: cp d3 module";   exit 1; }
 # ★ PE には RPATH が無い: 共有 libpig.dll は exe と同 dir 必須 (ELF は build RPATH で解決 = copy 不要)。
-for dll in "$(dirname "$SRAVA")"/libpig*.dll; do [ -f "$dll" ] && cp "$dll" "$WORK/"; done
+# ⚠ 共有ライブラリの命名は環境で違う: MinGW=libpig*.dll / Cygwin=cygpig*.dll。
+# 片方だけ見ると、当たらない側で pig を持ち込めず srava が起動できない。
+for dll in "$(dirname "$SRAVA")"/libpig*.dll "$(dirname "$SRAVA")"/cygpig*.dll; do
+	[ -f "$dll" ] && cp "$dll" "$WORK/"
+done
 
 # 隔離 dir に d3 以外のカーネルモジュールが無いことを確認 (cgal/manifold を持ち込んでいない)。
 # libpig*.dll はモジュールではない (SRAVA_MODULE_SYM 無し) ので除外。
-if ls "$WORK"/*.so "$WORK"/*.dll 2>/dev/null | grep -vE '/(d3\.(so|dll)|libpig[^/]*\.dll)$' | grep -q .; then
+if ls "$WORK"/*.so "$WORK"/*.dll 2>/dev/null | grep -vE '/(d3\.(so|dll)|(lib|cyg)pig[^/]*\.dll)$' | grep -q .; then
 	echo "D3_STANDALONE_FAIL: unexpected module in isolated dir: $(ls "$WORK"/*.so "$WORK"/*.dll 2>/dev/null)"; exit 1
 fi
 
@@ -36,8 +40,10 @@ CACHE="$WORK/cache"
 mkdir -p "$CACHE"
 
 # d3 だけで mesh 往復: d3_cube(s)→mesh・d3_merge→連結(16v/24f)・d3_nfaces/d3_nverts→値。
-# priority opt-in 不要 (d3 が唯一のカーネル = 既定 + d3 op は d3 owner へ op-owner routing)。
+# ★ #3452: 起動時 eager-load 撤去に伴い module("d3.so",{}) が必須(以前は暗黙ロードだった)。
+# priority opt-in は不要 (d3 が唯一のカーネル = 既定 + d3 op は d3 owner へ op-owner routing)。
 OUT=$(cd "$WORK" && SRAVA_AGENT="$WORK/$AGENT_BIN" SRAVA_CACHE_DIR="$CACHE" SRAVA_SOURCE='
+module("d3.so", {});
 var m = d3_merge(d3_cube(1), d3_cube(2));
 var ok = 0;
 if (d3_nfaces(m) == 24) { if (d3_nverts(m) == 16) { ok = 1; } }

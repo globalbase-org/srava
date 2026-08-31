@@ -29,6 +29,19 @@ ctest --test-dir build            # the test suite must stay green
 Preserving the **core ↔ kernel boundary** is the most important review criterion: the core
 must not gain a compile-time dependency on any geometry kernel.
 
+## Style rules worth knowing
+
+- **User-visible strings are written in English** — error messages, warnings and diagnostics that a
+  user of `srava` can see. Source comments stay in Japanese; this rule is only about the text that
+  leaves the program. (Established 2026-08-26; the codebase was already almost entirely English.)
+- **Modules must not keep mutable file-scope statics.** With in-process execution several ops of the
+  same module can live in one process, so module-global state gets mixed up between them. Keep
+  per-module state in the registry slot instead (`set_module_data` / `module_data`), and write failure
+  reasons into a buffer supplied by the caller. See `docs/srava_module_design.md` §5.3 / §5.4.
+- **Never fall back silently.** If something cannot be resolved (an unknown extension, a format that
+  no codec can write, a type that cannot be converted), raise an error rather than quietly picking
+  something else. Silent fallbacks have twice produced results that looked right and were not.
+
 ## Proposing changes
 
 1. Open an issue describing the change (bug, feature, or kernel/module addition).

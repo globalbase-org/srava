@@ -239,8 +239,23 @@ cgptsLemonParser_::do_include(const char *path)
 	if ( ! found && osglue_realpath(path, canon) )
 		found = canon;
 	if ( ! found ) {
-		char msg[PATH_MAX + 64];
-		::snprintf(msg, sizeof msg, "include: cannot find \"%s\"", path);
+		/* ★ どこを探したかを言う。探索路は ①元ファイルの dir ②$SRAVA_PATH ③コンパイル時 SRAVA_LIBDIR
+		 * ④そのまま、の 4 つあり、「見つからない」だけでは打ち手が決まらない。特に $SRAVA_PATH 未設定の
+		 * ビルドツリーでは ③ が install 済みの別世代を指すので、実際に見た場所を挙げないと切り分かない。 */
+		const char *sp = ::getenv("SRAVA_PATH");
+		char msg[PATH_MAX * 2 + 256];
+		::snprintf(msg, sizeof msg,
+			   "include: cannot find \"%s\" (searched: dir of including file, "
+			   "$SRAVA_PATH=%s"
+#ifdef SRAVA_LIBDIR
+			   ", %s"
+#endif
+			   ")",
+			   path, (sp && *sp) ? sp : "(unset)"
+#ifdef SRAVA_LIBDIR
+			   , SRAVA_LIBDIR
+#endif
+			   );
 		return thNEW(pigDataError,(thNEW(stdString,(msg)), tok_info()));
 	}
 	/* once-guard: 既に include 済みならスキップ(続行) */

@@ -24,6 +24,7 @@
  *   言語パーサ (cgptsLemonParser) を agent 側にリンクする必要がなくなった。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"
 #include	"ts2/c++/tsApplication.h"    /* ctor の parent 型 sPtr<tsApplication> */
 #include	<stdlib.h>                   /* getenv: PIG_TEST_ERR_AFTER_SAVE (テスト用注入) */
@@ -133,7 +134,12 @@ int
 ptsAgentApplication_::enable_body()
 {
 	/* ★ #3427 ③: app 所有レジストリから引く (このプロセスの唯一の登録 = INI でロードした .so)。 */
-	pigAgentFactory f = ( module_registry != thNULL ) ? module_registry->agents.lookup(0) : 0;
+	/* ★ #3419 §7.5: agent プロセス側でも同じ initialize() の流れが要る (planner だけでは
+	 * process 実行のモジュールが初期化されない)。積んでいる .so は 1 本なので名前は 0 で引く。 */
+	if ( module_registry != thNULL ) {
+		module_registry->ensure_initialized(0);
+	}
+	pigAgentFactory f = ( module_registry != thNULL ) ? module_registry->agent_factory(0) : 0;
 	if ( f == 0 )
 		return -1;
 	sPtr<tinyState> self = ifThis;
@@ -265,6 +271,21 @@ ptsAgentApplication_::forward_packet(sPtr<ptsWirePacket> pkt)
 		type = C_ARG_DATA;   /* PATH/INLINE の弁別は消える (実行体は is_cache() で見る) */
 		break;
 	}
+	case C_ENV: {
+		/* ★ #3441 (ひさ設計 2026-08-26): module(so,{opts}) のハッシュ全体。**実行体 (agent) へは
+		 * 転送しない** — これはモジュールの初期化に相当する話 (initialize と同じ扱い) であって、
+		 * 個別 op の引数ではない。ここで直接 module_registry を上書きし、その場で configure()
+		 * を呼んで完結させる (「planner と同じ方法で上書きする」)。
+		 * module==0 の引き方は enable_body() の ensure_initialized(0)/agent_factory(0) と同じ
+		 * (このプロセスが積んでいるモジュールは 1 本だけ)。 */
+		if ( n > 0 && module_registry != thNULL ) {
+			sPtr<stdString> text = thNEW(stdString,((const char*)&pkt->payload[0], 0, n));
+			sPtr<pigData> opts = pig_value_parse(text->get_str());   /* 失敗なら pigDataError */
+			if ( opts.is_notNull() && !opts->is_error() )
+				module_registry->set_and_apply_opts(0, opts);
+		}
+		return;   /* agent (op 実行体) へは転送しない */
+	}
 	default:
 		return;   /* agent 側で意味を持たないレコードは無視 */
 	}
@@ -356,7 +377,7 @@ TS_STATE(ACT_ptsAgentApplication_SAVEBEGIN)   /* メタ書込済 = 下流が att
 	 * planner はキャッシュハンドルで受け取る。値 (D_TEXT) は serialize を相乗りさせる。
 	 * 判定は保存時に選ばれた writer と同一基準 (pigCacheCodec::is_stream_body)。 */
 	sPtr<pigData> body = outCache->get_body();
-	if ( body != thNULL && module_registry != thNULL && ! module_registry->codecs.is_stream_body(body) )
+	if ( body != thNULL && module_registry != thNULL && ! module_registry->is_stream_body(body) )
 		wire_write(A_SAVE_BEGIN, body);
 	else
 		wire_write(A_SAVE_BEGIN, thNULL);
@@ -371,7 +392,7 @@ TS_STATE(ACT_ptsAgentApplication_SAVEDONE)   /* 本体まで書き終わった�
 	 * 根 (union) のみに限定 (box まで巻き込むと cascade abort で検証点が曖昧になる)。
 	 * §5/§6 で保存の見届けが実行体から親へ移ったので、注入点も cgatsAgent/mfatsAgent の
 	 * SAVEWRITEWAIT からここへ移設した。 */
-	if ( ::getenv("PIG_TEST_ERR_AFTER_SAVE") != 0
+	if ( osglue_env_int("PIG_TEST_ERR_AFTER_SAVE", 0)
 	     && opName != thNULL && ::strcmp(opName->get_str(), "union") == 0 ) {
 		wire_write(A_ERROR, thNEW(pigDataError,("injected error after save (test)")));
 		return rDO|ACT_ptsAgentApplication_WEND;

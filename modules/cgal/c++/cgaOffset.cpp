@@ -77,9 +77,10 @@ cgaOffset_::compute()
 	mesh = in->op_offset(d, subdiv);   /* 多態: 2D=skeleton / 3D=Minkowski(球。d<0 は補集合トリック) */
 	if ( ! mesh.is_notNull() )
 		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "offset failed: 入力が単純多角形でない(自己交差・重複頂点・零長エッジ)か、"
-		    "退化形状の可能性。valid() で確認し repair() で修復するか、輪郭を見直してください "
-		    "(曲線を concat した継ぎ目の重複は polygon が間引きます)"))));
+		    "offset failed: the input is probably not a simple polygon (self-intersection, "
+		    "duplicate vertices, zero-length edges) or is degenerate. check it with valid() and "
+		    "fix it with repair(), or revise the outline (polygon() thins out duplicates at the "
+		    "seams left by concatenating curves)"))));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

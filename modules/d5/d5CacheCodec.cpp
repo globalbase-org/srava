@@ -42,10 +42,21 @@ d5_match_never(sPtr<pigData>)
 
 /* ★ descriptor.codecs が指す配列 (name==0 番兵終端)。d5atsAgent.cpp が extern 参照。
  *   d5-mf-upgrade は MFM3 (Manifold mesh) を d5-mesh3d として読む cross reader = ⑤ 変換の実体。
- *   reader_for(MFM3, "d5-mesh3d") がこれを選ぶ (out_type でフィルタ・mf 自身の MFM3 読みは非干渉)。 */
-extern const pigModuleCodec d5_codecs[];
-const pigModuleCodec d5_codecs[] = {
-	{ "d5-mesh",       "D5M3", "d5-mesh3d", &d5_match,       &d5_mk_reader, &d5_mk_writer },
-	{ "d5-mf-upgrade", "MFM3", "d5-mesh3d", &d5_match_never, &d5_mk_reader, 0             },  /* MFM3→d5 昇格読み */
-	{ 0, 0, 0, 0, 0, 0 },
+ *   reader_for(MFM3, "d5-mesh3d") がこれを選ぶ (types でフィルタ・mf 自身の MFM3 読みは非干渉)。 */
+/* ★ 2026-08-28 (ABI v12): この階層への配線先。reader は下の codec 行が使うものと同一 —
+ *   どの行 (自型読み / foreign 昇格読み) でも reader は 1 本で、階層に帰属するため。 */
+PIG_WIRE_DEF(d5Mesh, d5_mk_reader, d5_mk_writer);
+
+/* ★ 2026-08-28 (ひさ設計・ABI v16): このモジュールが提供するもの。
+ *   1 行 = (本体クラス階層, その階層について名乗る型名, 扱う 4CC)。
+ *   ⚠ **types と tags は位置対応しない** (独立した 2 本・個数も一致しない)。どのタグがどの型に
+ *     なるかは申告せず、wire->create に通して訊く (pigModule.h の pigModuleType 参照)。
+ *   ⚠ tags は **診断専用** — 読めるかを答えるのは wire->create 一本で、この欄は
+ *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
+extern const pigModuleType d5_provides[];
+const pigModuleType d5_provides[] = {
+	{ &d5Mesh::WIRE, "d5-mesh3d",
+	  "D5M3,MFM3" },
+	{ 0, 0, 0 },
 };
+

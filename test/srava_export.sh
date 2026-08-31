@@ -4,6 +4,11 @@
 SRAVA="$1"
 FMT="${2:-off}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★ #3452: 起動時 eager-load 撤去に伴い、box() の実行に実カーネルの明示ロードが要る。
+export SRAVA_MODULE_ALL=1
+# include "module/all.sra" の解決に要る(cmake ENVIRONMENT が SRAVA_PATH を設定していないため)。
+SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
+export SRAVA_PATH
 OUT="$D.$FMT"
 # native srava と MSYS sh で /tmp の解決先が食い違う(C:\tmp vs C:\msys64\tmp)。export パスは
 # SRAVA_SOURCE 内リテラルとして native srava に渡るので、Windows では cygpath で両者一致の native 形へ。

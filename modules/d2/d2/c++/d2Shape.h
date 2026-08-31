@@ -13,6 +13,7 @@
  *   型軸: 型名 "d2-shape2d" ↔ 4CC タグ "D2S2" (1:1)。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<stdint.h>
 #include	<vector>
 
@@ -37,6 +38,11 @@ public:
 
 	static sPtr<d2Shape> square(double s);                 /* 原点隅の s×s 正方形 (4 点) */
 	static sPtr<d2Shape> create_for_meta(const uint8_t *meta, int len);
+
+	/* ★ 2026-08-28 (ABI v12): **この階層への配線先**。op の OPS 行が OPWIRE(Calc, d2Shape) と
+	 *   書くと、引数はこの WIRE 経由で実体化される。create_for_meta が 4CC を受理判定し、
+	 *   mkReader がこの階層の stream reader を起こす。定義は d2CacheCodec.cpp。 */
+	static const pigWireClass WIRE;
 
 protected:
 	std::vector<double> pts_;

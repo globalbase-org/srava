@@ -210,6 +210,25 @@ int main(void)
     CHECK(b->compact()->get_int() == 1);
   }
 
+  /* --- ★ 2026-08-19: キャッシュの型は **型スタンプだけ** (routing の唯一の根拠) ---
+   * routing (arg_type_set) は「継続 pair のスタンプ / キャッシュの type_stamp()」しか見ない。
+   * 以前はキャッシュだけ **ファイルの 4CC から型を引き直して**いたため、MISS (継続) と
+   * HIT (キャッシュ) で型の出どころが違い、cold と warm で routing が変わりうる状態だった。
+   * ★キャッシュは **型を名乗らない** (type_name() の override は撤去した)。形式 (4CC) は
+   * 複数モジュールが共有してよいので、そこから型を 1 つ引く API は必ずどこかで嘘をつく。
+   * 形式を主語にした診断は describe() が持ち、型を見せるときは**読める型を全部**列挙する。 */
+  {
+    sPtr<pigDataCache> c = thNEW(pigDataCache, ((pHashKeyType)12345, S("/nonexistent/srava-test-cache")));
+    CHECK(c->type_stamp() == thNULL);            /* 素の状態ではスタンプ無し */
+    CHECK(c->type_name() == 0);                  /* cache は型を名乗らない (基底の 0) */
+    CHECK(c->is_stream_cache() == 0);            /* 形式不明はストリーム扱いしない */
+    c->set_type_stamp(S("gg-mesh3d"));
+    CHECK(c->type_stamp() != thNULL &&
+          ::strcmp(c->type_stamp()->get_str(), "gg-mesh3d") == 0);
+    /* ★スタンプを載せても type_name() は 0 のまま = 「型を名乗る」のはスタンプの仕事。 */
+    CHECK(c->type_name() == 0);
+  }
+
   /* --- ハッシュキー: 同値同ハッシュ / 型違いは別ハッシュ(typeid 分離) --- */
   CHECK(I(5)->get_hashkey() == I(5)->get_hashkey());
   CHECK(I(5)->get_hashkey() != Str("5")->get_hashkey());

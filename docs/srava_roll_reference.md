@@ -16,19 +16,19 @@ title: srava roll ライブラリ リファレンス
 >
 > | キー | 推奨 | 理由 |
 > |---|---|---|
-> | `parallel` | `1` | 事実上必須。`0` だと 1 solve が ~150 秒かかり、実用サイズでは 1 時間級になる |
+> | `parallel` | `1` | 事実上必須。`0` だと 1 solve が桁違いに遅く、実用サイズでは現実的な時間で終わらない |
 > | `wSpace` | `0.1` | 区間長の正則化。入れないと自由尾の制御点が 1 点に寄り、gap が 1mm 級まで潰れる |
 >
-> 例: `{maxIter:100, threads:21, parallel:1, wSpace:0.1}`
+> 例: `{maxIter:100, threads:<コア数>, parallel:1, wSpace:0.1}`
 >
-> **実行時間の目安**（実測・threads:21 / parallel:1）: 弧長 3000mm 到達（15 手）で
-> **real 8m48s / user 75m17s**。短時間の回帰用に 2 手だけ回す縮小版が `test/roll_min.sra`（約 80 秒）
+> ⚠ **重い**（弧長 3000mm 到達＝15 手のフル実行は、並列を効かせても分単位かかる）。
+> 短時間の回帰用に 2 手だけ回す縮小版が `test/roll_min.sra`
 > にあり、`cmake -DSRAVA_SLOW_TESTS=ON` で ctest に登録される（既定は非登録）。
 
 
 芯パイプ（マンドレル）に**太さの変化するパイプを密接に沿わせて巻きつけ**、螺旋バックロードホーン
 （BLH）などを生成する継続法アルゴリズムのライブラリ。`pipe_proximity` / `pipe_scene_adjust`
-（[**プラグインリファレンス**](srava_plugin_reference.html)）を土台に、`.sra` で実装する。
+（[**関数リファレンス**](srava_function_reference.html#pipe-proximity)）を土台に、`.sra` で実装する。
 
 ```
 include "std/roll.sra";     // 標準ライブラリに追加した場合
@@ -162,4 +162,4 @@ include "roll.sra";         // 利用ディレクトリに置いた場合
   `m≈0.0004` でフル3周、`m≈0.0008` で弧長 3m 級 BLH ホーン、`m=0.001` は約1.7周で
   巻き管が芯を大きく上回りクリアランス破綻。
 - 内部ピン `params.fixed`（index 配列）は外力下でも固定点を保持する（host 修正 2026-07-30, Redmine #3408）。
-- 巻き工程は `params.parallel:1`（`threads` 併用）で回す。`parallel:0` は本問題で ~150s/solve と激遅。
+- 巻き工程は `params.parallel:1`（`threads` 併用）で回す。`parallel:0` は本問題では桁違いに遅い。

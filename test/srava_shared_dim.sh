@@ -25,10 +25,14 @@ cp "$SRAVA" "$WORK/$SRAVA_BIN" || { echo "SHARED_DIM_FAIL: cp srava";       exit
 cp "$AGENT" "$WORK/$AGENT_BIN" || { echo "SHARED_DIM_FAIL: cp srava_agent"; exit 1; }
 cp "$D2SO"  "$WORK/$D2_BIN"    || { echo "SHARED_DIM_FAIL: cp d2 module";   exit 1; }
 cp "$D3SO"  "$WORK/$D3_BIN"    || { echo "SHARED_DIM_FAIL: cp d3 module";   exit 1; }
-for dll in "$(dirname "$SRAVA")"/libpig*.dll; do [ -f "$dll" ] && cp "$dll" "$WORK/"; done
+# ⚠ 共有ライブラリの命名は環境で違う: MinGW=libpig*.dll / Cygwin=cygpig*.dll。
+# 片方だけ見ると、当たらない側で pig を持ち込めず srava が起動できない。
+for dll in "$(dirname "$SRAVA")"/libpig*.dll "$(dirname "$SRAVA")"/cygpig*.dll; do
+	[ -f "$dll" ] && cp "$dll" "$WORK/"
+done
 
 # 隔離 dir に d2 / d3 以外のカーネルモジュールが無いこと (libpig*.dll は非モジュールなので除外)。
-if ls "$WORK"/*.so "$WORK"/*.dll 2>/dev/null | grep -vE '/((d2|d3)\.(so|dll)|libpig[^/]*\.dll)$' | grep -q .; then
+if ls "$WORK"/*.so "$WORK"/*.dll 2>/dev/null | grep -vE '/((d2|d3)\.(so|dll)|(lib|cyg)pig[^/]*\.dll)$' | grep -q .; then
 	echo "SHARED_DIM_FAIL: unexpected module in isolated dir: $(ls "$WORK"/*.so "$WORK"/*.dll 2>/dev/null)"; exit 1
 fi
 
@@ -39,6 +43,8 @@ mkdir -p "$CACHE"
 #   dcount(d3_cube(1))  → d3 (3D・頂点数 8)
 #   dcount(d2_square(1))→ d2 (2D・点数   4)
 OUT=$(cd "$WORK" && SRAVA_AGENT="$WORK/$AGENT_BIN" SRAVA_CACHE_DIR="$CACHE" SRAVA_SOURCE='
+module("d2.so", {});
+module("d3.so", {});
 var c3 = dcount(d3_cube(1));
 var c2 = dcount(d2_square(1));
 var ok = 0;

@@ -8,6 +8,7 @@
 #include	"mf/c++/mfMesh.h"
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	<stdio.h>
 #include	"_ts2/c++/mfaUnion_.h"
 
 CLASS_TINYSTATE(mf/c++/mfaUnion,pig/c++/ptsCalcBody)
@@ -65,19 +66,14 @@ mfaUnion_::mfaUnion_(TS_ARGS0)
 void
 mfaUnion_::compute()
 {
-	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<pigData> a = ( na > 0 ) ? (*args)[0] : sPtr<pigData>();
-	sPtr<pigData> b = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
-	sPtr<mfMesh>  a3 = sPtr<mfMesh>::d_cast(a),  b3 = sPtr<mfMesh>::d_cast(b);
-	sPtr<mfCross> a2 = sPtr<mfCross>::d_cast(a), b2 = sPtr<mfCross>::d_cast(b);
-	if ( a3.is_notNull() && b3.is_notNull() )      geom = a3->op_union(b3);   /* 3D */
-	else if ( a2.is_notNull() && b2.is_notNull() ) geom = a2->op_union(b2);   /* 2D */
-	else {
-		result = thNEW(pigDataError,(thNEW(stdString,("union: needs two meshes"))));
-		return;
+	/* ★ #3436 P4: n 項で受ける。3 項以上は BatchBoolean (1 つの CSG ノード) へ。 */
+	const char *msg = 0;
+	geom = mf_bool_from_args(args, "union", &msg);
+	if ( ! geom.is_notNull() ) {
+		char b[128];
+		::snprintf(b, sizeof b, "union: %s", msg ? msg : "boolean failed");
+		result = thNEW(pigDataError,(thNEW(stdString,(b))));
 	}
-	if ( ! geom.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("union: boolean failed"))));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

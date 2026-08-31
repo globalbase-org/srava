@@ -21,6 +21,7 @@
  *   ERROR    : err (pigDataError) を set_result → FIN (ワイヤ化は親 Mediator の役割)。
  */
 #include	"pig/c++/ptsObject.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型 */
 #include	"pig/c++/ptsAgent.h"         /* 基底 (演算実行体) */
 #include	"pig/c++/pigData.h"
@@ -28,6 +29,7 @@
 #include	"pig/c++/pigwire.h"
 #include	"pig/c++/ptsMediatorPacket.h"     /* Internal 経路の pigData 直渡しパケット */
 #include	"pig/c++/ptsDataCache.h"
+#include	"pig/c++/pigModuleRegistry.h"   /* 非幾何型の判定 (op を持たないモジュールの型) */
 #include	"pig/c++/ptsCalcBody.h"
 #include	"ts2/c++/stdEvent.h"
 #include	"ts2/c++/stdString.h"
@@ -43,28 +45,6 @@
 
 CLASS_TINYSTATE(pig/c++/ptsGenericAgent,pig/c++/ptsAgent)
 
-/* ★ P3 (⑤ cross-module 変換): この agent が **消費できる型のリスト** (= 自 op の sig 出力型のうち
- *   幾何型 "value" 以外・重複除去) を集める。これを入力キャッシュに渡すと、キャッシュが自分の 4CC から
- *   reader_for で読める候補を選ぶ (pigDataCache::get_body(wantTypes,n))。次元概念・型選択ロジックは
- *   ここには無い (キャッシュ側が 4CC で解決) = ptsGenericAgent は mesh/次元に非依存のまま。 */
-static void pgts_consumable_types(const pigOpEntry* ops, int nops, std::vector<std::string>& out) {
-	for ( int i = 0 ; i < nops ; ++i ) {
-		const char* sig = ops[i].sig;
-		if ( sig == 0 ) continue;
-		for ( const char* p = ::strstr(sig, "->") ; p != 0 ; p = ::strstr(p, "->") ) {
-			p += 2;
-			const char* e = ::strchr(p, ';');
-			std::string t(p, e ? (size_t)(e - p) : ::strlen(p));
-			if ( t != "value" && ! t.empty() ) {
-				bool seen = false;
-				for ( size_t k = 0 ; k < out.size() ; ++k ) if ( out[k] == t ) { seen = true; break; }
-				if ( ! seen ) out.push_back(t);
-			}
-			if ( e == 0 ) break;
-			p = e + 1;
-		}
-	}
-}
 
 /* PIG_TIMING にファイルパスを設定すると各フェーズ境界の経過 ms をそこへ追記する (性能内訳計測用)。
  * agent は sh -c 経由起動で stderr が親に届かないためファイル出力 (旧 mfts_timing/cgts_timing を統一)。 */
@@ -96,6 +76,7 @@ protected:
 	virtual const pigOpEntry*	agent_ops();     /* 既定 0 (基底は直接使わない) */
 	virtual int			agent_n_ops();   /* 既定 0 */
 	virtual const char*		agent_name();    /* エラーメッセージ用。既定 "agent" */
+	/* env から整数キーを引く補助。無ければ def を返す (派生が使う)。 */
 
 	int	lookup_op(const char* name);   /* agent_ops()/agent_n_ops() を検索。無=-1 */
 
@@ -209,8 +190,11 @@ TS_STATE(ACT_ptsGenericAgent_WAIT)
 				err = thNEW(pigDataError,(b));
 				return rDO|ACT_ptsGenericAgent_ERROR;
 			}
-			if ( ( idx < e.nin ? e.in[idx] : AK_CACHE ) != kind ) {
-				const char* want = ( ( idx < e.nin ? e.in[idx] : AK_CACHE ) == AK_CACHE ) ? "a mesh" : "a value (number/array)";
+			/* ★ #3436 P4: 可変部の種別は記述子の vtail_value が決める (既定 0 = mesh)。
+			 *   planner 側 (pigfModuleAgent::arg_kind_violation) と同じ規則。 */
+			pigArgKind wantK = ( idx < e.nin ) ? e.in[idx] : ( e.vtail_value ? AK_INLINE : AK_CACHE );
+			if ( wantK != kind ) {
+				const char* want = ( wantK == AK_CACHE ) ? "a mesh" : "a value (number/array)";
 				const char* got  = ( kind == AK_CACHE ) ? "a mesh" : "a value";
 				char b[192];
 				::snprintf(b, sizeof b, "%s: argument %d should be %s, got %s",
@@ -265,39 +249,55 @@ TS_STATE(ACT_ptsGenericAgent_STARTCALC)   /* 全入力が揃った → 計算本
 {
 	pgts_timing("parse_done", timingT0);
 	/* テスト用: 計算を遅くして planner の SIGINT が評価中に確実に届くようにする。 */
-	if ( ::getenv("PIG_TEST_SLOW") != 0 )
+	if ( osglue_env_int("PIG_TEST_SLOW", 0) )
 		::usleep(200000);
 	/* cache 引数を get_body で実体化 = ランデブー収束点。未ロードの引数があれば get_body が
 	 * listen+sException で抜け、helper の TSE_DESTROY でこの状態が再走する (冪等)。TS_STATE で
 	 * 実体化してから渡すのは「TS_THREAD(compute)内から pigDataCache に触らない」(WSM-FgT) ため。 */
 	cargs.length(argv.length());
-	/* ★ P3 (⑤ cross-module 変換): この agent が消費できる型リスト (自 op の sig 出力型) を 1 度だけ集める。
-	 *   各入力キャッシュにこれを渡すと、キャッシュが自分の 4CC から reader_for で読める候補を選び、必要なら
-	 *   file を変換読みして返す (pigDataCache::get_body(wantTypes,n))。型選択は cache 側 (4CC)・agent は
-	 *   「欲しい型」を渡すだけ。次元概念なし。 */
-	std::vector<std::string> wantS;
-	pgts_consumable_types(agent_ops(), agent_n_ops(), wantS);
-	std::vector<const char*> wantC;
-	for ( size_t k = 0 ; k < wantS.size() ; ++k ) wantC.push_back(wantS[k].c_str());
+	/* ★ 2026-08-28 (ひさ設計・ABI v12): **引数ごとに、配線された本体クラスで実体化する**。
+	 *   OPS 行の OPWIRE(Calc, In...) が「この op の cache 引数 k は In[k] として受け取る」を宣言する。
+	 *   In[k] は計算本体が compute() で d_cast するクラスそのものなので、宣言がずれればコンパイルが落ちる。
+	 *   ★ 旧実装はモジュール全体で 1 本の型リストを作って全入力に配っていた (pgts_consumable_types)。
+	 *     そのリストは「sig の出力型の和集合」または「codec の writer 行」から導いていたが、どちらも
+	 *     消費型の定義になっていない — 出力型からは表現クラスをまたぐ op (occt_mf の triangulate) が
+	 *     取りこぼれ、codec からは writer を持たない検査専用 / reader を持たない生成専用 /
+	 *     codec を持たないモジュールが導けない。配線なら引数ごとに正確で、op ごとに閉じる。 */
+	const pigOpEntry&  oe = agent_ops()[opIdx];
+	const pigOpWiring* wr = oe.wiring;
+	int nCache = 0;                      /* cache 引数の通し番号 (AK_INLINE は数えない) */
 	for ( int i = 0 ; i < argv.length() ; ++i ) {
 		if ( argv[i] != thNULL && argv[i]->is_cache() ) {
 			sPtr<pigDataCache> ic = sPtr<pigDataCache>::d_cast(argv[i]);
 			/* canonical が自 module 型ならそのまま (in-memory fast path)・foreign なら 4CC から自型へ変換読み。
 			 * in-proc/process 同一経路 (process は canonical reader が既に自型へ整えている・in-proc は
 			 * in-memory body を bypass して file 変換)。 */
-			cargs[i] = ic->get_body(wantC.empty() ? 0 : &wantC[0], (int)wantC.size());
+			/* 可変長 op (union(a,b,c,…)) の尾部は **最後の配線を繰り返す**。 */
+			const pigWireClass* wf = 0;
+			if ( wr != 0 && wr->nwant > 0 )
+				wf = wr->want[ ( nCache < wr->nwant ) ? nCache : ( wr->nwant - 1 ) ];
+			++nCache;
+			cargs[i] = ic->get_body(wf);
 			if ( cargs[i] == thNULL ) {
-				char b[192];
+				/* ★ #3433: 「cache race」と決めつけない。get_body が null になる主因は
+				 *   (a) この形式を欲しい型へ変換できる codec が無い
+				 *   (b) 形式は読めたが **その型では表現できない値** (例: 非有界な Nef を cg-mesh3d へ)
+				 *   (c) 本当に cache が壊れている/競合、の 3 つ。入力の自己記述 (describe) と
+				 *   欲しい型を並べて切り分けられるようにする。 */
+				sPtr<stdString> what = ic->describe();
+				char b[320];
 				::snprintf(b, sizeof b,
-				    "%s: input %d failed to read/decode its cache (possible cache race — try clearing the cache dir or rerun)",
-				    agent_ops()[opIdx].op, i + 1);
+				    "%s: input %d: cannot materialize %s as the type this operand is wired to "
+				    "(no codec accepts this format / the value cannot be represented in that type / "
+				    "the producing module stores it in a form the target module cannot parse)",
+				    oe.op, i + 1, what->get_str());
 				err = thNEW(pigDataError,(b));
 				return rDO|ACT_ptsGenericAgent_ERROR;
 			}
 		} else
 			cargs[i] = argv[i];
 	}
-	calc = agent_ops()[opIdx].mkCalc(ifThis, &cargs, outCache->get_path());
+	calc = wr->mkCalc(ifThis, &cargs, outCache->get_path());
 	return ACT_ptsGenericAgent_CALC;
 }
 
@@ -350,3 +350,5 @@ TS_STATE(FIN_START)
 	cargs.length(0);
 	return rDO|FIN_ptsAgent_START;
 }
+
+

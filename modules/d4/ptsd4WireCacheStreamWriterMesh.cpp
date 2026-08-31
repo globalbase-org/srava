@@ -28,7 +28,6 @@ public:
 	/* d4Mesh の Sink 窓口: 基底 protected の d_chunk を公開して直接ストリームさせる。 */
 	void	chunk(const uint8_t *data, int n);
 protected:
-	sPtr<d4Mesh>	meshObj;
 private:
 	TS_DEFARGS
 };
@@ -51,7 +50,6 @@ ptsd4WireCacheStreamWriterMesh_::ptsd4WireCacheStreamWriterMesh_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    meshObj = _mesh;
 }
 
 
@@ -72,21 +70,21 @@ ptsd4WireCacheStreamWriterMesh_::chunk(const uint8_t *data, int n)
 
 TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* D_META に形式タグ "D4M3" を書く */
 {
-	if ( meshObj.is_notNull() )
-		write_d_meta((const uint8_t*)meshObj->meta_tag(), 4);
+	if ( _mesh.is_notNull() )
+		write_d_meta((const uint8_t*)_mesh->meta_tag(), 4);
 	else
 		write_d_meta((const uint8_t*)"D4M3", 4);
 	return rDO|INI_ptsWireCacheStreamWriter_DONE;
 }
 TS_THREAD(ACT_START)                          /* mesh を D_CHUNK へストリーム書き込み */
 {
-	if ( meshObj.is_notNull() ) {
+	if ( _mesh.is_notNull() ) {
 		struct Sink : d4ChunkSink {
 			ptsd4WireCacheStreamWriterMesh_ *w;
 			void chunk(const uint8_t *data, int n) { w->chunk(data, n); }
 		} sink;
 		sink.w = this;
-		meshObj->encode(sink);
+		_mesh->encode(sink);
 	}
 	return rDO|FIN_START;
 }

@@ -77,7 +77,7 @@ cgaColor_::compute()
 	int r = 150, g = 150, b = 150;
 	if ( ! srava_color::parse_spec(spec, r, g, b) ) {
 		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "color: 2nd arg は名前(\"red\"…) / \"#RRGGBB\" / [r,g,b](0-255) のいずれか"))));
+		    "color: 2nd arg must be a name (\"red\"...), \"#RRGGBB\", or [r,g,b] (0-255)"))));
 		mesh = thNEW(cgMesh3D,());
 		return;
 	}

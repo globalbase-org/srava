@@ -100,7 +100,7 @@ cgaPolygon_::compute()
 		verts.pop_back();
 	if ( verts.size() < 3 ) {
 		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "polygon: needs >= 3 distinct points (重複頂点を除くと 3 点未満)"))));
+		    "polygon: needs >= 3 distinct points (fewer than 3 remain after removing duplicates)"))));
 		return;
 	}
 	cgMesh2D::Polygon_2 p(verts.begin(), verts.end());

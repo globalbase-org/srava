@@ -20,15 +20,17 @@
 /* 1 ファイルを開いて末尾の W_END 番兵まで歩く。
  *   戻り 1=完了(番兵あり)、0=未完(番兵なし)、-1=不正(PWIG ヘッダでない/短すぎ)。
  *   pid_out!=0 なら streamhdr の writer_pid を返す(完了/未完のとき有効)。 */
-static int cache_has_end(FILE *f, uint32_t *pid_out)
+static int cache_has_end(FILE *f, uint32_t *pid_out, uint64_t *start_out)
 {
 	uint8_t hdr[WIRE_STREAMHDR_SIZE];
 	if ( ::fread(hdr, 1, WIRE_STREAMHDR_SIZE, f) != (size_t)WIRE_STREAMHDR_SIZE )
 		return -1;
 	uint32_t pid = 0;
-	if ( wire_check_streamhdr(hdr, &pid) != WIRE_OK )
+	uint64_t start = 0;
+	if ( wire_check_streamhdr(hdr, &pid, &start) != WIRE_OK )
 		return -1;
 	if ( pid_out ) *pid_out = pid;
+	if ( start_out ) *start_out = start;
 	for ( ;; ) {
 		uint8_t rh[WIRE_RECHDR_SIZE];
 		if ( ::fread(rh, 1, WIRE_RECHDR_SIZE, f) != (size_t)WIRE_RECHDR_SIZE )
@@ -100,7 +102,7 @@ static int cache_ref_file_missing(const char *cachePath)
  * 件数サマリ([pig] startup sweep / exit cleanup: N 個)は常に出す。 */
 /* ★ #3427 ④: 旧・関数内 static の getenv キャッシュ (write-once の可変 static) を廃し都度読む。
  * sweep は起動時 1 回の低頻度パスなので getenv 直読みで十分。 */
-static int sweep_verbose() { return ( ::getenv("PIG_DEBUG") != 0 ); }
+static int sweep_verbose() { return ( osglue_env_int("PIG_DEBUG", 0) ); }
 
 /* CACHE_DIR の *.cache を掃除。戻り = 削除数。
  *   used==0 (起動時スイープ): 死体(番兵なし & writer_pid not live / 不正ヘッダ)のみ削除。完了は残す。
@@ -137,7 +139,8 @@ static int sweep_cache_dir(const char *dir, const INTEGER64 *used, int nused,
 		if ( f == 0 )
 			continue;
 		uint32_t pid = 0;
-		int hasEnd = cache_has_end(f, &pid);
+		uint64_t wstart = 0;
+		int hasEnd = cache_has_end(f, &pid, &wstart);
 		::fclose(f);
 		if ( hasEnd == 1 ) {
 			/* 完了キャッシュ。 */
@@ -164,8 +167,10 @@ static int sweep_cache_dir(const char *dir, const INTEGER64 *used, int nused,
 			}
 			continue;
 		}
-		/* 未完(0)/不正ヘッダ(-1)= 死体候補。未完は writer_pid live なら別プロセス書込中 → 残す。 */
-		int alive = ( hasEnd == 0 ) ? osglue_pid_exists(pid) : 0;
+		/* 未完(0)/不正ヘッダ(-1)= 死体候補。未完は writer が生きていれば書込中 → 残す。
+		 * ★ 「生きている」は **pid と起動時刻の両方**で見る (2026-08-26)。pid だけだと OS の
+		 *   使い回しで無関係なプロセスを writer と誤認し、この死体を残してしまう。 */
+		int alive = ( hasEnd == 0 ) ? osglue_pid_alive_as(pid, wstart) : 0;
 		if ( alive == 1 )
 			continue;
 		if ( ::unlink(path) == 0 ) {
@@ -239,6 +244,37 @@ int pigCacheManager::exit_sweep(const char *dir, const INTEGER64 *used, int nuse
                                 int retain_mode, INTEGER64 cutoff_epoch)
 {
 	return sweep_cache_dir(dir, used, nused, retain_mode, cutoff_epoch);
+}
+
+/* dir を舐めて *.cache を分類集計する。判定は sweep と同じ cache_has_end(番兵まで歩く)。
+ * 読むだけで一切消さない。dir が無ければ全部 0。 */
+int pigCacheManager::count_caches(const char *dir, int *complete, int *incomplete, int *broken)
+{
+	int nc = 0, ni = 0, nb = 0;
+	DIR *d = ::opendir(dir);
+	if ( d != 0 ) {
+		struct dirent *e;
+		while ( (e = ::readdir(d)) != 0 ) {
+			const char *nm = e->d_name;
+			size_t L = ::strlen(nm);
+			if ( L < 6 || ::strcmp(nm + L - 6, ".cache") != 0 )
+				continue;
+			char path[1024];
+			::snprintf(path, sizeof path, "%s/%s", dir, nm);
+			FILE *f = ::fopen(path, "rb");
+			if ( f == 0 ) { nb++; continue; }
+			int hasEnd = cache_has_end(f, 0, 0);
+			::fclose(f);
+			if ( hasEnd == 1 )      nc++;
+			else if ( hasEnd == 0 ) ni++;
+			else                    nb++;
+		}
+		::closedir(d);
+	}
+	if ( complete )   *complete   = nc;
+	if ( incomplete ) *incomplete = ni;
+	if ( broken )     *broken     = nb;
+	return nc;
 }
 
 void pigCacheManager::make_path(char *buf, size_t bufsz, const char *dir, INTEGER64 h)

@@ -1,5 +1,6 @@
 #ifndef PIGDATA_H
 #define PIGDATA_H
+#include "pig/c++/pigOpEntry.h"   /* pigWireFactoryFn (配線 get_body) */
 /*
  * pigData — srava の値/式 DAG ノード(軽パス)
  *
@@ -45,8 +46,11 @@ enum { PDC_MODE_SAVE = 0, PDC_MODE_LOAD = 1, PDC_MODE_LOAD_CONV = 2 };
 /* ★ P4 修正 (conv リスト化): target_type を factory 引数に追加。LOAD_CONV のとき「どの型へ変換読みするか」を
  *   **helper 自身が不変に保持**する (共有 conv スロットの単一 convType を廃止 → 異型同時要求の競合を根絶)。
  *   SAVE/LOAD では thNULL。 */
+/* ★ 2026-08-28 (ABI v12): wire = **この引数に配線された本体クラス** (0 可)。非 0 なら reader は
+ *   そのクラスのものを直に起こす (型名で codec 表を引き直さない)。target_type は converted[] の
+ *   dedup キーとして残る。 */
 typedef sPtr<tinyState> (*pigDataCacheHelperFn)(sPtr<tinyState> starter, sPtr<pigDataCache> cache, int mode,
-                                               sPtr<stdString> target_type);
+                                               sPtr<stdString> target_type, const pigWireClass* wire);
 /* ★ #3427 ③: 旧 pigDataCache_set_helper_factory (プロセスグローバルのフック登録) は撤去。
  * 生成子は app 所有レジストリ (pigModuleRegistry::set_pdc_helper) が持ち、ptsApplication の
  * INI が ptsDataCache_helper() を登録する。 */
@@ -121,12 +125,6 @@ public:
    * string はクォート、float は必ず小数点、array/hash は再帰直列。ソースとワイヤで共有する正準形。 */
   virtual sPtr<stdString> serialize();
   virtual pHashKeyType    get_hashkey();     /* typeid + get_str の FNV-1a */
-
-  /* trigger() — 評価結果を待たずに「起動だけ」する(並列 spark)。値ノードは何もしない。
-   * 遅延ノード(pigDataDelay)は start()=helper 起動を蹴るだけで result は待たない。
-   * 全 args を評価する同期演算子(Add/Eq 等)が _start 頭で全 args を trigger すると、
-   * volume(a)==volume(b) のような独立 op の agent が逐次でなく並列に走る。 */
-  virtual void trigger() {}
 
   /* 四則(型依存): a.OP(b)=b->p_OP(a の生値)。既定は非対応エラー。エラーは pigDataError が短絡 */
   virtual sPtr<pigData> add(sPtr<pigData>);
@@ -239,15 +237,6 @@ public:
    * clone() と違い葉を複製しない(メッシュ継続を clone すると再計算/dedup 喪失になるため)。
    * 既定 = 自分返し(不変値)。pigDataArray/pigDataHash のみ override(要素を再帰 capture_copy)。 */
   virtual sPtr<pigData> capture_copy() { return thThis; }
-
-  /* 静的正規化(1.2.3 可変ソート)。parse 直後にプランナーが tree->normalize() を呼ぶ。
-   * 評価(compact/dispatch)を起こさず AST を書き換える純静的パス。
-   * recipe_hash() = 評価を起こさない構造ハッシュ(可換 op の引数ソートキー)。値は get_hashkey
-   * でよい(値の get_hashkey は評価不要)。遅延 op は pigDataOperator で構造ハッシュに override。
-   * normalize() = 子を再帰正規化し、可換 op(union/intersection)の引数を recipe_hash 順に並べ替える
-   * (a|||b と b|||a を同一キャッシュキーに → 再利用)。値/葉は no-op。 */
-  virtual pHashKeyType recipe_hash() { return get_hashkey(); }
-  virtual void         normalize() {}
 
   /* print(x) ビルトイン用の表示文字列。既定は get_str()。pigDataDelay でゲートウェイ化
    * (未解決の遅延/継続なら compact で解決まで yield)、pigDataPair は継続 cdr を辿る。
@@ -449,10 +438,35 @@ public:
   virtual pHashKeyType    get_hashkey()   { return hashkey; }
   virtual int             is_cache()      { return 1; }
   sPtr<stdString>         get_path()      { return path; }
-  /* ★ rev4 Phase B: キャッシュ本文の **実装型名** (in-memory body / D_META 4CC → type_of_tag)。mesh でない/
-   *   未登録タグは 0。plan 時の型ディスパッチ (decide_executor) が HIT 入力の型を非ブロッキングに知るのに使う。
-   *   ★ P2e: 旧 get_module_tag (カーネル軸: cache の所属 module) は撤去。routing は型軸 (type_name) のみ。 */
-  virtual const char*     type_name();
+  /* ★ 2026-08-19: 旧 type_name() override (先頭 D_META の 4CC → 型名) は **撤去**した。
+   *   cache は基底の type_name() = 0 (型を名乗らない)。理由:
+   *     ① routing は型スタンプ (type_stamp) だけを見るようになり、呼ぶ人が居なくなった
+   *     ② 4CC → 型の逆引きは「同じ形式を複数モジュールが名乗ったら先勝ち」で**嘘をつく**
+   *        (形式を共有するのは正常。例: geogram と manifold はどちらも "MFM3")
+   *     ③ 基底 type_name() の意味は **型名** (本文が名乗る実装型) で、cache だけ形式名を返すと
+   *        同じ virtual に 2 つの意味が同居する
+   *   形式 (4CC) を主語にした診断は describe() が担い、そこは「その形式を読めるモジュールが
+   *   出せる型を**全部**」列挙する (先勝ちで 1 つ選ばない)。 */
+  /* ★ 2026-08-19: **型スタンプ** — 継続 pair の car に載るものと **同じ文字列**
+   *   (単一型 "cg-mesh3d" / 多候補 CSV "d3-mesh3d,d3-cross2d")。プランナがこのノードの
+   *   出力型として計画したもの。
+   *   ★これを持たせないと **cold と warm で routing が変わる**: MISS では継続 pair に
+   *   スタンプが載るのに、HIT では生のハンドルが返り、下流が 4CC から型を引き直していた
+   *   (4CC が型と 1:1 でなくなった瞬間に別カーネルへ静かに流れる。実測で確認)。
+   *   ★routing はこのスタンプ **だけ** を見る。**無ければエラー** (4CC へのフォールバックは
+   *   しない — 「たまたま引けた型」で走ってしまうのを禁じる・ひさ設計 2026-08-19)。 */
+  void                    set_type_stamp(sPtr<stdString> t) { typeStamp = t; }
+  sPtr<stdString>         type_stamp() const { return typeStamp; }
+  /* この cache が **ストリーム本体** (mesh 等) を指しているか。値キャッシュ (D_META "TEXT") と
+   * 形式不明 (未書込 / ファイル不在) は 0。routing が「型スタンプが無いのは異常か」を判定するのに使う
+   * (値キャッシュは型を持たないのが正常なので区別が要る)。非ブロッキング。 */
+  int                     is_stream_cache();
+  /* ★ #3433: 診断用の自己記述 ("形式 'NEF3'" / 引けたときは "形式 'NEF3' = 型 'nf-mesh3d'" /
+   *   値キャッシュは "値 (形式 'TEXT')")。cache の識別は 4CC と型名の 2 段だが、**4CC は
+   *   どのプロセスでも読める / 型名は per-binary** (その .so を積んだ実行体しか引けない) という
+   *   非対称がある。呼び出し側がこれを毎回書くと判別ロジックが散るのでここへ閉じ込める。
+   *   非ブロッキング (peek_tag は同期 read・未メタ/file 不在なら形式不明)。必ず何か返す。 */
+  sPtr<stdString>         describe();
 
   /* ★ in-memory body(#3406, 2026-0727 メモ §2 / 2026-07-29 メモ 3. で抽象化完成):
    *   ディスク上のキャッシュ本文と等価なデータ(mesh/値)をメモリ上に持ち回る。
@@ -475,8 +489,24 @@ public:
    *   「mesh cache に value は無い」等も特殊ケースでなくこの規則の帰結。
    *   単型版 = 候補 1 個・無引数版 = 候補 {"value"} (A_SAVE_BEGIN payload 判定用) の退化形。 */
   sPtr<pigData> get_body();
-  sPtr<pigData> get_body(const char* type);
-  sPtr<pigData> get_body(const char* const* wantTypes, int n);
+  /* ★ 2026-08-28 (ABI v12): 型名で欲しい型を並べる公開 overload
+   *   (get_body(const char*) / get_body(const char* const*, int)) は **撤去**した。
+   *   呼び手は配線版 1 つだけになり、型名は配線クラスの type_name() から出る。 */
+
+  /* ★ 2026-08-28 (ひさ設計・ABI v12): **配線された本体クラスで実体化する** get_body。
+   *   want = op の引数に配線された本体クラスの create_for_meta (pigOpEntry.h の pigWireFactoryFn)。
+   *   この file の 4CC を渡して「そのクラスが受け取れるか」を訊き、受け取れるなら**返ってきた
+   *   具象インスタンスの type_name()** を欲しい型として上の実装へ渡す。
+   *   ★ 型名の一覧をモジュールから申告させる必要がない (旧 pgts_consumable_types / types_of_module) —
+   *     欲しい型は op が d_cast するクラスそのもので、そのクラスだけが知っている。
+   *   want == 0 (幾何を要求しない引数) は無変換の get_body() と同じ。
+   *   受け取れない形式なら thNULL (呼び側が明示エラーにする)。 */
+  sPtr<pigData> get_body(const pigWireClass* want);
+
+private:
+  /* 上の 2 つの実装本体。wire != 0 なら reader をその階層に固定する (配線経路)。 */
+  sPtr<pigData> get_body_impl(const char* const* wantTypes, int n, const pigWireClass* wire);
+public:
   int           is_valid();
   /* ★ A_SAVE_BEGIN 受信 (= 生産者の「メタ書込済」宣言) を planner 側ハンドルへ反映する。
    *   External 生産者は planner 側に writer helper がいないため、これが唯一の valid 成立経路
@@ -524,6 +554,7 @@ private:
                                            失敗は「メタ未書込かも」なので焼き込まない = 毎回再読) */
   unsigned char tagMemo[4];             /* peek_tag の成功メモ (tagKnown=1 のとき有効) */
   int  tagKnown = 0;
+  sPtr<stdString> typeStamp;            /* ★ 2026-08-19: 型スタンプ (set_type_stamp) */
 };
 
 class pigDataArray : public pigData {
@@ -703,8 +734,6 @@ public:
    * 束縛ノード、sequence→最終文ノード等)へ再帰する = compact() が辿るのと同じ連鎖。
    * result が値ノード(継続 pigDataPair 等)なら基底の no-op で止まる。 */
   virtual void          destroy();
-  /* 並列 spark: 起動だけ蹴る(result は待たない)。start() は冪等(start_flag)なので二度押し安全。 */
-  virtual void          trigger() { start(); }
 protected:
   /* _start を先に実行し、**正常完了してから** start_flag を立てる。_start が yield(sException)した
    * 場合は flag が立たないので、再走で _start を再実行できる(非同期引数を読む同期演算子=Eq/Export
@@ -748,12 +777,23 @@ public:
    * 将来はパーサ/dispatch が op シグネチャから設定。既定 0 = 値(インライン)。 */
   void set_out_cache(int c) { out_cache = c; }
   int  get_out_cache() { return out_cache; }
-  virtual pHashKeyType recipe_hash();   /* 構造ハッシュ(typeid+op_name+各 arg の recipe_hash。評価なし) */
-  virtual void         normalize();     /* 子を再帰正規化 + 可換 op の引数を recipe_hash 順にソート */
   /* clean() — result 確定後に args/helper のポインタを切り、生成元 DAG(巨大インライン配列等)を解放。
    * result は保持(観測でこれを返す)。clone は未評価テンプレートに対してのみ起こる(評価済みノードは
    * 再 clone されない)ので args を落として安全。同期 op は _start 末尾、agent helper は FIN で front->clean()。 */
   virtual void clean() { args.length(0); helper = thNULL; }
+  /* ★ #3419 (ひさ設計 2026-08-24): **引数を並列に解決し始める**。
+   * 全 args を compact し、未解決の yield (sException) は**握って次の引数へ進み**、最後に投げ直す。
+   * ⇒ 1 回目の compact で **全ての引数の計算が起動される** = 並列。
+   *   `preprocess()` は throw の**前に** caller を helper の listener に登録し、listen は加算なので、
+   *   呼び手は全 helper の listener になり、どれかの完了で起こされる (前進が保証される)。
+   * ★ これが「早く、解決された引数が欲しい」の直接の実装。**起動の入口は _start ただ 1 つ**になる。
+   *
+   * 返り値: **左優先で最初に確定したエラー** (無ければ thNULL)。呼び手はこれを result にして
+   *   早期リターンできる (どうせ捨てる右側の計算を起動しない)。
+   *   ⚠ 「それより左が全て解決済み」のときだけ返すので、**どのエラーが報告されるかは決定的**。
+   *
+   * ⚠ 逐次に意味がある op は呼んではいけない (pigfSequence / Hash の兄弟キー参照など)。 */
+  sPtr<pigData> spark_args();
 protected:
   /* clone 共通: args を deep clone して n に積み、op_name/out_cache を引き継ぐ(n は新ノード=
    * 未評価。delay 状態 result/start_flag/helper はコピーしない)。各 operator 派生の clone から呼ぶ。 */
@@ -934,24 +974,49 @@ protected:
   virtual void _start();
 };
 
-/* load(so) — カーネル/プラグイン .so を探索路 (docs §1.3) からロードする planner 側 op (agent 不要・
- * .so 化 Phase 4b)。冪等 (dlopen refcount + registry 後勝ち)。結果 = モジュール名 (文字列)。 */
-class pigDataOperatorLoad : public pigDataOperator {
-public:
-  pigDataOperatorLoad(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
-  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorLoad,())); }
-protected:
-  virtual void _start();
-};
-
-/* module(so[, {exec_default, priority}]) — .so をロードし設定を上書きする planner 側 op (docs §2.4)。
+/* module(so[, opts]) — **記述子の設定を上書きする** planner 側 op (docs §2.4)。指定されたモジュールが
+ * 未ロードなら読み込む。★ロード順は変えない (上書き op なので)。
+ *   引数 1 個:    module(so, {}) と同じ (ロードのみ・記述子は触らない)
+ *   "off":        **実アンロード** (dlclose)。以後 module(so,{}) で読み直せる。文字列オプションは
+ *                 これだけ ("on" は無い)。未ロード / 既に使われたモジュールへの off は明示エラー
  *   exec_default: "thread" / "process" (このモジュールの起動方式)
- *   priority:     既定カーネル選択順 (大=優先・「今ロードした扱い」で後勝ち)
+ *   priority:     既定カーネル選択順 (大=優先・**同点の勝敗は不定**)
  * 結果 = モジュール名。DEFAULT_OUTPUT 変数 / SRAVA_INPROC env の置換 (.so 化 Phase 4)。 */
 class pigDataOperatorModule : public pigDataOperator {
 public:
   pigDataOperatorModule(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModule,())); }
+protected:
+  virtual void _start();
+};
+
+/* module_loaded(so) — その .so が **いまロードされているか** (1/0)。
+ * ★ 2026-08-28 (ひさ指摘): module(so,"off") が実アンロードになり、未ロードへの off は
+ *   明示エラーになったので、落とす前に確かめる手段が要る。
+ *   引数は module() と同じ書き方 (名前だけなら探索路から解決する)。 */
+class pigDataOperatorModuleLoaded : public pigDataOperator {
+public:
+  pigDataOperatorModuleLoaded(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModuleLoaded,())); }
+protected:
+  virtual void _start();
+};
+
+/* <op>(...) — 55 個のハードコード builtin(box/union/…)以外の呼び出し名を、eval 時に
+ * module op として実行するか、ローカル変数の lambda 適用として実行するかを選ぶ (#3452)。
+ *   args[0] = module op 枝 (mk_call が組み立てる pigfModuleAgent ノード)
+ *   args[1] = lambda 変数 apply 枝 (同じく mk_call が組み立てる varref+pigfApply ノード)
+ * op_name (set_op_name で刻む) を pig_current_registry()->any_supports_op() に問い合わせ、
+ * true なら args[0]・false なら args[1] だけを compact する(選ばれなかった枝は評価しない=
+ * 副作用なし)。判定内容自体は旧 mk_call の parse 時チェックと同じ — 呼ばれるタイミングが
+ * eval 時 (= script 内で先行する module() が実行済みの時点) に変わっただけ。
+ * ★ pigDataOperator は「_start が例外で抜けたら start_flag が立たず、次回呼び出しで
+ * _start ごとやり直す」設計 (pigData.h の start() 参照) なので、compact() の yield は
+ * ここでは何も気にせず素通しでよい(pigDataOperatorArray 等と同じ作法)。 */
+class pigDataOperatorCallResolve : public pigDataOperator {
+public:
+  pigDataOperatorCallResolve(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorCallResolve,())); }
 protected:
   virtual void _start();
 };
@@ -998,7 +1063,9 @@ protected:
 /* 代入モード(pigfAssign が参照)。
  *  DEF: var あり → def_var(現スコープに新エントリを作る。シャドウ可)
  *  SET: var なし → set_var(既存エントリを上方探索して更新。無ければエラー) */
-enum { PIG_ASSIGN_DEF = 0, PIG_ASSIGN_SET = 1 };
+/* 代入モード。DEF_LIST = 分割代入 `var [a,b,c] = 式;`
+ * (args[0] = 名前の pigDataArray・args[1] = 右辺。右辺の配列要素を順に def_var する) */
+enum { PIG_ASSIGN_DEF = 0, PIG_ASSIGN_SET = 1, PIG_ASSIGN_DEF_LIST = 2 };
 
 class pigDataFunction_b : public pigDataOperator {
 public:
@@ -1020,8 +1087,19 @@ public:
   }
 protected:
   virtual void _start() {
-    /* 現在の状態機械(caller)を実態親に、自分(=front)を渡して helper を起動 */
-    helper = thNEW(__TYPE, (sPtr<ptsObject>::d_cast(sCallSection::key->caller()), thThis));
+    /* 現在の状態機械(caller)を実態親に、自分(=front)を渡して helper を起動。
+     * ★ #3419 (ひさ指示 2026-08-24): caller を**そのまま d_cast しない**。
+     * ⚠ `ts2Parallel` の worker はコルーチンで **`ptsObject` ではない**ため、そこから
+     *   helper を作ると parent が null になり落ちる (実測: pigfMap の事前 trigger を外すと
+     *   `srava_map` が SEGFAULT)。**親を辿って最初の `ptsObject` を実態親にする**。
+     * ⇒ worker の中から helper を作っても env が正しく引ける = 「helper 生成のために
+     *   良い文脈で先に trigger する」という回避が不要になる。 */
+    sPtr<ptsObject> pp;
+    for ( sPtr<tinyState> p = sCallSection::key->caller() ; p.is_notNull() ; p = p->parent ) {
+      pp = sPtr<ptsObject>::d_cast(p);
+      if ( pp.is_notNull() ) break;
+    }
+    helper = thNEW(__TYPE, (pp, thThis));
   }
 };
 

@@ -7,6 +7,7 @@
  * 文として置けば pigfSequence の評価順で export 等より先に走る → 出力ディレクトリ作成(mkdir -p)等に。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"ts2/c++/ts2System.h"
@@ -32,7 +33,6 @@ protected:
 	sPtr<ts2System>		sys;
 	int			retp;
 private:
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -51,7 +51,6 @@ pigfSystem_::pigfSystem_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     retp = 0;
 }
 
@@ -68,16 +67,16 @@ TS_STATE(INI_pigfFunction_START)
 TS_STATE(ACT_START)
 {
 	if ( args.length() < 1 ) {
-		front->set_result(thNEW(pigDataInteger,((INTEGER64)-1)));
+		_front->set_result(thNEW(pigDataInteger,((INTEGER64)-1)));
 		return rDO|FIN_START;
 	}
 	if ( args[0]->is_error() ) {           /* コマンド文字列の評価エラー → 伝播 */
-		front->set_result(args[0]);
+		_front->set_result(args[0]);
 		return rDO|FIN_START;
 	}
 	sPtr<stdString> cmd = args[0]->get_str();   /* 遅延/変数なら compact ゲートで解決 */
 	if ( ! cmd.is_notNull() ) {
-		front->set_result(thNEW(pigDataInteger,((INTEGER64)-1)));
+		_front->set_result(thNEW(pigDataInteger,((INTEGER64)-1)));
 		return rDO|FIN_START;
 	}
 	/* pipe を捕らえずに起動(stdout/stderr は親へ継承)。完了は ts2System の TSE_RETURN で検出。 */
@@ -93,7 +92,7 @@ TS_STATE(ACT_START)
 	sys = thNEW(ts2System,(ifThis, &retp, runcmd,
 	                       (sPtr<ts2IO>*)0, (sPtr<ts2IO>*)0, (sPtr<ts2IO>*)0, 0));
 	if ( retp < 0 ) {
-		front->set_result(thNEW(pigDataError,(thNEW(stdString,("system: failed to launch command")))));
+		_front->set_result(thNEW(pigDataError,(thNEW(stdString,("system: failed to launch command")))));
 		return rDO|FIN_START;
 	}
 	return ACT_pigfSystem_WAIT;   /* ts2System の TSE_RETURN 待ち → rDO なし */
@@ -103,7 +102,7 @@ TS_STATE(ACT_pigfSystem_WAIT)
 {
 	if ( ev->type == TSE_RETURN && ev->source == sys ) {
 		/* 子プロセス終了。終了コード(相当)を結果に。 */
-		front->set_result(thNEW(pigDataInteger,((INTEGER64)ev->msg_int)));
+		_front->set_result(thNEW(pigDataInteger,((INTEGER64)ev->msg_int)));
 		return rDO|FIN_START;
 	}
 	/* ★ destroy の作法 (ひさ指示 2026-08-06): 子へ destroy() を送り、TSE_RETURN が
@@ -112,7 +111,7 @@ TS_STATE(ACT_pigfSystem_WAIT)
 	if ( is_destroyed() ) {
 		/* sys を destroy して子プロセスの終了 (TSE_RETURN) を待つ。ここで即 FIN すると
 		 * 子プロセスが孤児になる。 */
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] system: 子プロセスへ destroy\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] system: 子プロセスへ destroy\n");
 		if ( sys.is_notNull() ) { sys->destroy(); return 0; }
 		return rDO|FIN_START;
 	}

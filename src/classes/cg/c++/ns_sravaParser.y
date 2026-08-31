@@ -63,6 +63,19 @@ static sPtr<pigData> mk_assign(int mode, sPtr<pigData> name, sPtr<pigData> val) 
 	return n;
 }
 
+/* 分割代入 `var [a,b,c] = 式;` — 右辺の配列要素 0,1,2,… を各名前へ束縛する。
+ * names = 名前(pigDataString)の pigDataArray。実体は pigfAssign の mode=PIG_ASSIGN_DEF_LIST。
+ * ★ 文を分けずに複数の名前を作れるので、「値の計算を別々の文に分けると直列になる」
+ *   (docs 言語リファレンス) を避けやすい: `var [a,b] = [volume(m1), volume(m2)];` は 1 文 = 並列。 */
+static sPtr<pigData> mk_assign_list(sPtr<pigData> names, sPtr<pigData> val) {
+	sPtr<pigDataFunction<pigfAssign> > n = thNEW(pigDataFunction<pigfAssign>,());
+	n->set_mode(PIG_ASSIGN_DEF_LIST);
+	n->pushArg(names);
+	n->pushArg(val);
+	if ( names.is_notNull() && names->get_info().is_notNull() ) n->set_info(names->get_info());
+	return n;
+}
+
 /* async 文 `async { body...; sync: S }`。body 文配列 + 省略可 sync 文 → pigcgOperatorAsync。
  * args = [body0,...,(sync)]、syncStmt があれば末尾に積み mode=1(hasSync)。実体は pigfAsync。 */
 static sPtr<pigData> mk_async(sPtr<pigData> arr, sPtr<pigData> syncStmt) {
@@ -81,6 +94,7 @@ static sPtr<pigData> mk_async(sPtr<pigData> arr, sPtr<pigData> syncStmt) {
 #else  /* SRAVA_VALUE_ONLY: PROGRAM ルールは到達不能だがアクション本体は生成されるためスタブが要る。 */
 static sPtr<pigData> mk_seq(sPtr<pigData>) { return thNULL; }
 static sPtr<pigData> mk_assign(int, sPtr<pigData>, sPtr<pigData>) { return thNULL; }
+static sPtr<pigData> mk_assign_list(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
 static sPtr<pigData> mk_async(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
 #endif
 
@@ -275,24 +289,14 @@ static sPtr<pigData> mk_meshop(const char* op, sPtr<pigData> a, sPtr<pigData> b,
 static sPtr<pigData> mk_meshop(const char*, sPtr<pigData>, sPtr<pigData>, sPtr<pigInfo> = thNULL) { return thNULL; }
 #endif
 
-/* 実行木分解(1.2.3/coding_plan §4): n-ary 可換呼び出し(union(a,b,c,..))を二項 op の木に分解。
- * agent は常に二項だけ見ればよい(平展開しない)。中置 a|||b|||c は文法で既に二項なので触らない。 */
-#ifndef SRAVA_VALUE_ONLY
-/* 可換: ops は recipe_hash 昇順済み前提 → 均衡二分木(中間 op がキャッシュ共有されやすい)。 */
-static sPtr<pigData> build_bintree(const char* op, sArray<sPtr<pigData> >& ops, int lo, int hi, sPtr<pigInfo> opinfo = thNULL) {
-	if ( hi - lo == 1 )
-		return ops[lo];
-	int mid = (lo + hi) / 2;
-	return mk_meshop(op, build_bintree(op, ops, lo, mid, opinfo), build_bintree(op, ops, mid, hi, opinfo), opinfo);
-}
-/* 非可換(difference): 左 fold (((a op b) op c)…)。順序保持・ソートしない。 */
-static sPtr<pigData> build_leftfold(const char* op, sArray<sPtr<pigData> >& ops, int n, sPtr<pigInfo> opinfo = thNULL) {
-	sPtr<pigData> acc = ops[0];
-	for ( int i = 1 ; i < n ; ++i )
-		acc = mk_meshop(op, acc, ops[i], opinfo);
-	return acc;
-}
-#endif
+/* ★ #3436 P4 (2026-08-25): **実行木への分解はパース時に行わない**。
+ * n 項の union(a,b,c,…) / difference(a,b,c,…) は **n 項ノードのまま**残し、
+ * pigfModuleAgent の dispatch 時に分解する (docs/sig_grammar_design.md §5.5)。
+ * 理由: 実項数 k = min(N', sig の N, 群の執行者が許す最大) はモジュールが決まらないと分からず、
+ * モジュールは**型**が決まらないと分からず、型はパース時には分からない
+ * (box(2,2,2) の型は DEFAULT_OUTPUT と priority で決まる)。
+ * ⚠ 中置 a|||b|||c は文法で既に左 fold の直線なので触らない (平坦化しない・ひさ確定)。
+ * (旧 build_bintree / build_leftfold はここにあった。分解は pigfModuleAgent::try_decompose へ) */
 
 /* 比較演算子 → pigDataOperator(結果は 0/1 の整数)。 */
 static sPtr<pigData> mk_cmp(int op, sPtr<pigData> a, sPtr<pigData> b) {
@@ -454,17 +458,20 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
-	/* load(so): カーネル/プラグイン .so をロード(planner 側 op・agent 不要・.so 化 Phase 4b)。 */
-	if ( ::strcmp(nm, "load") == 0 ) {
-		sPtr<pigDataOperatorLoad> f = thNEW(pigDataOperatorLoad,(ci));
-		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
-		return f;
-	}
-	/* module(so[, {exec_default, priority}]): .so をロードし設定上書き(planner 側 op・docs §2.4)。 */
+	/* module(so[, opts]): 記述子の設定を上書き。未ロードなら読み込む(planner 側 op・docs §2.4)。
+	 * ★ 旧 load(so) は廃止 (2026-08-18)。module(so) が「未ロードなら読み込む + on にする」を
+	 *   兼ねるので、ロード専用 op を別に持つ意味が無くなった (使用実績も docs の例だけだった)。 */
 	if ( ::strcmp(nm, "module") == 0 ) {
 		sPtr<pigDataOperatorModule> f = thNEW(pigDataOperatorModule,(ci));
 		for ( int i = 0 ; i < na && i < 2 ; ++i )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+		return f;
+	}
+	/* module_loaded(so): その .so がいまロードされているか (1/0)。★ロードはしない。
+	 * module(so,"off") が実アンロードになり、未ロードへの off は明示エラーなので、その前段に使う。 */
+	if ( ::strcmp(nm, "module_loaded") == 0 ) {
+		sPtr<pigDataOperatorModuleLoaded> f = thNEW(pigDataOperatorModuleLoaded,(ci));
+		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
 	/* concat(a, b, ...): 配列連結(planner 側 op・agent 不要)。配列は要素展開、非配列は 1 要素追加。 */
@@ -734,7 +741,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		return f;
 	}
 	/* 単一引数 union/intersection/combine: 引数が **mesh 配列** なら eval 時に均衡二分木へ分解して
-	 * 並列に畳む(pigfArrayFold)。`union(concat(...))` の直列 fold 回避(ユーザ案・実測 ~10x)。
+	 * 並列に畳む(pigfArrayFold)。`union(concat(...))` の直列 fold 回避(ユーザ案)。
 	 * 配列長は実行時にしか分からないのでパース時でなく評価時に木を組む。単一 mesh は素通り(=その mesh)。 */
 	if ( ( ::strcmp(nm, "union") == 0 || ::strcmp(nm, "intersection") == 0
 	    || ::strcmp(nm, "combine") == 0 ) && na == 1 ) {
@@ -745,26 +752,10 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		f->set_info(ci);
 		return f;
 	}
-	/* n-ary 可換 op(3 引数以上): recipe_hash 昇順にソート → 均衡二分木へ分解。
-	 * union(a,b,c) と union(c,b,a) が同一木に正準化(キャッシュ共有)。 */
-	if ( ( ::strcmp(nm, "union") == 0 || ::strcmp(nm, "intersection") == 0
-	    || ::strcmp(nm, "combine") == 0 ) && na > 2 ) {
-		sArray<sPtr<pigData> > ops;
-		for ( int i = 0 ; i < na ; ++i )
-			ops.push(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
-		for ( int i = 1 ; i < na ; ++i )   /* recipe_hash 昇順 挿入ソート(normalize と同じ uint64 比較) */
-			for ( int j = i ; j > 0 && (uint64_t)ops[j-1]->recipe_hash() > (uint64_t)ops[j]->recipe_hash() ; --j ) {
-				sPtr<pigData> t = ops[j-1]; ops[j-1] = ops[j]; ops[j] = t;
-			}
-		return build_bintree(nm, ops, 0, na, ci);   /* 二分木ノードは union(…) 呼びの行を指す */
-	}
-	/* n-ary 非可換 op(difference, 3 引数以上): 左 fold(順序保持)。 */
-	if ( ::strcmp(nm, "difference") == 0 && na > 2 ) {
-		sArray<sPtr<pigData> > ops;
-		for ( int i = 0 ; i < na ; ++i )
-			ops.push(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
-		return build_leftfold(nm, ops, na, ci);
-	}
+	/* ★ #3436 P4: n 項の union/intersection/combine/difference は **そのまま n 項ノード**で残す
+	 * (下の generic 経路が n 引数の pigfModuleAgent ノードを作る)。木への分解と、可換 op の
+	 * 引数ソートはどちらも評価時 (pigfModuleAgent::try_decompose) が行う (#3452 で判明した回帰の
+	 * 修正: parse 直後にモジュール情報を要る判定を置くと未ロード状態を掴んでしまうため)。 */
 	/* circle / sphere は精度ピッチ省略可。circle(r)→(r, 32 辺)、sphere(r)→(r, subdiv 0)。
 	 * circle(r, segs) / sphere(r, subdiv) はそのまま。内部は常に 2 引数 (r, pitch) に統一。 */
 	if ( ::strcmp(nm, "circle") == 0 || ::strcmp(nm, "sphere") == 0 ) {
@@ -923,34 +914,43 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		return f;
 	}
 	/* ★ .so 化 Phase 4a: op 受理の layer 3 (generic)。上の糖衣付き builtin に該当しない名前でも、
-	 * ロード済みモジュール .so の descriptor.ops に載っていれば pigfModuleAgent ノードとして受理する
+	 * モジュール .so の descriptor.ops に載っていれば pigfModuleAgent ノードとして受理する
 	 * (grammar を触らず新カーネル/プラグインが op を足せる)。out_cache は descriptor の出力型 (mesh/value) から。
 	 * 糖衣が要る op (circle/rotate/offset/… や measure 系) は上で個別処理済みなのでここには来ない。
 	 * ★ Plan A (2026-08-10): plugin レイヤ廃止に伴い pipe_proximity 等の値 op も**この generic 経路**へ
 	 *   (旧 pigfPluginAgent 分岐撤去)。値 op は decide_executor が -1 → op-owner routing で owner へ・in-proc
-	 *   可否は agent_module_name の exec_default 判定で決まる (mesh カーネルと同一機構・demo.so と同じ扱い)。 */
-	/* ★ #3427 ③: レジストリは app 所有。パーサ (cgptsLemonParser) の TS_STATE 実行中なので
-	 *   pig_current_registry() (sCallSection TLS) で planner app のレジストリへ届く。 */
+	 *   可否は agent_module_name の exec_default 判定で決まる (mesh カーネルと同一機構・demo.so と同じ扱い)。
+	 *
+	 * ★★ #3452: 「module op として受理できるか(any_supports_op)」を **ここ(parse 時)では判定しない**。
+	 *   #3452 で起動時 eager-load を撤去したため、parse 時点では script 内の先行する module() 呼び出しが
+	 *   まだ実行されていない(parse はスクリプト全体を評価前に 1 回で行う)。ここで判定を確定すると、
+	 *   「module() の直後で同じ script 内のその op を使う」という最も基本的な使い方が
+	 *   「undefined variable」で壊れる(実測で判明)。
+	 *   → module op 枝(pigfModuleAgent)と lambda 変数 apply 枝(varref+pigfApply)を**両方**
+	 *   組み立てておき、pigDataOperatorCallResolve に包んで返す。判定 (any_supports_op) 自体は
+	 *   変えず、実行するタイミングを eval 時(pigDataOperatorCallResolve::_start)へ動かすだけ。
+	 *   選ばれなかった枝は compact されない(pigfIf の then/else 選択と同じく副作用なし)。
+	 *   ★ ハードコード builtin (box/union/… 55 個。mesh 演算子 |||/&&&/---/+++ も含む) はこの経路を
+	 *   通らないので無変更 (2026-08-26 の設計判断・ひさ)。 */
 	{
-		sPtr<pigModuleRegistry> reg = pig_current_registry();
-		if ( reg != thNULL && reg->any_supports_op(nm) ) {
-			sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-			for ( int i = 0 ; i < na ; ++i )
-				f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
-			f->set_op_name(thNEW(stdString,(nm)));
-			f->set_out_cache( reg->op_out_is_mesh(nm) == 1 ? 1 : 0 );
-			f->set_info(ci);
-			return f;
-		}
-	}
-	/* builtin でない名前 → lambda 変数の apply。callee=変数参照(評価で lambda 値)、続けて実引数。 */
-	{
-		sPtr<pigDataFunction<pigfApply> > f = thNEW(pigDataFunction<pigfApply>,());
-		f->set_info(ci);
-		f->pushArg(mk_varref(name));
+		sPtr<pigDataFunction<pigfModuleAgent> > mf = thNEW(pigDataFunction<pigfModuleAgent>,());
 		for ( int i = 0 ; i < na ; ++i )
-			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
-		return f;
+			mf->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+		mf->set_op_name(thNEW(stdString,(nm)));
+		mf->set_info(ci);
+		/* out_cache は暫定値(未確定)。pigDataOperatorCallResolve::_start が eval 時に確定させる。 */
+
+		sPtr<pigDataFunction<pigfApply> > af = thNEW(pigDataFunction<pigfApply>,());
+		af->set_info(ci);
+		af->pushArg(mk_varref(name));
+		for ( int i = 0 ; i < na ; ++i )
+			af->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+
+		sPtr<pigDataOperatorCallResolve> cr = thNEW(pigDataOperatorCallResolve,(ci));
+		cr->pushArg(mf);
+		cr->pushArg(af);
+		cr->set_op_name(thNEW(stdString,(nm)));
+		return cr;
 	}
 }
 #else
@@ -1059,6 +1059,14 @@ input ::= MODE_PROGRAM stmt_list(L).
 input ::= MODE_VALUE value(V).
 		{ periArg->parseAccept(V); }
 
+/* 分割代入の名前リスト `a, b, c`(pigDataArray of pigDataString)。 */
+namelist(A) ::= IDENT(N).
+		{ sPtr<pigDataArray> l = thNEW(pigDataArray,()); l->push_nocheck(N);
+		  if ( N.is_notNull() ) l->set_info(N->get_info());
+		  A = l; }
+namelist(A) ::= namelist(L) COMMA IDENT(N).
+		{ sPtr<pigDataArray>::d_cast(L)->push_nocheck(N); A = L; }
+
 stmt_list(A) ::= .
 		{ A = thNEW(pigDataArray,()); }
 stmt_list(A) ::= stmt_list(L) stmt(S).
@@ -1068,6 +1076,10 @@ stmt(A) ::= VAR IDENT(N) ASSIGN arhs(E) SEMI.
 		{ A = mk_assign(PIG_ASSIGN_DEF, N, E); }
 stmt(A) ::= VAR IDENT(N) SEMI.
 		{ A = mk_assign(PIG_ASSIGN_DEF, N, thNULL); }
+/* 分割代入 `var [a,b,c] = 式;` — 右辺(配列)の要素 0,1,2,… を各名前へ束縛。要素が足りなければエラー、
+ * 余りは無視。★ 1 文で複数の名前を作れる = 「文を分けると直列」を避けられる。 */
+stmt(A) ::= VAR LBRACK namelist(NL) RBRACK ASSIGN arhs(E) SEMI.
+		{ A = mk_assign_list(NL, E); }
 stmt(A) ::= IDENT(N) ASSIGN arhs(E) SEMI.
 		{ A = mk_assign(PIG_ASSIGN_SET, N, E); }
 

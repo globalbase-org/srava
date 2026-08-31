@@ -41,7 +41,6 @@ public:
 	sPtr<pigDataArray>	out;     /* 結果配列。worker が **自分の添字位置へ** 書き込む */
 	int			mapIdx;  /* worker への担当 index 配り(共有カウンタ) */
 private:
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -62,7 +61,6 @@ pigfMap_::pigfMap_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     mapIdx = 0;
 }
 
@@ -75,33 +73,37 @@ TS_STATE(INI_pigfFunction_START)
 TS_STATE(ACT_START)
 {
 	if ( args.length() < 2 ) {
-		front->set_result(thNEW(pigDataError,("map: needs (array, function)", front->get_info())));
+		_front->set_result(thNEW(pigDataError,("map: needs (array, function)", _front->get_info())));
 		return rDO|FIN_START;
 	}
 	sPtr<pigData> av = args[0]->compact();          /* 配列(async なら yield → 再走) */
-	if ( av->is_error() ) { front->set_result(av); return rDO|FIN_START; }
+	if ( av->is_error() ) { _front->set_result(av); return rDO|FIN_START; }
 	sPtr<pigDataArray> arr = av->obt_array();
 	if ( ! arr.is_notNull() ) {
-		front->set_result(thNEW(pigDataError,("map: first argument must be an array", front->get_info())));
+		_front->set_result(thNEW(pigDataError,("map: first argument must be an array", _front->get_info())));
 		return rDO|FIN_START;
 	}
 	sPtr<pigData> lv = args[1]->compact();           /* lambda 値(arity を見る) */
-	if ( lv->is_error() ) { front->set_result(lv); return rDO|FIN_START; }
+	if ( lv->is_error() ) { _front->set_result(lv); return rDO|FIN_START; }
 	sPtr<pigDataLambda> lam = sPtr<pigDataLambda>::d_cast(lv);
 	if ( ! lam.is_notNull() ) {
-		front->set_result(thNEW(pigDataError,("map: second argument must be a function", front->get_info())));
+		_front->set_result(thNEW(pigDataError,("map: second argument must be a function", _front->get_info())));
 		return rDO|FIN_START;
 	}
 	int pc = lam->paramc();
 	if ( pc != 1 && pc != 2 ) {
-		front->set_result(thNEW(pigDataError,("map: function must take 1 (elem) or 2 (elem, index) params", front->get_info())));
+		_front->set_result(thNEW(pigDataError,("map: function must take 1 (elem) or 2 (elem, index) params", _front->get_info())));
 		return rDO|FIN_START;
 	}
 	int n = arr->length();
-	/* 適用ノードを作る。★ここは**この pigfMap の文脈**で trigger しておく(pigfAgent SENDOP と同じ手筋):
-	 * helper の生成を worker(ts2Parallel コルーチン=ptsObject でない)でなく良い env で行い、
-	 * かつ全要素を先に起動して並列性を出す(pigDataOperatorArray::_start と同じ)。trigger は
-	 * start() だけで preprocess を踏まないので yield しない。 */
+	/* 適用ノードを作る。
+	 * ⚠ かつてここで `app->trigger()` を撃っていた。理由は並列性ではなく **helper の生成を
+	 *   worker (ts2Parallel コルーチン = ptsObject でない) でやると parent が null になって
+	 *   落ちる**ことの回避だった (実測: 外すと srava_map が SEGFAULT)。
+	 * ★ #3419 (ひさ指示 2026-08-24): `pigDataFunction::_start` が **親を辿って最初の ptsObject を
+	 *   実態親にする**ようにしたので、worker の中で helper を作っても env が正しく引ける。
+	 *   ⇒ 事前 trigger は不要になった (撤去後も 1 波 8/8・ctest 289/289 を確認)。
+	 * 並列性は下の worker が phase0 で次の兄弟を spawn することで出ている。 */
 	apps.length(n);
 	out = thNEW(pigDataArray,());
 	for ( int i = 0 ; i < n ; ++i ) {
@@ -111,7 +113,6 @@ TS_STATE(ACT_START)
 		if ( pc == 2 )
 			app->pushArg(thNEW(pigDataInteger,((INTEGER64)i)));       /* index */
 		apps[i] = app;
-		app->trigger();
 	}
 
 	/* 要素を worker で解決する。各 worker は:
@@ -119,7 +120,7 @@ TS_STATE(ACT_START)
 	 *   phase1: 担当要素を compact(未解決なら yield。**その worker だけ**が巻き戻る)
 	 * ts2Parallel は _fn を worker 毎に複製するので idx/phase は per-worker。sException で
 	 * 巻き戻っても mutable キャプチャは保たれるため phase0(spawn)は再実行されない。
-	 * ★エラー/制御値(exit 等)を見つけた worker は **その場で front に結果を入れて cancel** する
+	 * ★エラー/制御値(exit 等)を見つけた worker は **その場で _front に結果を入れて cancel** する
 	 *   (ひさ設計)。他 worker が重い計算を続けても意味がないので即座に畳む。
 	 *   `set_result(…,1)` = 既に result があれば上書きしない → **最初に見つけたエラーが勝つ**。
 	 * ★`push` でなく **`set_ix(idx,…)`** で書く: worker は完了順に走るので push だと
@@ -140,7 +141,7 @@ TS_STATE(ACT_START)
 				return 1;
 			if ( phase == 1 ) {
 				if ( apps[idx]->is_error() ) {   /* 未解決なら compact ゲートで yield 再走 */
-					front->set_result(apps[idx], 1);   /* 最初のエラーが勝つ */
+					_front->set_result(apps[idx], 1);   /* 最初のエラーが勝つ */
 					me->cancel();                      /* ★他 worker を止める */
 					/* ★ worker を畳むだけでは **上流(pigfApply とその子 agent)は走り続ける**。
 					 * pigData::destroy() で要らなくなった枝を名指しで止める(ひさ設計)。
@@ -159,7 +160,7 @@ TS_STATE(ACT_START)
 	return ACT_pigfMap_COLLECT;   /* par の TSE_RETURN 待ち → rDO なし */
 }
 
-/* 全要素の解決完了(または エラーで cancel)。エラー時は worker が既に front を解決済みなので、
+/* 全要素の解決完了(または エラーで cancel)。エラー時は worker が既に _front を解決済みなので、
  * flag=1 の set_result は**上書きしない**(= エラーがそのまま map の結果として上方へ伝播する)。 */
 TS_STATE(ACT_pigfMap_COLLECT)
 {
@@ -173,7 +174,7 @@ TS_STATE(ACT_pigfMap_COLLECT)
 		}
 		return 0;
 	}
-	front->set_result(out, 1);
+	_front->set_result(out, 1);
 	return rDO|FIN_START;
 }
 

@@ -15,6 +15,7 @@
  * CGAL を要するので srava_agent 側でのみ compile。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include	<CGAL/Surface_mesh.h>
 #include	<CGAL/IO/Color.h>   /* 面の色(per-face property map "f:color")。color() op / 色つき export 用 */
@@ -50,6 +51,12 @@ public:
 	/* ---- codec(D_CHUNK ストリーム)---- */
 	virtual void encode(cgChunkSink&)   = 0;
 	virtual void decode(cgChunkSource&) = 0;
+	/* ★ #3433: decode が「この形式は cg の表現力では受け取れない」と判断したときに立てる。
+	 *   reader はこれを見て errCode を立てる (空 mesh を黙って返さない)。 */
+	int  decode_failed() const { return decodeErr_; }
+protected:
+	int  decodeErr_ = 0;
+public:
 	/* ---- ブーリアン(同次元の新 mesh を返す。異次元/失敗は null=呼び元が A_ERROR)---- */
 	virtual sPtr<cgMesh> op_union       (sPtr<cgMesh> b) = 0;
 	virtual sPtr<cgMesh> op_intersection(sPtr<cgMesh> b) = 0;
@@ -67,6 +74,11 @@ public:
 
 	/* ---- 計測(値を返す。2D=囲み面積 / 3D=表面積)。値返し op = WriterText で直列化 ---- */
 	virtual double op_area() = 0;   /* 2D: 囲み面積(外周−穴) / 3D: 表面積 */
+	/* ★ #3443: 頂点数 / 面数。planner が cache のバイト列を直接読んで表示していたのをやめ、
+	 *   **幾何の語彙はモジュール側の op が答える**ようにした (planner はカーネル中立に戻る)。
+	 *   2D は面を持たないので op_nfaces()=0・op_nverts() は点の総数 (外周 + 穴)。 */
+	virtual int    op_nverts() = 0;
+	virtual int    op_nfaces() = 0;
 	virtual double op_volume()    = 0;   /* 3D: 囲む体積(閉メッシュ)/ 2D: 0(呼び元が dim ガード) */
 	virtual double op_perimeter() = 0;   /* 2D: 境界長(外周+穴)/ 3D: 0(呼び元が dim ガード) */
 	virtual int    op_centroid(double out[3]) = 0;   /* 面積/体積重心。out に座標、返り=次元(2 or 3) */
@@ -94,6 +106,11 @@ public:
 
 	/* reader 用ファクトリ: D_META タグから具体型を生成(未知タグは null)。 */
 	static sPtr<cgMesh> create_for_meta(const uint8_t *meta, int len);
+
+	/* ★ 2026-08-28 (ABI v12): **この階層への配線先**。op の OPS 行が OPWIRE(Calc, cgMesh) と
+	 *   書くと、引数はこの WIRE 経由で実体化される。create_for_meta が 4CC を受理判定し、
+	 *   mkReader がこの階層の stream reader を起こす。定義は cgCacheCodec.cpp。 */
+	static const pigWireClass WIRE;
 };
 
 /* 3D メッシュ(EPECK Surface_mesh)。 */
@@ -117,13 +134,22 @@ public:
 	 *   これで cg agent(=CGAL カーネル)が Manifold カーネルの出力キャッシュを透過的に入力できる。
 	 *   昇格後は普通の cgMesh3D(meta_tag="MESH")なので encode/ブール/計測は全て既存経路。 */
 	void set_mfm3_input() { mfm3Input_ = 1; }
+	/* ★ #3433/#3440: nef の出力キャッシュ ("NEFB") を cgMesh3D として受理する。
+	 *   ★cg(corefinement)は**有界な 2-多様体しか表現できない**ので、表現できないものは
+	 *   decode で **失敗させる**(黙って境界だけ拾うと「箱の補集合」が「箱」に化ける)。
+	 *   ★#3440 の 3 以降、cgal.so は **CGAL Nef に依存しない** = SNC はパースできないので、
+	 *   受理できるのは payload 形式が **厳密境界 (NF_FORM_BOUNDARY)** のものだけ。
+	 *   nef 側が SNC で書く値 (非有界・非多様体 = そもそも cg で表現できない) は明示エラーになる。 */
+	void set_nef3_input() { nef3Input_ = 1; }
 	virtual sPtr<cgMesh> op_union       (sPtr<cgMesh> b);
 	virtual sPtr<cgMesh> op_intersection(sPtr<cgMesh> b);
 	virtual sPtr<cgMesh> op_difference  (sPtr<cgMesh> b);
 	virtual sPtr<cgMesh> op_combine     (sPtr<cgMesh> b);   /* 両 Surface_mesh を連結(corefinement なし) */
 	virtual sPtr<cgMesh> apply_affine(const double e[12]);
-	virtual sPtr<cgMesh> op_offset(double d, int subdiv);   /* Minkowski(icosphere)膨張/収縮 */
+	virtual sPtr<cgMesh> op_offset(double d, int subdiv);   /* 2D=straight skeleton / ★3D は nef へ移設 (#3440) */
 	virtual double op_area();   /* 表面積(PMP::area・√含むので double) */
+	virtual int    op_nverts();
+	virtual int    op_nfaces();
 	virtual double op_volume();      /* PMP::volume(閉メッシュの体積) */
 	virtual double op_perimeter();   /* 3D は未定義(呼び元 dim ガード)→ 0 */
 	virtual int    op_centroid(double out[3]);   /* 体積重心(四面体分割・発散定理) */
@@ -145,8 +171,10 @@ public:
 	virtual bool write_to(const char *path, const char *unit);   /* OFF/STL/OBJ/PLY(unit 無視) */
 protected:
 	void	decode_mfm3(cgChunkSource&);   /* MFM3 raw-double framing → EPECK Surface_mesh(無損失昇格) */
+	bool	decode_nef3(cgChunkSource&);   /* NEF3(SNC) → EPECK Surface_mesh。表現不能なら false */
 	Mesh	m_;
 	int	mfm3Input_ = 0;   /* 1 = decode() が MFM3 framing を読む(create_for_meta が MFM3 タグで立てる) */
+	int	nef3Input_ = 0;   /* 1 = decode() が NEF3(SNC) を読む(create_for_meta が NEF3 タグで立てる) */
 };
 
 /* 2D 多角形領域(EPECK)。穴あき多角形の集合 = ブール演算結果(複数連結成分・穴)を表せる。
@@ -182,6 +210,8 @@ public:
 	virtual sPtr<cgMesh> apply_affine(const double e[12]);
 	virtual sPtr<cgMesh> op_offset(double d, int subdiv);   /* straight skeleton(subdiv 無視) */
 	virtual double op_area();   /* 囲み面積(Polygon::area・外周−穴。exact→double) */
+	virtual int    op_nverts();
+	virtual int    op_nfaces();   /* 2D は面を持たない = 0 */
 	virtual double op_volume();      /* 2D は体積なし(呼び元 dim ガード)→ 0 */
 	virtual double op_perimeter();   /* 境界長(全 region の外周+穴。√→double) */
 	virtual int    op_centroid(double out[3]);   /* 面積重心(shoelace モーメント・穴は負寄与) */

@@ -12,9 +12,7 @@
 #include	<CGAL/Aff_transformation_3.h>
 #include	<CGAL/Polygon_mesh_processing/orientation.h>   /* reverse_face_orientations */
 #include	<CGAL/boost/graph/IO/polygon_mesh_io.h>        /* 拡張子で OFF/STL/OBJ/PLY 書き出し */
-#include	<CGAL/Nef_polyhedron_3.h>                       /* 3D offset = Minkowski(球) */
-#include	<CGAL/minkowski_sum_3.h>
-#include	<CGAL/convex_decomposition_3.h>
+#include	<sstream>                       /* 3D offset = Minkowski(球) */
 #include	<CGAL/boost/graph/convert_nef_polyhedron_to_polygon_mesh.h>
 #include	<CGAL/boost/graph/generators.h>                /* make_icosahedron */
 #include	<CGAL/boost/graph/copy_face_graph.h>           /* combine(単純連結・corefinement なし) */
@@ -32,7 +30,6 @@
 #include	<CGAL/AABB_tree.h>                          /* 近接(closest_point) */
 #include	<CGAL/AABB_traits_3.h>
 #include	<CGAL/AABB_face_graph_triangle_primitive.h>
-#include	<CGAL/Subdivision_method_3/subdivision_methods_3.h>   /* icosphere 細分化 */
 #include	<CGAL/Exact_predicates_inexact_constructions_kernel.h>   /* SDF レイ投射用の double カーネル */
 #include	<map>
 #include	<vector>
@@ -65,6 +62,10 @@ void
 cgMesh3D::decode(cgChunkSource& src)
 {
 	if ( mfm3Input_ ) { decode_mfm3(src); return; }   /* ★ Manifold cache → 無損失昇格(#3404) */
+	if ( nef3Input_ ) {                              /* ★ Nef cache → 表現できるなら降格(#3433) */
+		if ( ! decode_nef3(src) ) { m_.clear(); decodeErr_ = 1; }   /* 表現不能 = reader がエラーにする */
+		return;
+	}
 	cgaMeshCodec::decode(src, m_);    /* Source=cgChunkSource。pull() は virtual 呼び */
 }
 
@@ -237,32 +238,30 @@ cgMesh3D::apply_affine(const double e[12])
 	return out;
 }
 
-/* 半径 r・細分化 subdiv の icosphere(icosahedron を Loop 細分化し球面へ投影)を ball に。
- * subdiv=0=icosahedron(20 面・粗い)、1=80 面、2=320 面…(大=滑らか・Minkowski が重い)。
- * 投影は double 正規化(sqrt)→ K::FT 格納(近似形状・有理座標、回転と同じ方針)。
- * cgaSphere.cpp と共有(sphere(r, subdiv) も同じ球近似)→ 非 static。 */
-void cga_make_icosphere(cgMesh::Mesh& ball, double r, int subdiv)
+/* ★ offset 専用だった近似球生成器 cga_make_icosphere は nef へ移設した (#3440 の 2)。
+ *   sphere/icosphere op が使う測地球は下の cga_make_geodesic (common/geodesic.h) で別物。 */
+
+/* ★ #3433/#3440: nef の cache (4CC "NEFB") を cg へ**降格**して読む。
+ *   framing: [u8 形式][…] (nfMesh.h の NF_FORM_*・安定契約としてここに inline 再現)。
+ *   ★**cgal.so は CGAL Nef に依存しない** (#3440 の 3)。よって読めるのは
+ *     形式 1 = 厳密境界 (cg の "MESH" と同一フレーミング) **だけ**で、
+ *     形式 0 = SNC は **読まずに false** を返す (呼び側が明示エラーにする)。
+ *   nef_hybrid が SNC で書くのは「cg では**表現できない**値 (非有界・非多様体)」だけなので、
+ *   降格が要る値は全て境界形式で届く (空洞つき立体も境界形式で運ばれる = 降格できる)。
+ *   nef_snc は常に SNC なので cg へ降格できない (設計どおりの代償)。 */
+bool
+cgMesh3D::decode_nef3(cgChunkSource& src)
 {
-	typedef cgMesh::K K;
-	CGAL::make_icosahedron<cgMesh::Mesh, K::Point_3>(ball, K::Point_3(0,0,0), K::FT(r));
-	CGAL::Polygon_mesh_processing::triangulate_faces(ball);
-	for ( int i = 0 ; i < subdiv ; ++i )
-		CGAL::Subdivision_method_3::Loop_subdivision(ball, CGAL::parameters::number_of_iterations(1));
-	if ( subdiv > 0 ) {
-		for ( cgMesh::Mesh::Vertex_index v : ball.vertices() ) {
-			double x = CGAL::to_double(ball.point(v).x());
-			double y = CGAL::to_double(ball.point(v).y());
-			double z = CGAL::to_double(ball.point(v).z());
-			double L = std::sqrt(x*x + y*y + z*z);
-			if ( L > 0 ) { double s = r / L;
-				ball.point(v) = K::Point_3(K::FT(x*s), K::FT(y*s), K::FT(z*s)); }
-		}
-		CGAL::Polygon_mesh_processing::triangulate_faces(ball);
-	}
+	uint8_t form = 0;
+	src.pull(&form, 1);
+	if ( form != 1 )        /* NF_FORM_BOUNDARY 以外 (= SNC) は cgal では読めない */
+		return false;
+	cgaMeshCodec::decode(src, m_);
+	return true;
 }
 
 /* ---- 測地球 (manifold と共通アルゴリズム = src/h/common/geodesic.h)。sphere/icosphere の実体。
- *      種 (八面体/二十面体) を n 分割して球面投影する。cga_make_icosphere (Loop 細分・offset 専用)
+ *      種 (八面体/二十面体) を n 分割して球面投影する。offset 専用の Loop 細分の球 (旧 cga_make_icosphere)
  *      とは別物: こちらは線形分割なので manifold と頂点・面が一致し体積が数値誤差で揃う。 ---- */
 namespace {
 struct CgGeoSink {
@@ -285,65 +284,22 @@ void cga_make_geodesic(cgMesh::Mesh& ball, int seed, int n, double r)
 	srava_geo::make_geodesic(seed, n, r, sink);
 }
 
-/* ---- 3D オフセット = Minkowski 和(半径 |d| の icosphere 球)。d>0 膨張 / d<0 収縮(補集合トリック)。
- *      subdiv 大=丸めが滑らか・重い(Nef + 凸分解)が srava はそれ向け。 ---- */
+/* ---- 3D オフセット: **nef モジュールへ移設した** (#3440 の 2) ----
+ * 中身は Minkowski 和 (Nef + 凸分解) で、他の幾何カーネル (Nef) の機能を借りて cgal の顔で
+ * 出していた = モジュール境界の約束①違反だった (docs/srava_module_reference.md「モジュールの境界」)。
+ * ★sig からも 3D は外してあるので、通常 routing でここへ来ることは無い (来たら明示エラー)。
+ *   2D offset (straight skeleton) は cgMesh2D 側に健在。 */
 sPtr<cgMesh>
-cgMesh3D::op_offset(double d, int subdiv)
+cgMesh3D::op_offset(double, int)
 {
-	typedef CGAL::Nef_polyhedron_3<K> Nef;
-	if ( d == 0.0 ) {
-		sPtr<cgMesh3D> out = thNEW(cgMesh3D,());
-		out->m_ = m_;
-		return out;
-	}
-	if ( subdiv < 0 ) subdiv = 0;
-	if ( subdiv > 3 ) subdiv = 3;   /* 上限(暴走防止) */
-	double r = ( d > 0.0 ) ? d : -d;
-
-	/* 半径 r の icosphere を球の近似に。 */
-	Mesh ball;
-	cga_make_icosphere(ball, r, subdiv);
-	Nef nball(ball);
-
-	sPtr<cgMesh3D> out = thNEW(cgMesh3D,());
-
-	if ( d > 0.0 ) {
-		/* 膨張: A ⊕ ball。 */
-		Nef nbody(m_);
-		Nef nres = CGAL::minkowski_sum_3(nbody, nball);   /* 内部で凸分解(重い) */
-		CGAL::convert_nef_polyhedron_to_polygon_mesh(nres, out->m_, true /* 三角化 */);
-		return out;
-	}
-
-	/* 収縮(d<0): 補集合トリック erode(A,r) = A − dilate(boundingBox − A, ball_r)。
-	 * 有界化のため A の bbox を margin(>r)拡大した箱 B を使う(B 壁付近の誤侵食を避ける)。 */
-	double minx=1e300, miny=1e300, minz=1e300, maxx=-1e300, maxy=-1e300, maxz=-1e300;
-	for ( Mesh::Vertex_index v : m_.vertices() ) {
-		double x = CGAL::to_double(m_.point(v).x());
-		double y = CGAL::to_double(m_.point(v).y());
-		double z = CGAL::to_double(m_.point(v).z());
-		if ( x<minx ) minx=x; if ( x>maxx ) maxx=x;
-		if ( y<miny ) miny=y; if ( y>maxy ) maxy=y;
-		if ( z<minz ) minz=z; if ( z>maxz ) maxz=z;
-	}
-	if ( minx > maxx ) return out;   /* 空 */
-	double mg = 2.0 * r;             /* margin > r */
-	minx-=mg; miny-=mg; minz-=mg; maxx+=mg; maxy+=mg; maxz+=mg;
-	Mesh box;
-	CGAL::make_hexahedron(
-	    K::Point_3(K::FT(minx),K::FT(miny),K::FT(minz)), K::Point_3(K::FT(maxx),K::FT(miny),K::FT(minz)),
-	    K::Point_3(K::FT(maxx),K::FT(maxy),K::FT(minz)), K::Point_3(K::FT(minx),K::FT(maxy),K::FT(minz)),
-	    K::Point_3(K::FT(minx),K::FT(miny),K::FT(maxz)), K::Point_3(K::FT(maxx),K::FT(miny),K::FT(maxz)),
-	    K::Point_3(K::FT(maxx),K::FT(maxy),K::FT(maxz)), K::Point_3(K::FT(minx),K::FT(maxy),K::FT(maxz)), box);
-	CGAL::Polygon_mesh_processing::triangulate_faces(box);
-
-	Nef nefA(m_), nefBox(box);
-	Nef nefOut = nefBox - nefA;                          /* 箱内の外側(A の補集合を有界化) */
-	Nef nefDil = CGAL::minkowski_sum_3(nefOut, nball);   /* 外側を r 膨張(A 内へ r シェル侵入) */
-	Nef nefRes = nefA - nefDil;                          /* A から r シェルを除く = 収縮 */
-	CGAL::convert_nef_polyhedron_to_polygon_mesh(nefRes, out->m_, true);
-	return out;
+	return thNULL;   /* 呼び側 (cgaOffset) がエラーにする */
 }
+
+/* ---- 計測: 頂点数 / 面数 (#3443) ----
+ * ★ planner が cache の先頭バイトを "MESH" 前提で読んで表示していたのを op へ移した。
+ *   形式ごとの詰め方を知っているのは **そのモジュール** なので、ここが正しい置き場所。 */
+int cgMesh3D::op_nverts() { return (int)m_.number_of_vertices(); }
+int cgMesh3D::op_nfaces() { return (int)m_.number_of_faces(); }
 
 /* ---- 計測: 表面積(全三角形面積の和。√を含むので double で返す)---- */
 double
@@ -648,9 +604,17 @@ cgMesh3D::op_valid()
 	return ok ? 1 : 0;
 }
 
-/* ---- 修復: autorefine で自己交差を幾何的に解消(交差線を実エッジ化。EPECK で厳密・常に成功)。
- *      とぐろ tube 等の自己交差を valid(=1) に持ち込む。重なる立体からのソリッド再構成
- *      (内壁除去)は Nef が要るので未対応(将来)。---- */
+/* ---- 修復: autorefine で **交差線を実エッジ化** する (EPECK で厳密・常に成功)。
+ * ★**自己交差は「解消」されない**。valid() は does_self_intersect を見るので、
+ *   自己交差した形状は repair の後も **valid()=0 のまま** である (2026-08-18 実測: 軽い/深い
+ *   自己交差 tube・重なる 2 箱を combine したもの、いずれも repair 後 0)。細分は効いている
+ *   (自己交差 tube で 86v/168f → 726v/792f) が、交わっていた 2 枚の面はエッジで接したまま残るため。
+ *   ★以前ここに「とぐろ tube 等の自己交差を valid(=1) に持ち込む」と書いてあったが **誤り**だった
+ *   (テストは健全な箱が素通りすることしか見ていなかったので、誰も気づいていなかった)。
+ * 何に使えるか: 交点を実エッジにした mesh は「三角形が辺でしか交わらない」= arrangement 系の
+ *   内外判定 (winding number) の **入力条件**を満たす。つまり repair は再構成の *前半* に当たる。
+ *   後半 (どのセルが内側か) は cgal/manifold/nef のどれも持っていない → #3435 geogram /
+ *   #3438 Cherchi の射程 (mesh arrangements)。---- */
 sPtr<cgMesh>
 cgMesh3D::op_repair()
 {
@@ -927,7 +891,10 @@ cgMesh::create_for_meta(const uint8_t *meta, int len)
 	if ( len == 4 && meta[0]=='P' && meta[1]=='L' && meta[2]=='Y' && meta[3]=='2' )
 		return thNEW(cgMesh2D,());
 	/* ★ #3404: Manifold カーネルの出力キャッシュ "MFM3" も 3D として受理し、decode 時に EPECK へ
-	 *   無損失昇格する(cg agent が Manifold 入力を透過的に読める)。昇格後は普通の cgMesh3D。 */
+	 *   無損失昇格する(cg agent が Manifold 入力を透過的に読める)。昇格後は普通の cgMesh3D。
+	 *   ★ #3435 / 2026-08-19: **geogram の値もこの形式** (自前 4CC "GGM3" は撤去し、同一レイアウト
+	 *   なので MFM3 を共有)。geogram のブールは厳密述語/厳密構成だが結果の頂点は double に落ちるので、
+	 *   EPECK へは manifold と同様に無損失昇格になる (double は 2 進有理数)。 */
 	if ( len == 4 && meta[0]=='M' && meta[1]=='F' && meta[2]=='M' && meta[3]=='3' ) {
 		sPtr<cgMesh3D> m = thNEW(cgMesh3D,());
 		m->set_mfm3_input();
@@ -938,6 +905,14 @@ cgMesh::create_for_meta(const uint8_t *meta, int len)
 	if ( len == 4 && meta[0]=='M' && meta[1]=='F' && meta[2]=='C' && meta[3]=='2' ) {
 		sPtr<cgMesh2D> m = thNEW(cgMesh2D,());
 		m->set_mfc2_input();
+		return m;
+	}
+	/* ★ #3433: Nef カーネルの出力 "NEF3"(SNC) も 3D として受理。decode で SNC を読み、
+	 *   **有界かつ 2-多様体のときだけ** Surface_mesh へ落とす (cg の表現力の範囲)。 */
+	if ( len == 4 && meta[0]=='N' && meta[1]=='E' && meta[2]=='F' &&
+	     ( meta[3]=='3' || meta[3]=='B' ) ) {   /* nef_snc="NEF3" / nef_hybrid="NEFB" */
+		sPtr<cgMesh3D> m = thNEW(cgMesh3D,());
+		m->set_nef3_input();
 		return m;
 	}
 	return sPtr<cgMesh>();

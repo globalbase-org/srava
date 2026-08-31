@@ -29,7 +29,7 @@ gen() {  # $1=点数 → tube 用 [[[x,y,z],r],...] を生成(cos/sin は awk)
 }
 
 # NB: MinGW での stall は **間欠的(双方向パイプ・デッドロックの race)**。時々完走・時々 hang するので
-#     各サイズを ATTEMPTS 回試し、1 回でも hang したら STALL とみなす。Linux は毎回即完走(<1s)。
+#     各サイズを ATTEMPTS 回試し、1 回でも hang したら STALL とみなす。Linux は毎回即完走。
 TO="timeout 30"; command -v timeout >/dev/null 2>&1 || TO=""   # Linux 0.3s / MinGW hang を弾く
 ATTEMPTS="${REPRO_ATTEMPTS:-4}"
 

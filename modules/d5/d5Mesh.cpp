@@ -108,7 +108,7 @@ d5Mesh::create_for_meta(const uint8_t *meta, int len)
 	/* 自ネイティブ D5M3 に加え、Manifold の MFM3 も受理する (⑤ cross-module 変換・P4)。
 	 * mfMesh の MFM3 codec framing は d5Mesh と完全同一 ([u32 nv][u32 nf] verts(f64) faces(u32)・
 	 * little-endian) なので、同じ decode() で読める = MFM3→d5-mesh3d の cross reader が成立する。
-	 * どちらのタグでも生成するのは d5Mesh (=自型)。reader_for が out_type=d5-mesh3d で選ぶので、
+	 * どちらのタグでも生成するのは d5Mesh (=自型)。reader_for が types=d5-mesh3d で選ぶので、
 	 * MFM3 を「自型で消費したい」要求のときだけこの reader が呼ばれる (mf 自身の読みには影響しない)。 */
 	if ( len == 4 && ( ::memcmp(meta, "D5M3", 4) == 0 || ::memcmp(meta, "MFM3", 4) == 0 ) )
 		return thNEW(d5Mesh,());

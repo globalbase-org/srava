@@ -3,7 +3,7 @@
 //   螺旋生成・解放帯検出・pipe_scene_adjust 呼び出し・テーパ付き export まで一通り踏む。
 //
 //   実行: srava test/roll_min.sra   （include は $PREFIX/share/srava/lib か $SRAVA_PATH から解決）
-//   所要: real ~1m11s / user ~11m25s  (threads:21, parallel:1。cold cache からでも通る)
+//   所要: 重い (threads:21, parallel:1。cold cache からでも通る)
 //   必須モジュール: pipe_proximity  （`srava --modules` でロード確認できる）
 //
 //   期待値（この 5 行が出れば PASS）:

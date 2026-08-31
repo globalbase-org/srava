@@ -36,7 +36,14 @@ function(tinystate_codegen CODEGEN_TARGET)
   file(MAKE_DIRECTORY ${_stampdir})
   set(_stamps)
   foreach(_src ${ARGN})
-    string(REPLACE "/" "_" _nm "${_src}")
+    # ★ コロンも潰す: MinGW/MSYS2 では絶対パスが `C:/Users/...` なので、スラッシュだけ置換すると
+    #   ドライブレターのコロンが名前に残る。NTFS では `名前:ストリーム` が代替データストリーム (ADS)
+    #   の構文なので、`stamps/C:_Users_….t` への touch は **`C` という名前のファイルの ADS** になり、
+    #   ninja からは stamp が「存在しない」ままになる (`ninja explain: output ... doesn't exist`)。
+    #   → codegen が毎回全件再実行され、生成ヘッダの mtime 更新で依存 TU も全部再コンパイルされる
+    #     (= MinGW のビルドが永遠に差分にならない)。2026-08-30 実測: stamps/ の中身が Linux 256 個に
+    #     対し MinGW は `C` ひとつだけ。Cygwin は `/cygdrive/c/...` でコロンが無いので無傷だった。
+    string(REGEX REPLACE "[/:]" "_" _nm "${_src}")
     set(_stamp ${_stampdir}/${_nm}.t)
     # tscpp2 は各ソースにつき ${CMAKE_BINARY_DIR}/_ts2/c++/<basename>_.h (private) と
     #   <basename>_pb.h (public base) を生成する (genOutputName: <baseheader>/<header>/c++/<basename>)。

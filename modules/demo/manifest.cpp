@@ -6,7 +6,7 @@
 
 extern const srava_module_descriptor dematsAgent_descriptor;   /* dematsAgent.cpp */
 
-extern "C" const srava_module_descriptor* srava_module(void)
+SRAVA_MODULE_EXPORT const srava_module_descriptor* srava_module(void)
 {
 	return &dematsAgent_descriptor;
 }

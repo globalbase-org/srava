@@ -6,6 +6,7 @@
  * 注: if は一度だけ評価されるので memo 化と衝突しない。while/for(再評価)は 2.4。
  */
 #include	"pig/c++/pigfFunction.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
 #include	"_ts2/c++/pigfIf_.h"
@@ -28,7 +29,6 @@ public:
 	int		ifDestroyed;   /* 駆動中の枝へ destroy を転送済み(1 回だけ) */
 private:
 protected:
-	TS_DEFARGS
 };
 
 TS_END_IMPLEMENT
@@ -46,7 +46,6 @@ pigfIf_::pigfIf_(TS_ARGS0)
         : pigfFunction_(parent,_front),
 	  parent(tinyState_::parent)
 {
-    TS_CPARGS0
     ifDestroyed = 0;
 }
 
@@ -67,24 +66,24 @@ TS_STATE(ACT_START)
 	 * 自分の args を一巡して送れば「走っている枝だけ」が畳まれる。1 度だけ。 */
 	if ( is_destroyed() && ! ifDestroyed ) {
 		ifDestroyed = 1;
-		if ( ::getenv("PIG_DBG_TD") ) ::fprintf(stderr, "[td] if: destroy 転送\n");
+		if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] if: destroy 転送\n");
 		for ( int di = 0 ; di < args.length() ; ++di )
 			if ( args[di].is_notNull() ) args[di]->destroy();
 	}
 	if ( args.length() < 2 ) {           /* 文法上ありえないが安全に */
-		front->set_result(thNEW(pigDataNull,()));
+		_front->set_result(thNEW(pigDataNull,()));
 		return rDO|FIN_START;
 	}
 	if ( args[0]->is_error() ) {         /* 条件評価エラー → 伝播 */
-		front->set_result(args[0]);
+		_front->set_result(args[0]);
 		return rDO|FIN_START;
 	}
 	/* 取られた枝を compact して値を返す(エラーでも実結果でも「その枝の値」= 同じものを返す)。
 	 * 取られない枝には触れない。compact は async 枝で yield しうるが seqLast 同様再走で前進。 */
 	if ( args[0]->get_bool() )
-		front->set_result(args[1]->compact());
+		_front->set_result(args[1]->compact());
 	else
-		front->set_result( ( args.length() >= 3 ) ? args[2]->compact()
+		_front->set_result( ( args.length() >= 3 ) ? args[2]->compact()
 		                                          : sPtr<pigData>(thNEW(pigDataNull,())) );
 	return rDO|FIN_START;
 }

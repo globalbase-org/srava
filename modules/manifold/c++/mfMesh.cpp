@@ -15,6 +15,7 @@
 #include	<utility>
 #include	"common/geodesic.h"   /* sphere/icosphere の測地球生成 (cgal と共通) */
 #include	"common/mesh3mf.h"   /* AMF/3MF ライタ (cgal と共通) */
+#include	"common/exact_wire.h"   /* CGAL 厳密 wire の有理数文字列パーサ (geogram と共通) */
 #include	<sys/time.h>  /* gettimeofday (decode 内訳プローブ) */
 #include	<unistd.h>    /* getpid */
 
@@ -112,41 +113,9 @@ mfMesh::encode(mfChunkSink &sink)
  *   framing: [u32 nv][u32 nf] / 頂点×nv(各 x,y,z = [u32 len][len byte の "p/q" or 整数 文字列])/
  *            面×nf([u32 nidx][u32 idx]...)/ 色 section。CGAL 非依存で "p/q" を double へ(桁あふれ回避の
  *   スケール除算)。面は n-gon 可 → ファン三角化。頂点 index は共有済み(統合不要)。 */
-static std::string get_str_field(mfChunkSource &s) {
-	uint32_t len = get_u32(s);
-	std::string str;
-	str.resize(len);
-	if ( len > 0 ) s.pull((uint8_t*)&str[0], (int)len);
-	return str;
-}
-/* 十進整数文字列 → mantissa(|m|<1e18) と 10 の指数 e10。value = m * 10^e10。桁あふれしない。 */
-static double strdec_scaled(const std::string &s, int &e10) {
-	int i = 0, sign = 1;
-	if ( i < (int)s.size() && (s[i]=='-' || s[i]=='+') ) { if ( s[i]=='-' ) sign = -1; i++; }
-	std::string d = s.substr(i);
-	size_t nz = d.find_first_not_of('0');
-	if ( nz == std::string::npos ) { e10 = 0; return 0.0; }
-	d = d.substr(nz);
-	int total = (int)d.size();
-	int keep = ( total < 18 ) ? total : 18;
-	double m = 0.0;
-	for ( int k = 0 ; k < keep ; ++k ) m = m * 10.0 + (double)(d[k] - '0');
-	e10 = total - keep;
-	return sign * m;
-}
-/* "p/q"(or 整数)→ double。巨大 p,q でも (mp/mq)*10^(ep-eq) で桁あふれを避ける。 */
-static double parse_rational_d(const std::string &s) {
-	size_t slash = s.find('/');
-	if ( slash == std::string::npos ) {
-		int e; double m = strdec_scaled(s, e);
-		return m * ::pow(10.0, (double)e);
-	}
-	int en, ed;
-	double mn = strdec_scaled(s.substr(0, slash), en);
-	double md = strdec_scaled(s.substr(slash + 1), ed);
-	if ( md == 0.0 ) return 0.0;
-	return (mn / md) * ::pow(10.0, (double)(en - ed));
-}
+/* パーサ本体は src/h/common/exact_wire.h (geogram.so と共通)。ここでは短い別名だけ置く。 */
+static inline std::string get_str_field(mfChunkSource &s) { return srava_exact::get_str_field(s); }
+static inline double parse_rational_d(const std::string &s) { return srava_exact::parse_rational_d(s); }
 
 void
 mfMesh::decode_mesh_exact(mfChunkSource &src)
@@ -173,6 +142,21 @@ mfMesh::decode_mesh_exact(mfChunkSource &src)
 	}
 	/* 色 section は読まない(必要バイトのみ pull 済み・reader が残りを閉じる)。 */
 	m_ = Manifold(m);
+}
+
+/* ★ #3433: NEF3 (nef.so の出力) を読む。payload 先頭 1 バイト = 形式
+ *   (nfMesh.h の NF_FORM_*・安定契約としてここに inline 再現):
+ *     1 = 厳密境界 → cg の "MESH" と同一フレーミングなので decode_mesh_exact をそのまま使える
+ *     0 = SNC      → パースに CGAL が要る。manifold.so は **CGAL 非依存 (GPL 非汚染)** を設計として
+ *                    守っているので読まない。黙って空 mesh にせず decodeErr_ を立てて落とす
+ *                    (nf → mf が要るなら cast("cg-mesh3d", x) を挟んで cg 経由で降ろす)。 */
+void
+mfMesh::decode_nef3(mfChunkSource &src)
+{
+	uint8_t form = 0;
+	src.pull(&form, 1);
+	if ( form == 1 ) { decode_mesh_exact(src); return; }
+	decodeErr_ = 1;
 }
 
 /* ---- exact→float 2D (cast の cg→mf downgrade): CGAL の PLY2(cgMesh2D 形式・厳密有理数リング)を
@@ -214,6 +198,7 @@ void
 mfMesh::decode(mfChunkSource &src)
 {
 	if ( meshExactInput_ ) { decode_mesh_exact(src); return; }   /* ★ CGAL MESH → double(Phase D) */
+	if ( nef3Input_ )      { decode_nef3(src);       return; }   /* ★ NEF3 → 境界形式なら読む(#3433) */
 	mf_decode_timing("dec_start");
 	uint32_t nv = get_u32(src);
 	uint32_t nt = get_u32(src);
@@ -293,6 +278,47 @@ mfMesh::op_difference(sPtr<mfMesh> b)
 	return thNEW(mfMesh,(m_ - b->m_));
 }
 
+/* ---- n 項ブール (#3436 P4) --------------------------------------------------
+ * manifold::Manifold::BatchBoolean は n 個をまとめて 1 つの CsgOpNode にする (上限なし)。
+ * 二項の +/^/- はその 2 オペランド版。★ Subtract は CsgOpNode が「先頭は正・残りは負」
+ * = a - (b ∪ c ∪ …) として畳むので、左 fold の a-b-c と一致する。 */
+sPtr<mfGeom>
+mf_bool_from_args(sArray<sPtr<pigData> > *args, const char *kind, const char **errmsg)
+{
+	int na = ( args != 0 ) ? args->length() : 0;
+	if ( na < 2 ) { *errmsg = "needs at least two meshes"; return sPtr<mfGeom>(); }
+	int isU = ( ::strcmp(kind, "union") == 0 ), isI = ( ::strcmp(kind, "intersection") == 0 );
+	manifold::OpType op = isU ? manifold::OpType::Add
+	                    : isI ? manifold::OpType::Intersect : manifold::OpType::Subtract;
+
+	if ( sPtr<mfMesh>::d_cast((*args)[0]).is_notNull() ) {           /* 3D */
+		std::vector<manifold::Manifold> v;
+		v.reserve((size_t)na);
+		for ( int i = 0 ; i < na ; ++i ) {
+			sPtr<mfMesh> mi = sPtr<mfMesh>::d_cast((*args)[i]);
+			if ( ! mi.is_notNull() ) { *errmsg = "needs meshes of one kind (3D)"; return sPtr<mfGeom>(); }
+			v.push_back(mi->manifold());
+		}
+		if ( na == 2 )   /* 既存キャッシュを byte 不変に保つため 2 項は従来どおり */
+			return thNEW(mfMesh,( isU ? (v[0] + v[1]) : isI ? (v[0] ^ v[1]) : (v[0] - v[1]) ));
+		return thNEW(mfMesh,(manifold::Manifold::BatchBoolean(v, op)));
+	}
+	if ( sPtr<mfCross>::d_cast((*args)[0]).is_notNull() ) {          /* 2D */
+		std::vector<manifold::CrossSection> v;
+		v.reserve((size_t)na);
+		for ( int i = 0 ; i < na ; ++i ) {
+			sPtr<mfCross> ci = sPtr<mfCross>::d_cast((*args)[i]);
+			if ( ! ci.is_notNull() ) { *errmsg = "needs meshes of one kind (2D)"; return sPtr<mfGeom>(); }
+			v.push_back(ci->cross());
+		}
+		if ( na == 2 )
+			return thNEW(mfCross,( isU ? (v[0] + v[1]) : isI ? (v[0] ^ v[1]) : (v[0] - v[1]) ));
+		return thNEW(mfCross,(manifold::CrossSection::BatchBoolean(v, op)));
+	}
+	*errmsg = "needs two meshes";
+	return sPtr<mfGeom>();
+}
+
 /* ---- アフィン変換: 行優先 double[12] → Manifold::Transform(mat3x4)。
  *   e = { m00 m01 m02 tx  m10 m11 m12 ty  m20 m21 m22 tz }(cgMesh3D::apply_affine と同規約)。
  *   mat3x4 は la 列優先(4 列×vec3): 列0..2=線形部の各列・列3=平行移動。反射(det<0)の面反転は
@@ -311,6 +337,24 @@ mfMesh::apply_affine(const double e[12])
 /* ---- 計測 / 妥当性 ---- */
 double mfMesh::op_volume() { return m_.Volume(); }
 double mfMesh::op_area()   { return m_.SurfaceArea(); }
+
+/* ---- 計測: 頂点数 / 面数 (#3443) ----
+ * ★ planner が cache の先頭バイトを読んで表示していたのを op へ移した (planner はカーネル中立へ)。
+ * ★ @NumVert()@ は Manifold の内部頂点数。cache に書くのは @GetMeshGL64()@ の頂点なので、
+ *   同じ値になるように **抽出後の数** を返す (lazy CSG はここで評価される = volume/area と同じコスト)。 */
+int
+mfMesh::op_nverts()
+{
+	manifold::MeshGL64 g = m_.GetMeshGL64();
+	return (int)(g.vertProperties.size() / g.numProp);
+}
+
+int
+mfMesh::op_nfaces()
+{
+	manifold::MeshGL64 g = m_.GetMeshGL64();
+	return (int)(g.triVerts.size() / 3);
+}
 
 int
 mfMesh::op_valid()
@@ -635,6 +679,13 @@ mfGeom::create_for_meta(const uint8_t *meta, int len)
 		sPtr<mfCross> c = thNEW(mfCross,(manifold::CrossSection()));
 		c->set_cross_exact_input();
 		return c;
+	}
+	/* ★ #3433: nef の "NEF3" も受理する。payload 先頭 1 バイトが形式で、境界形式 (=1) なら
+	 *   cg の "MESH" と同一フレーミングなので **CGAL 無しで**読める。SNC (=0) は読めない。 */
+	if ( len == 4 && ::memcmp(meta, "NEFB", 4) == 0 ) {
+		sPtr<mfMesh> m = thNEW(mfMesh,(Manifold()));
+		m->set_nef3_input();
+		return m;
 	}
 	return sPtr<mfGeom>();
 }

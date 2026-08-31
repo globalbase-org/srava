@@ -9,6 +9,7 @@
  * pigAgentRegistry / cgCacheCodec と同じ注意)。
  */
 #include	"pig/c++/pigCacheCodec.h"
+#include	"pig/c++/pigModule.h"   /* 組込記述子 (#3439 ③) */
 #include	"pig/c++/pigDataRef.h"
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsObject 派生 TU の作法 (ptsApp 完全型) */
@@ -34,12 +35,41 @@ ref_match(sPtr<pigData> body)
 	return pig_data_ref_is(body);
 }
 
-/* D_REF は in-proc 参照でカーネル非依存 = 無型 (out_types "")。reader_for_tag は "REF " の自型
- * (type_of_tag=0) が無いのでフォールバック経路 (タグを読める任意 codec) でこの reader を選ぶ。
- * ★ #3427 ③: 旧「静的初期化でグローバル表へ登録」を廃止。pigModuleRegistry (ハブ) の ctor が
- *   この関数で **自分の codec 表へ** 組込登録する (per-registry = per-app・リエントラント)。 */
-void
-pigRefCacheCodec_register(pigCacheCodec &codecs)
+/* D_REF は in-proc 参照でカーネル非依存 = 無型 (types "")。
+ *
+ * ★ #3439 ③: 派生テーブルへの登録をやめ、**組込モジュールの記述子**として持つ。
+ *   検索は記述子走査 + is_enabled になったので、組込も同じ経路に乗せる必要がある。
+ *   この記述子は名前 "pig"・priority 0・ops 無し・**常に有効** (off にできない = モジュール由来でない
+ *   ことが構造で表れる)。値キャッシュ ("TEXT") はここにも居ない — あれは ptsDataCache の既定分岐
+ *   (codec が無ければ WriterText / wire_tag_is_text なら ReaderText) で、モジュール由来ではない。 */
+
+/* ★ 2026-08-28 (ABI v13/v16): 組込の wire クラス。D_REF は **無型** (pigDataWireTyped の派生ではない)
+ *   ので **create を持たない** = op の引数として配線される対象にならないし、4CC から実体化もされない。
+ *   writer / match は生きている — export が書く REF キャッシュの writer 選択がこれを引く。
+ *   ★ create=0 にしたのは v16 の検証機構の指摘による。以前は「常に null を返す create」を置いていたが、
+ *     tags に "REF " を申告していたため「申告したのに受理しない」= ずれとして検出された。
+ *     受理しないのは実装の性質なので、**持たない**ことを構造で表すのが正しい。 */
+static const pigWireClass pig_ref_wire = { "pigDataRef", 0 /*create*/, &ref_mk_reader, &ref_mk_writer, &ref_match };
+/* ★ ABI v16: 階層 × 型名 × 4CC。D_REF は無型なので types は空。 */
+static const pigModuleType pig_builtin_provides[] = {
+	{ &pig_ref_wire, "", 0 /* tags: create を持たないので列挙しない */ },
+	{ 0, 0, 0 },
+};
+
+static const srava_module_descriptor pig_builtin_descriptor = {
+	SRAVA_MODULE_ABI, "pig", 0,
+	0 /*make_agent*/, 0u /*exec_caps*/, 0 /*exec_default*/,
+	0 /*ops*/, 0 /*n_ops*/,
+	0 /*import_exts*/, 0 /*export_exts*/,
+	pig_builtin_provides,  /* provides: 階層 × 型名 × 4CC (ABI v16) */
+	/* ★ 2026-08-28 (ABI v11): 旧 types/type_tags ("value,ref" / "TEXT,REF ") は撤去。
+	 *   非幾何型は libpig の pig_nongeometric_types が 1 本で持つ (全モジュール共通のため)。 */
+	0 /*hash_salt*/,
+	0,    /* initialize */
+};
+
+const srava_module_descriptor *
+pig_builtin_module_descriptor(void)
 {
-	codecs.register_codec("pig-ref", "REF ", "", &ref_match, &ref_mk_reader, &ref_mk_writer);
+	return &pig_builtin_descriptor;
 }

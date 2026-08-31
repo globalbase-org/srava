@@ -139,6 +139,9 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	src.r = this;
 	mesh->decode(src);
 	if ( pullErr ) { errCode = -1; return rDO|FIN_START; }
+	/* ★ #3433: 形式は読めたが cg の表現力で受け取れない (非有界/非多様体の Nef 等)。
+	 *   空 mesh を黙って返すと volume が 0 になるので、ここでエラーにする。 */
+	if ( mesh->decode_failed() ) { errCode = -2; return rDO|FIN_START; }
 	result = mesh;                     /* cgMesh は pigData=stdObject → そのまま渡す(d_cast 不要) */
 	return rDO|FIN_START;
 }

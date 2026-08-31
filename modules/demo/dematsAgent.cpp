@@ -34,8 +34,8 @@ CLASS_TINYSTATE(demo/c++/dematsAgent,pig/c++/ptsAgent)
 
 /* descriptor.ops (レジストリ照会用)。全 op out=value。in/nin/mkCalc は不使用 (単一 demo_compute へ流す)。 */
 static const pigOpEntry DEMO_OPS[] = {
-	{ "demo_add",   0, 0, AK_INLINE, 0, 1 },
-	{ "demo_range", 0, 0, AK_INLINE, 0, 1 },
+	{ "demo_add",   0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
+	{ "demo_range", 0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
 };
 static const int DEMO_N_OPS = (int)(sizeof(DEMO_OPS) / sizeof(DEMO_OPS[0]));
 
@@ -88,17 +88,27 @@ mk_dematsAgent(sPtr<ptsObject> med)
 	return thNEW(dematsAgent,(med));
 }
 
-/* 自己申告記述子。priority=0 (opt-in: agent(so,{priority}) で既定化)・**EXEC_PROCESS 専用** (⑤ 回避)。
+/* 自己申告記述子。priority=-1 (opt-in: agent(so,{priority}) で既定化)・**EXEC_PROCESS 専用** (⑤ 回避)。
  * namespace scope の const は既定で内部リンケージ → manifest.cpp から extern 参照するため extern 明示。 */
 extern const srava_module_descriptor dematsAgent_descriptor;
 extern const srava_module_descriptor dematsAgent_descriptor = {
-	SRAVA_MODULE_ABI, "demo", 0,
-	&mk_dematsAgent, (unsigned)EXEC_PROCESS, EXEC_PROCESS,
-	DEMO_OPS, DEMO_N_OPS, 0, 0,
-	0,      /* codec_tags: 無し (value のみ) */
-	0,      /* codecs: 無し */
-	0, 0,   /* types / type_tags: 解析モジュール (自前の mesh 型を持たない) */
-	0,   /* hash_salt: 基準カーネル/解析モジュールはソルト無し */
+	.abi_version   = SRAVA_MODULE_ABI,
+	.name          = "demo",
+	.priority      = -1,   /* テスト/実証専用。既定カーネル候補としては最下位群 (負値)・同点回避 */
+	.make_agent    = &mk_dematsAgent,
+	.exec_caps     = (unsigned)EXEC_PROCESS,
+	.exec_default  = EXEC_PROCESS,
+	.ops           = DEMO_OPS,
+	.n_ops         = DEMO_N_OPS,
+	.import_exts   = 0,
+	.export_exts   = 0,
+	.provides      = 0,   /* 無し */
+	.hash_salt     = 0,   /* 基準カーネル/解析モジュールはソルト無し */
+	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
+	 *   テスト専用 */
+	.initialize    = 0,   /* 無し */
+	.configure     = 0,   /* ★ v10 (#3441): opts フックは未使用(このモジュールは module() の
+	                       *   opts を消費しない) */
 };
 /* ★ #3427 ③: 旧・静的初期化の register_descriptor は撤去。登録は dlopen 経路
  * (pigModuleRegistry::load_file → register_descriptor) の 1 本 = app 所有レジストリへ。 */

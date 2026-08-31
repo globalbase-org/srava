@@ -79,11 +79,11 @@ mfaColor_::compute()
 	int r = 150, g = 150, b = 150;
 	if ( ! srava_color::parse_spec(spec, r, g, b) ) {
 		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "color: 2nd arg は名前(\"red\"…) / \"#RRGGBB\" / [r,g,b](0-255) のいずれか"))));
+		    "color: 2nd arg must be a name (\"red\"...), \"#RRGGBB\", or [r,g,b] (0-255)"))));
 		return;
 	}
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("color: needs a 3D mesh (2D は非対応)"))));
+		result = thNEW(pigDataError,(thNEW(stdString,("color: needs a 3D mesh (2D is not supported)"))));
 		return;
 	}
 	mesh = in->op_color(r, g, b);

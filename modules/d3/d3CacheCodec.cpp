@@ -32,8 +32,20 @@ d3_match(sPtr<pigData> body)
 }
 
 /* ★ descriptor.codecs が指す配列 (name==0 番兵終端)。d3atsAgent.cpp が extern 参照。 */
-extern const pigModuleCodec d3_codecs[];
-const pigModuleCodec d3_codecs[] = {
-	{ "d3-mesh", "D3M3", "d3-mesh3d", &d3_match, &d3_mk_reader, &d3_mk_writer },
-	{ 0, 0, 0, 0, 0, 0 },
+/* ★ 2026-08-28 (ABI v12): この階層への配線先。reader は下の codec 行が使うものと同一 —
+ *   どの行 (自型読み / foreign 昇格読み) でも reader は 1 本で、階層に帰属するため。 */
+PIG_WIRE_DEF(d3Mesh, d3_mk_reader, d3_mk_writer);
+
+/* ★ 2026-08-28 (ひさ設計・ABI v16): このモジュールが提供するもの。
+ *   1 行 = (本体クラス階層, その階層について名乗る型名, 扱う 4CC)。
+ *   ⚠ **types と tags は位置対応しない** (独立した 2 本・個数も一致しない)。どのタグがどの型に
+ *     なるかは申告せず、wire->create に通して訊く (pigModule.h の pigModuleType 参照)。
+ *   ⚠ tags は **診断専用** — 読めるかを答えるのは wire->create 一本で、この欄は
+ *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
+extern const pigModuleType d3_provides[];
+const pigModuleType d3_provides[] = {
+	{ &d3Mesh::WIRE, "d3-mesh3d",
+	  "D3M3" },
+	{ 0, 0, 0 },
 };
+

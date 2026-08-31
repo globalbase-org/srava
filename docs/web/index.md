@@ -21,16 +21,28 @@ title: srava ドキュメント
 - [**インストールガイド**](srava_install_guide.html) — Linux / macOS / Windows(MSYS2・Cygwin)での
   ビルド + インストール手順。各モジュールの依存関係(幾何カーネル CGAL 厳密 / Manifold 高速)・
   tinyState・HDF5、外部依存の自動取得(FetchContent)まで。**まず動かすならこちら。**
+- [**モジュールリファレンス**](srava_module_reference.html) — モジュール(`.so`)の探索路・優先度・
+  記述子 ABI と、**モジュールが効かないときの診断**:
+  [`srava --modules`](srava_install_guide.html#modules)（**どの `.so` が効いているか** = 配置）と
+  [`srava --module-info`](srava_install_guide.html#module-info)（**何を申告しているか** = 中身）。
 - [**言語リファレンス**](srava_language_reference.html) — 文法・lambda/クロージャ・評価モデル・
-  2D/3D ディスパッチ・キャッシュ・エラー表示・環境変数。まず全体像を掴むならこちら。
+  **並列に走るもの / 走らないもの**・2D/3D ディスパッチ・キャッシュ・エラー表示・
+  **設定と環境変数**(srava 変数 → 環境変数 → 既定 の解決順・負荷コントロール一覧)。
+  まず全体像を掴むならこちら。
 - [**関数リファレンス**](srava_function_reference.html) — 全関数・演算子を統一形式で一覧した逆引き
-  カタログ。「この関数のシグネチャと使い方をすぐ知りたい」ときに。
+  カタログ。「この関数のシグネチャと使い方をすぐ知りたい」ときに。冒頭に
+  **[op × モジュールの ○× 表](srava_function_reference.html#module-matrix)**（どの演算をどのモジュールが
+  実装しているか・記述子から機械生成）がある。
 - [**螺旋巻きつけライブラリ**](srava_roll_reference.html) — 標準ライブラリ `std/roll.sra`（芯パイプに
   太さ可変パイプを密接に巻きつけて螺旋ホーンを生成する継続法）の関数リファレンス。**要 pipe_proximity
   モジュール**。ドライバ例は `examples/roll_sample.sra`。
 - [**モジュールリファレンス**](srava_module_reference.html) — モジュール機構（`.so`）の概要と、同梱
-  モジュール **cgal.so** / **manifold.so**（幾何カーネル）・**pipe_proximity**（可変太さ配管の自己接近
-  検出・距離調整）の依存・対応型・op 一覧。
+  モジュールの依存・対応型・op 一覧。幾何カーネルは **cgal.so**（CGAL・厳密）/ **manifold.so**（高速）/
+  **nef_snc.so・nef_hybrid.so**（Nef 多面体）/ **geogram.so**（厳密 mesh arrangement）/
+  **cherchi.so**（indirect predicates）/ **occt.so**（B-rep・解析曲面）/ **openvdb.so**（ボリューム）、
+  表現をまたぐ**橋渡し** **occt_mf.so** / **openvdb_mf・cg・gg.so**、
+  解析モジュールは **pipe_proximity**（可変太さ配管の自己接近検出・距離調整）。
+  ★ 既定でビルドされるのは cgal / manifold / nef / pipe_proximity で、残りは opt-in。
 - [**モジュール設計**](srava_module_design.html) — 自作モジュール（`.so`）を書くための設計ガイド。
   記述子 ABI・op 申告・型/4CC 登録・実行方式・cross-module 型変換・ビルド/配置。
 - [**k-Wave 音響シミュレーション**](srava_kwave.html) — srava の形状を `export_vox` で voxel 化し、
@@ -58,6 +70,16 @@ export("horn.stl", tube(path, 24));
 srava model.sra            # ファイルを実行(先頭の #! シェバングは読み飛ばす)
 ```
 
+★ **モジュールは `module()` で名指したときにロードされる**。
+とりあえず実カーネル一式(cgal / geogram / manifold / occt / openvdb / nef_hybrid)を使いたいときは
+`include "module/all.sra";` か `SRAVA_MODULE_ALL=1`。**「全モジュール」ではない** — `nef_snc`・
+橋渡し(`openvdb_mf` / `openvdb_cg` / `openvdb_gg`)・`pipe_proximity`・`d2`-`d5` は個別に `module()` する。
+
+```
+module("manifold.so", {});                 // 使うモジュールを明示する
+include "module/all.sra";                  // または一式まとめて
+```
+
 環境変数 `SRAVA_AGENT`（agent バイナリ）・`SRAVA_CACHE_DIR`（キャッシュ置き場）・
 `SRAVA_CACHE_RETAIN`（終了時キャッシュ掃除の保持方針・既定は即削除）・
-`SRAVA_PATH`（`include` の探索パス）・`PIG_MAX_WORKERS`（並列ワーカー上限）など。詳細は言語リファレンス。
+`SRAVA_PATH`（`include` の探索パス）・`SRAVA_LOAD_CPU`（並列ワーカー上限）など。詳細は言語リファレンス。

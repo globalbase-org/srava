@@ -15,6 +15,7 @@
  *    妥当性は Status()==NoError で判断でき、破綻はサイレントでなく検出できる(op_valid)。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	"manifold/manifold.h"
 #include	"manifold/cross_section.h"
 #include	<stdint.h>
@@ -35,11 +36,22 @@ public:
 	virtual int         dim()       = 0;   /* 2 or 3 */
 	virtual void encode(mfChunkSink&)   = 0;
 	virtual void decode(mfChunkSource&) = 0;
+	/* ★ #3433: decode が「この形式は mf の表現力では受け取れない」と判断したときに立てる。
+	 *   reader がこれを見て errCode を立てる (空 mesh を黙って返さない)。 */
+	int  decode_failed() const { return decodeErr_; }
+protected:
+	int  decodeErr_ = 0;
+public:
 	virtual bool write_to(const char *path, const char *unit) = 0;
 	/* アフィン変換(行優先 double[12]・3D 規約)。2D(mfCross)は XY 2x2 + XY 平行移動だけ使う。 */
 	virtual sPtr<mfGeom> apply_affine(const double e[12]) = 0;
 	/* reader 用ファクトリ: D_META タグから具体型を生成(未知タグは null)。 */
 	static sPtr<mfGeom> create_for_meta(const uint8_t *meta, int len);
+
+	/* ★ 2026-08-28 (ABI v12): **この階層への配線先**。op の OPS 行が OPWIRE(Calc, mfGeom) と
+	 *   書くと、引数はこの WIRE 経由で実体化される。create_for_meta が 4CC を受理判定し、
+	 *   mkReader がこの階層の stream reader を起こす。定義は mfCacheCodec.cpp。 */
+	static const pigWireClass WIRE;
 };
 
 /* ---- 3D Manifold ---- */
@@ -67,6 +79,11 @@ public:
 	 *   経路を有効にする。cast("manifold", exactMesh) で create_for_meta が MESH を検出→これを立て、
 	 *   decode() が cgaMeshCodec 形式(有理数 "p/q" 文字列)をパースして Manifold を作る(CGAL 非依存)。 */
 	void set_mesh_exact_input() { meshExactInput_ = 1; }
+	/* ★ #3433: nef の "NEF3" を読む経路。NEF3 の payload は先頭 1 バイトが形式で、
+	 *   1 = 厳密境界 (cg の "MESH" と同一フレーミング) なら **CGAL 無しで読める** (decode_mesh_exact)。
+	 *   0 = SNC は CGAL が要るので manifold では読めない (CGAL 非依存 = GPL 非汚染を守る) →
+	 *   decodeErr_ を立てて reader にエラーを出させる (空 mesh を黙って返さない)。 */
+	void set_nef3_input() { nef3Input_ = 1; }
 
 	/* ---- 着色 (#3415 続き): 全頂点プロパティ ch3..5 に RGB(0-255) を入れた新 mesh ----
 	 * cgal の per-face "f:color" property map に対応する mf 側の持ち方は **頂点プロパティ**
@@ -87,6 +104,9 @@ public:
 	/* ---- 計測 / 妥当性 ---- */
 	double op_volume();   /* 囲む体積 */
 	double op_area();     /* 表面積 */
+	/* ★ #3443: 頂点数 / 面数 (planner の表示を op へ移した)。 */
+	int    op_nverts();
+	int    op_nfaces();
 	int    op_valid();    /* 1 = Status()==NoError かつ非空 / 0 = 破綻・空(サイレント破綻の検出点)*/
 	int    op_bbox(double mn[3], double mx[3]);      /* 軸平行 AABB。返り=3 */
 	int    op_centroid(double out[3]);               /* 体積重心(発散定理・GetMeshGL64)。返り=3 */
@@ -103,8 +123,10 @@ public:
 
 protected:
 	void	decode_mesh_exact(mfChunkSource& src);   /* CGAL MESH(有理数文字列)→ double Manifold */
+	void	decode_nef3(mfChunkSource& src);         /* NEF3: 境界形式なら読む / SNC は失敗 */
 	manifold::Manifold	m_;
 	int	meshExactInput_ = 0;   /* 1 = decode() が CGAL MESH 形式を読む(create_for_meta が MESH タグで立てる) */
+	int	nef3Input_ = 0;        /* 1 = decode() が NEF3 を読む(create_for_meta が NEF3 タグで立てる) */
 };
 
 /* ---- 2D manifold::CrossSection(extrude/revolve の断面) ---- */
@@ -138,6 +160,8 @@ public:
 
 	/* ---- 計測 ---- */
 	double op_area();                            /* 囲み面積 */
+	int    op_nverts();
+	int    op_nfaces();   /* 2D は面を持たない = 0 */
 	int    op_bbox(double mn[3], double mx[3]);  /* 2D AABB(mn/mx の [0],[1] のみ)。返り=2 */
 
 	/* ---- アフィン変換(2D: e[12] の XY 2x2 + XY 平行移動を使う)→ 新 mfCross ---- */
@@ -156,5 +180,13 @@ protected:
 	manifold::CrossSection	c_;
 	int	crossExactInput_ = 0;   /* 1 = decode() が CGAL PLY2 形式を読む(create_for_meta が PLY2 タグで立てる) */
 };
+
+/* ★ #3436 P4: n 項ブール (mfaUnion / mfaIntersection / mfaDifference 共通の入口)。
+ *   manifold は Manifold::BatchBoolean / CrossSection::BatchBoolean を持ち、**上限なし**で
+ *   n 個を 1 つの CSG ノードとして畳む (Compose は deprecated なのでこちらを使う)。
+ *   difference は CsgOpNode が「先頭は正・残りは負」= a-(b|c|…) として扱うので左 fold と一致する。
+ *   2 項は従来の二項 API のまま (既存キャッシュを byte 不変に保つ)。
+ *   失敗時は null を返し *errmsg に理由を置く。3D/2D はここで振り分ける。 */
+sPtr<mfGeom> mf_bool_from_args(sArray<sPtr<pigData> > *args, const char *kind, const char **errmsg);
 
 #endif /* MF_MESH_H */
