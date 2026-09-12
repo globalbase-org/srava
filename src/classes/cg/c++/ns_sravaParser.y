@@ -434,6 +434,35 @@ static sPtr<pigData> mk_lambda(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
 
 /* 関数呼び。名前で builtin を dispatch。 */
 #ifndef SRAVA_VALUE_ONLY
+
+/* ★ #3474 続き (2026-09-05): 引数を **そのまま全部**転送するヘルパ (import / text 用)。
+ *
+ *   ⚠ 以前はこの種の op ごとに **添字を直書きして固定 arity のノードを組み直して**いた:
+ *       pushArg(arg0); if (na>=2) pushArg(arg1); else pushArg(既定);
+ *     これだと index 2 以降には**触れてすらいない**ので、余分な引数が黙って捨てられる
+ *     (`sphere(1,32,5)` が第 3 引数を捨てて通っていた)。arity 検査 (pigfModuleAgent の
+ *     in[]/nin 照合) が見るのは **組み上がったノードの args** なので、検査より上流で
+ *     消えた引数は誰にも気づかれない。
+ *
+ *   ★ パーサの仕事は **来た引数をそのまま伝えること**。誤った呼び出しは下流の
+ *     arity/種別検査と sig 照合が弾く。既定値の穴埋めだけがパーサに残る理由で、
+ *     それは「arity 検査が完全一致を要求する」ため (各 op の compute() 自身も
+ *     `na > k ? ... : 既定` を持っているので、値としては二重に持っている)。
+ *
+ *   from … この位置から後ろを既定値で埋める / defs … 既定値の配列 (from に対応)
+ */
+static void
+pig_push_rest_with_defaults(sPtr<pigDataFunction<pigfModuleAgent> > f,
+                            sPtr<pigDataArray> a, int na, int from,
+                            sPtr<pigData> *defs, int ndefs)
+{
+	int i = from;
+	for ( ; i < na ; ++i )                              /* 来た引数は **全部**通す */
+		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+	for ( ; i < from + ndefs ; ++i )                    /* 足りないぶんだけ既定値 */
+		f->pushArg(defs[i - from]);
+}
+
 static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	const char* nm = name->get_str()->get_str();
 	sPtr<pigDataArray> a = sPtr<pigDataArray>::d_cast(arglist);
@@ -472,6 +501,25 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	if ( ::strcmp(nm, "module_loaded") == 0 ) {
 		sPtr<pigDataOperatorModuleLoaded> f = thNEW(pigDataOperatorModuleLoaded,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		return f;
+	}
+	/* ★ #3477: 実行時の内省 3 本 (planner 側 op・agent 不要)。
+	 *   modules()             … いま載っているモジュールと priority ("name:priority" 空白区切り)
+	 *   type_of(x)            … x の幾何型名 ("cg-mesh3d" 等・値は "value")
+	 *   which(op[, intype..]) … その op を宣言するモジュールを priority 順に全部 ("name:prio:sig")
+	 * カーネルが混ざる式のデバッグで、毎回ソースを読まずに済ませるための手段。 */
+	if ( ::strcmp(nm, "modules") == 0 ) {
+		return thNEW(pigDataOperatorModules,(ci));
+	}
+	if ( ::strcmp(nm, "type_of") == 0 ) {
+		sPtr<pigDataOperatorTypeOf> f = thNEW(pigDataOperatorTypeOf,(ci));
+		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		return f;
+	}
+	if ( ::strcmp(nm, "which") == 0 ) {
+		sPtr<pigDataOperatorWhich> f = thNEW(pigDataOperatorWhich,(ci));
+		for ( int i = 0 ; i < na ; ++i )
+			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 		return f;
 	}
 	/* concat(a, b, ...): 配列連結(planner 側 op・agent 不要)。配列は要素展開、非配列は 1 要素追加。 */
@@ -651,7 +699,25 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
 		if ( na >= 1 )
 			f->pushArg(thNEW(pigDataFileRef,(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))))));
+		/* ★ 2 個目以降も **そのまま通す** (openvdb の import(path, dx) 等)。
+		 *   包むのはパス (D_REF 化) だけで、残りに手を入れる理由は無い。 */
+		pig_push_rest_with_defaults(f, a, na, 1, 0, 0);
 		f->set_op_name(thNEW(stdString,("import")));
+		f->set_out_cache(1);
+		f->set_info(ci);
+		return f;
+	}
+	/* ★ #3471: text(fontPath, str[, size]) — **フォントを import と同じ D_REF 扱いにする**。
+	 *   引数 0 を pigDataFileRef で包むと、キャッシュキーに **ファイル内容のハッシュ**が入る
+	 *   (content-addressed)。フォントを差し替えればキーが変わり、正しく再計算される。
+	 *   ★ fontconfig の名前引き (StdPrs_BRepFont::FindAndInit) を使わないのはこのため —
+	 *     名前だと同じ .sra が機械によって違う形を出し、値ベースの DAG の前提が壊れる。 */
+	if ( ::strcmp(nm, "text") == 0 ) {
+		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
+		if ( na >= 1 )
+			f->pushArg(thNEW(pigDataFileRef,(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))))));
+		pig_push_rest_with_defaults(f, a, na, 1, 0, 0);   /* ★ 3 個で打ち切らない */
+		f->set_op_name(thNEW(stdString,("text")));
 		f->set_out_cache(1);
 		f->set_info(ci);
 		return f;
@@ -675,35 +741,18 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		f->set_info(ci);
 		return f;
 	}
-	/* offset は球細分化省略可: offset(m, d)(2 引数)は subdiv 既定 1 を補う。offset(m, d, n) はそのまま
-	 * (n=3D 球の細分化レベル。大=滑らか・重い。2D は無視)。 */
-	if ( ::strcmp(nm, "offset") == 0 ) {
-		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* d */
-		if ( na >= 3 )
-			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)2))));   /* subdiv */
-		else
-			f->pushArg(thNEW(pigDataInteger,((INTEGER64)1)));            /* 既定 subdiv=1 */
-		f->set_op_name(thNEW(stdString,("offset")));
-		f->set_out_cache(1);
-		f->set_info(ci);
-		return f;
-	}
-	/* revolve(m[, angle[, segs]]): angle 省略=360(全周)、segs 省略=32(全周の分割数=回転ピッチ)。
-	 * 内部は常に (mesh, angle, segs) の 3 引数に統一。 */
-	if ( ::strcmp(nm, "revolve") == 0 ) {
-		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
-		f->pushArg( na >= 2 ? a->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))   /* angle */
-		                    : sPtr<pigData>(thNEW(pigDataInteger,((INTEGER64)360))) );
-		f->pushArg( na >= 3 ? a->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))   /* segs */
-		                    : sPtr<pigData>(thNEW(pigDataInteger,((INTEGER64)32))) );
-		f->set_op_name(thNEW(stdString,("revolve")));
-		f->set_out_cache(1);
-		f->set_info(ci);
-		return f;
-	}
+	/* ★ #3474 続き (2026-09-05): offset の特例は **撤去した**。
+	 *   存在理由は「省略された引数を既定値で埋めて固定 arity にする」ことだけで、
+	 *   既定値は各 op の compute() が既に自前で持っていた (値が二重にあった)。
+	 *   記述子に nreq (必須引数個数) が入ったので、省略形はそのまま下の generic 経路で通る。
+	 *   ★ パーサが既定値を持てないのは、**どのモジュールが実行するか知らない**から:
+	 *     sphere(r,seg) と sphere(r,dx) では第 2 引数の意味も既定の有無も違う。 */
+	/* ★ #3474 続き (2026-09-05): revolve の特例は **撤去した**。
+	 *   存在理由は「省略された引数を既定値で埋めて固定 arity にする」ことだけで、
+	 *   既定値は各 op の compute() が既に自前で持っていた (値が二重にあった)。
+	 *   記述子に nreq (必須引数個数) が入ったので、省略形はそのまま下の generic 経路で通る。
+	 *   ★ パーサが既定値を持てないのは、**どのモジュールが実行するか知らない**から:
+	 *     sphere(r,seg) と sphere(r,dx) では第 2 引数の意味も既定の有無も違う。 */
 	/* rotate は軸省略可: rotate(m, deg)(2 引数)は軸 "z"(2D 面内回転 / 3D は z 軸)を補う。
 	 * rotate(m, axis, deg)(3 引数)はそのまま。演算子 m@(deg) も 2 引数経由でここに来る。 */
 	if ( ::strcmp(nm, "rotate") == 0 ) {
@@ -756,33 +805,23 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	 * (下の generic 経路が n 引数の pigfModuleAgent ノードを作る)。木への分解と、可換 op の
 	 * 引数ソートはどちらも評価時 (pigfModuleAgent::try_decompose) が行う (#3452 で判明した回帰の
 	 * 修正: parse 直後にモジュール情報を要る判定を置くと未ロード状態を掴んでしまうため)。 */
-	/* circle / sphere は精度ピッチ省略可。circle(r)→(r, 32 辺)、sphere(r)→(r, subdiv 0)。
-	 * circle(r, segs) / sphere(r, subdiv) はそのまま。内部は常に 2 引数 (r, pitch) に統一。 */
-	if ( ::strcmp(nm, "circle") == 0 || ::strcmp(nm, "sphere") == 0 ) {
-		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* r */
-		if ( na >= 2 )
-			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* pitch(segs / subdiv) */
-		else
-			f->pushArg(thNEW(pigDataInteger,( ::strcmp(nm,"circle")==0 ? (INTEGER64)32 : (INTEGER64)0 )));
-		f->set_op_name(thNEW(stdString,(nm)));
-		f->set_out_cache(1);
-		f->set_info(ci);
-		return f;
-	}
+	/* ★ #3474 続き (2026-09-05): circle / sphere の特例は **撤去した**。
+	 *   存在理由は「省略された引数を既定値で埋めて固定 arity にする」ことだけで、
+	 *   既定値は各 op の compute() が既に自前で持っていた (値が二重にあった)。
+	 *   記述子に nreq (必須引数個数) が入ったので、省略形はそのまま下の generic 経路で通る。
+	 *   ★ パーサが既定値を持てないのは、**どのモジュールが実行するか知らない**から:
+	 *     sphere(r,seg) と sphere(r,dx) では第 2 引数の意味も既定の有無も違う。 */
 	/* 計測(値返し op): area(m) は mesh 1 個を取り数値を返す。out_cache(0)=値(インライン)出力 →
 	 * cgatsAgent が WriterText で保存、プランナが VALUE パースで構造化 → 式で観測可能。 */
-	/* 肉厚(値返し): thin_spots(m, t_min [, rays [, cone]]) は mesh + 閾値 + (任意)レイ本数 + (任意)コーン全角(度)
-	 * を取り [[x,y,z,thk],..] を返す。rays 省略=25 / cone 省略=45°。agent は常に 4 引数(THIN_IN)で受けるので補う。 */
+	/* thin_spots(m, t_min[, rays[, cone]]): 肉厚 < t_min の面を返す **値返し** op。
+	 * ★ #3474 続き (2026-09-05): 既定値の穴埋め (rays=25 / cone=45) は **撤去した** —
+	 *   既定値は計算本体 (cgaThinSpots) が自前で持っており、省略可否は記述子の nreq が言う。
+	 *   ⚠ ただし特例自体は残す: この op は **値返し (set_out_cache(0))** で、下の generic 経路
+	 *     (out_cache=1) には寄せられない。ここでやるのは「引数を全部通す」ことだけ。 */
 	if ( ::strcmp(nm, "thin_spots") == 0 ) {
 		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* t_min */
-		if ( na > 2 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)2))));   /* rays */
-		else          f->pushArg(thNEW(pigDataInteger,((INTEGER64)25)));             /* 既定 rays=25 */
-		if ( na > 3 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)3))));   /* cone(度) */
-		else          f->pushArg(thNEW(pigDataInteger,((INTEGER64)45)));             /* 既定 cone=45° */
-		f->set_op_name(thNEW(stdString,(nm)));
+		pig_push_rest_with_defaults(f, a, na, 0, 0, 0);
+		f->set_op_name(thNEW(stdString,("thin_spots")));
 		f->set_out_cache(0);   /* 値返し */
 		f->set_info(ci);
 		return f;
@@ -871,27 +910,29 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* 引数なしの leaf: empty2d() / empty3d() = 値としての空集合(`{}` は中立元で別物)。 */
 	if ( ::strcmp(nm, "empty2d") == 0 || ::strcmp(nm, "empty3d") == 0 ) {
 		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
+		/* ★ #3474 続き (2026-09-05): 引数を **そのまま通す**。以前は 1 つも push せず
+		 *   捨てていたので、openvdb の empty3d(dx) が引数を受け取れなかった
+		 *   (ボリュームは空でも「どの格子の上の空か」= transform が要る)。
+		 *   引数を取らないカーネルでは、余分な引数を下流の arity 検査が弾く。 */
+		pig_push_rest_with_defaults(f, a, na, 0, 0, 0);
 		f->set_op_name(thNEW(stdString,(nm)));
 		f->set_out_cache(1);
 		f->set_info(ci);
 		return f;
 	}
-	/* tube(path[, segs]): path=[[[x,y,z],r],...] を 3D 折れ線まわりに掃引した管。segs=断面円の辺数
-	 * (精度ピッチ。省略=32)。内部は常に 2 引数 (path, segs)。path は構造 inline 値。 */
-	if ( ::strcmp(nm, "tube") == 0 ) {
-		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* path */
-		if ( na >= 2 )
-			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)1))));   /* segs */
-		else
-			f->pushArg(thNEW(pigDataInteger,((INTEGER64)32)));
-		f->set_op_name(thNEW(stdString,("tube")));
-		f->set_out_cache(1);
-		f->set_info(ci);
-		return f;
-	}
+	/* ★ #3474 続き (2026-09-05): tube の特例は **撤去した**。
+	 *   存在理由は「省略された引数を既定値で埋めて固定 arity にする」ことだけで、
+	 *   既定値は各 op の compute() が既に自前で持っていた (値が二重にあった)。
+	 *   記述子に nreq (必須引数個数) が入ったので、省略形はそのまま下の generic 経路で通る。
+	 *   ★ パーサが既定値を持てないのは、**どのモジュールが実行するか知らない**から:
+	 *     sphere(r,seg) と sphere(r,dx) では第 2 引数の意味も既定の有無も違う。 */
 	if ( ::strcmp(nm, "box") == 0 || ::strcmp(nm, "prism") == 0
 	  || ::strcmp(nm, "pyramid") == 0
+	  /* ★ #3474 続き: 省略可能な引数を持つ op も **generic 経路**で受ける (専用特例を撤去)。
+	   *   省略形は記述子の nreq が許し、既定値は op の compute() が入れる。 */
+	  || ::strcmp(nm, "circle") == 0 || ::strcmp(nm, "sphere") == 0
+	  || ::strcmp(nm, "offset") == 0  || ::strcmp(nm, "revolve") == 0
+	  || ::strcmp(nm, "tube") == 0
 	  || ::strcmp(nm, "boxa") == 0     /* boxa([w,h,d]): 寸法を配列(構造 inline)で渡す */
 	  || ::strcmp(nm, "rect") == 0     /* 2D プリミティブ */
 	  || ::strcmp(nm, "ngon") == 0
@@ -955,6 +996,46 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 }
 #else
 [[maybe_unused]] static sPtr<pigData> mk_call(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
+#endif
+
+/* ★ #3467: `モジュール::op(引数…)` — op ごとのモジュール指名。
+ *
+ * ★ **指名は sig の代わりではなく候補の絞り込み**。ここでは指名式を op ノードへ刻むだけで、
+ *   解決 (名前 → module id) と sig 照合は decide_out_module() が eval 時に行う。暗黙の cast は
+ *   入れない ⇒ 「op sig がディスパッチの唯一の真実」を壊さない。
+ *
+ * ★ 指名は **args に入れない**。args に入れると compute_arg_hash の argHashes に混ざり、
+ *   `""::op` のキーが `op` と変わってしまう。指名はキーに現れず、**解決結果 (outModule) だけ**が
+ *   ソルト経由でキーに現れる (#3466)。⇒ 「同じモジュールに解決されれば同じキー」が自動で成立。
+ *
+ * ⚠ 指名できるのは **モジュール op だけ**。print/length/module/… のような planner 側 builtin は
+ *   モジュールを持たないので、指名されたらここで明示エラーにする (黙って無視しない)。 */
+#ifndef SRAVA_VALUE_ONLY
+static sPtr<pigData> mk_qcall(sPtr<pigData> modexpr, sPtr<pigData> name, sPtr<pigData> arglist) {
+	sPtr<pigData> node = mk_call(name, arglist);
+	if ( node == thNULL ) return node;
+	/* generic 経路は CallResolve(mf, af) に包まれている → module op 枝 (arg 0) へ刻む。 */
+	sPtr<pigDataOperatorCallResolve> cr = sPtr<pigDataOperatorCallResolve>::d_cast(node);
+	sPtr<pigDataOperator> target = cr.is_notNull()
+	    ? sPtr<pigDataOperator>::d_cast(cr->arg(0))
+	    : sPtr<pigDataOperator>::d_cast(node);
+	/* ハードコード builtin のうち **モジュール op になるもの** は pigDataFunction<pigfModuleAgent>。
+	 * planner 側 builtin (print/length/float/int/module/concat/…) はそうならない。 */
+	sPtr<pigDataFunction<pigfModuleAgent> > mf = sPtr<pigDataFunction<pigfModuleAgent> >::d_cast(target);
+	if ( mf == thNULL ) {
+		const char *nm = ( name != thNULL && name->get_str().is_notNull() )
+		    ? name->get_str()->get_str() : "?";
+		char buf[200];
+		::snprintf(buf, sizeof buf,
+		    "module qualifier: '%s' is not a module op, so it cannot be qualified with '::' "
+		    "(planner builtins such as print/length/module have no module)", nm);
+		return thNEW(pigDataError,(buf, name != thNULL ? name->get_info() : thNULL));
+	}
+	mf->set_module_expr(modexpr);
+	return node;
+}
+#else
+[[maybe_unused]] static sPtr<pigData> mk_qcall(sPtr<pigData>, sPtr<pigData>, sPtr<pigData>) { return thNULL; }
 #endif
 
 /* 一般の呼び出し `callee(args)`。callee は任意の式。
@@ -1051,6 +1132,7 @@ static sPtr<pigData> mk_rot_op(sPtr<pigData>, sPtr<pigData>)    { return thNULL;
 %left STAR SLASH.
 %right UMINUS BANG.   /* 単項マイナス / 論理否定(二項より強く、後置より弱い) */
 %left DOT LBRACK LPAREN.   /* 後置の添字/メンバ/呼び出しが最も強く結合 */
+%left COLON2.     /* ★ #3467: `モジュール::op(…)` の指名。呼び出しより強く結合する */
 
 /* 2 入口: 先頭センチネルトークン(レキサが mode に応じて注入)で切替。
  * MODE_PROGRAM → 文の並び(ソース)。MODE_VALUE → 単一値(ワイヤ/キャッシュの値リテラル)。 */
@@ -1156,6 +1238,9 @@ expr(A) ::= expr(B) LBRACK expr(K) RBRACK. { A = mk_index(B, K); }    /* 添字 
 expr(A) ::= expr(B) DOT IDENT(N).          { A = mk_index(B, N); }    /* メンバ a.key */
 expr(A) ::= LPAREN arhs(B) RPAREN.  { A = B; }   /* 括弧内は代入も可: (c = 5) は c に代入し値 5 を返す式 */
 expr(A) ::= expr(F) LPAREN arglist(L) RPAREN.  { A = mk_apply(F, L); }   /* 一般呼び出し */
+/* ★ #3467: `モジュール::op(引数…)`。指名は **呼び出し 1 個ぶん**の構文で、部分適用 (k::box を
+ *   値として取り回す) は非目標なので 1 規則にまとめる (曖昧さも出ない)。 */
+expr(A) ::= modname(M) COLON2 IDENT(N) LPAREN arglist(L) RPAREN.  { A = mk_qcall(M, N, L); }
 expr(A) ::= IDENT(N).               { A = mk_varref(N); }
 expr(A) ::= INT(V).                 { A = V; }
 expr(A) ::= FLOAT(V).               { A = V; }
@@ -1175,6 +1260,14 @@ hashbody(A) ::= hashbody(L) COMMA hashkey(K) COLON expr(V).
 		{ A = hashop_put(L, K, V); }
 hashkey(A) ::= IDENT(N).   { A = N; }
 hashkey(A) ::= STRING(N).  { A = N; }
+
+/* ★ #3467: `::` の左辺 = モジュール名に評価されるもの。
+ *   "occt"::box(…)   リテラル      → 文字列そのもの
+ *   k::box(…)        変数          → 変数参照 (評価時に文字列へ)
+ *   ""::box(…)       空文字        → 「planner に任せる」= 指名なしと同一 (キーも同じ)
+ *   ⚠ 一般の式 (a[i]::op(…) 等) は取らない。曖昧さを避けるためと、実用上この 2 形で足りるため。 */
+modname(A) ::= STRING(V).  { A = V; }
+modname(A) ::= IDENT(N).   { A = mk_varref(N); }
 
 /* expr_ns: 文の先頭に来られる式(先頭が `{` でない = hash プライマリを持たない)。
  * expr との差は hash リテラルが無いことだけ。左再帰の左被演算子は expr_ns、それ以外
@@ -1205,6 +1298,7 @@ expr_ns(A) ::= expr_ns(B) LBRACK expr(K) RBRACK. { A = mk_index(B, K); }
 expr_ns(A) ::= expr_ns(B) DOT IDENT(N).          { A = mk_index(B, N); }
 expr_ns(A) ::= LPAREN expr(B) RPAREN.  { A = B; }
 expr_ns(A) ::= expr_ns(F) LPAREN arglist(L) RPAREN.  { A = mk_apply(F, L); }   /* 一般呼び出し */
+expr_ns(A) ::= modname(M) COLON2 IDENT(N) LPAREN arglist(L) RPAREN.  { A = mk_qcall(M, N, L); }
 expr_ns(A) ::= IDENT(N).               { A = mk_varref(N); }
 expr_ns(A) ::= INT(V).                 { A = V; }
 expr_ns(A) ::= FLOAT(V).               { A = V; }

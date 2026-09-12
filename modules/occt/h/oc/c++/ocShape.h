@@ -38,6 +38,8 @@
  *   中身は OCCT ネイティブ。中立形式を自前定義しないのも vd と同じ理由 (読み手が居ない)。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
+#include	"pig/c++/pigBreak.h"         /* #3498: 走行中の中断 (下の ★中断 を参照) */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<TopoDS_Shape.hxx>
 #include	<stdint.h>
@@ -46,7 +48,14 @@
 #define OC_MODULE_NAME	"occt"
 #define OC_TYPE		"oc-brep3d"
 #define OC_TAG		"BREP"
-#define OC_SALT		"\x01" "OCB"
+/* ★ #3471: **2D 領域** (平面上の TopoDS_Face)。OCCT の TopoDS は常に 3D なので、「2D 領域」は
+ *   平面上の Face (edge が Geom_Plane 上に pcurve を持つ) として表す。
+ *   ⚠ 「occt に 2D が無い」は正確には **2D の位相が無い**という意味で、曲線側 (Geom2d_BezierCurve /
+ *     Geom2d_BSplineCurve / GCE2d_* / Geom2dAPI_*) は揃っている。
+ *   ★ 4CC は BREP と分ける — 中身は同じ BinTools のバイナリだが、**型が違えば形式も分ける**
+ *     (同じタグにすると reader が 2D と 3D を見分けられない)。 */
+#define OC2_TYPE	"oc-cross2d"
+#define OC2_TAG		"BRP2"
 
 /* ★ OC_MESH_TYPE / OC_MESH_TAG は **撤去した** (akira-project #3452)。
  * occt.so は mesh 型を一切名乗らない (oc-brep3d だけ)。B-rep → メッシュの出口は
@@ -68,8 +77,16 @@ public:
 	virtual void encode(ocChunkSink&)   = 0;
 	virtual void decode(ocChunkSource&) = 0;
 	int  decode_failed() const { return decodeErr_; }
+	/* ★ #3479: 立てた **理由** (立てていなければ 0)。reader がこれを拾って errCode と一緒に
+	 *   parent へ渡す。従来は「読めなかった」という事実だけが残り、利用者に届く文は
+	 *   「codec が無い / 表現できない / 形式が違う」の 3 択を並べた推測だった。
+	 *   ★文字列リテラル前提 (寿命は .so と同じ)。 */
+	const char* decode_why() const { return decodeWhy_; }
 protected:
+	/* decodeErr_ と理由は必ず対で立てる (理由の無い拒否を作らない)。 */
+	void set_decode_err(const char* why) { decodeErr_ = 1; decodeWhy_ = why; }
 	int  decodeErr_ = 0;
+	const char* decodeWhy_ = 0;
 public:
 	virtual bool write_to(const char *path, const char *unit) = 0;
 	static sPtr<ocGeom> create_for_meta(const uint8_t *meta, int len);
@@ -99,22 +116,45 @@ public:
 	virtual void encode(ocChunkSink&   sink);
 	virtual void decode(ocChunkSource& src);
 	virtual bool write_to(const char *path, const char *unit);
+	/* ★ #3503 続き: STEP 書き出しは巨大な B-rep で長くなる。@c STEPControl_Writer の
+	 *   Transfer / Write は Message_ProgressRange を取るので中断できる。
+	 *   ⚠ BREP (BinTools) と 2D 側には進捗の口が無い。 */
+	bool write_to(const char *path, const char *unit, const pigBreak *brk);
+
+	/* ★★ #3498: **走行中に中断できる**。
+	 *
+	 * OCCT の中断機構は Message_ProgressIndicator — 算法へ Message_ProgressRange を渡すと、
+	 * 算法が要所で indicator->UserBreak() を引く。真を返せば算法はそこで畳まれる。
+	 * 器 (indicator の派生) を用意するのは *こちら側* で、その実装は ocShape.cpp の
+	 * ocBreakIndicator。旗そのものは ptsCalcBody が持つ pigBreak (pigBreak.h)。
+	 *
+	 * ★ occt が 3 カーネルの中で最も素直: **ブール本体が止まる**。BRepAlgoAPI_* の
+	 *   Build(range) がそのまま BOPAlgo へ降りるので、評価点を動かす改修は要らない。
+	 * ⚠ 中断すると算法は「できなかった」状態で返る (IsDone()==false / BOPAlgo_AlertUserBreak)。
+	 *   呼び手からは **失敗と区別がつかない**ので、失敗を報告する前に必ず brk を見ること
+	 *   (下の oc_abort_err)。中断は「答えが出なかった」であって「答えは空」ではない。
+	 * ⚠ UserBreak は **並行に呼ばれうる** (Message_ProgressIndicator.hxx に明記)。だから旗は
+	 *   tinyState の is_destroyed() ではなく pigBreak の atomic を見る (理由は pigBreak.h)。
+	 *
+	 * brk = 0 なら中断機構を繋がない (既定・従来どおりの挙動)。 */
 
 	/* ★ #3436 P4: n 項ブール。BRepAlgoAPI_* は SetArguments/SetTools で **リスト**を取れる
 	 *   (BOPAlgo_Builder が n 個をまとめて 1 回の交差計算で処理する)。上限なし。
 	 *   kind = "union" / "intersection" / "difference" (差は ops[0] から残り全部を引く = 左 fold)。 */
-	static sPtr<ocShape> op_bool_nary(sArray<sPtr<ocShape> >& ops, const char *kind, char *err = 0, int errsz = 0);
+	static sPtr<ocShape> op_bool_nary(sArray<sPtr<ocShape> >& ops, const char *kind, char *err = 0, int errsz = 0,
+	                                  const pigBreak *brk = 0);
 	/* planner から届いた引数配列の入口 (2 項は従来の二項 API のまま)。失敗は null + *errmsg。 */
 	static sPtr<ocShape> bool_from_args(sArray<sPtr<pigData> > *args, const char *kind,
-	                                    const char **errmsg, char *errbuf = 0, int errbufsz = 0);
+	                                    const char **errmsg, char *errbuf = 0, int errbufsz = 0,
+	                                    const pigBreak *brk = 0);
 
 	/* ---- ブール (BRepAlgoAPI)。失敗は null を返す (OCCT は「作れない」で失敗しうる) ---- */
-	sPtr<ocShape> op_union(sPtr<ocShape> b, char *err = 0, int errsz = 0);
-	sPtr<ocShape> op_intersection(sPtr<ocShape> b, char *err = 0, int errsz = 0);
-	sPtr<ocShape> op_difference(sPtr<ocShape> b, char *err = 0, int errsz = 0);
+	sPtr<ocShape> op_union(sPtr<ocShape> b, char *err = 0, int errsz = 0, const pigBreak *brk = 0);
+	sPtr<ocShape> op_intersection(sPtr<ocShape> b, char *err = 0, int errsz = 0, const pigBreak *brk = 0);
+	sPtr<ocShape> op_difference(sPtr<ocShape> b, char *err = 0, int errsz = 0, const pigBreak *brk = 0);
 
 	/* ---- ★ 解析曲面を直接オフセット (BRepOffsetAPI_MakeOffsetShape) ---- */
-	sPtr<ocShape> op_offset(double d, char *err = 0, int errsz = 0);
+	sPtr<ocShape> op_offset(double d, char *err = 0, int errsz = 0, const pigBreak *brk = 0);
 
 	/* ---- ★ **B-rep でしか書けない加工** (#3437) ----
 	 * fillet = 稜を半径 r の転がり球で丸める / chamfer = 稜を距離 d で 45 度に削ぐ。
@@ -122,16 +162,38 @@ public:
 	 * ★ メッシュ系にこれが無いのは偶然ではない — 転がり球の接触軌跡は解析曲面
 	 *   (円筒・球・トーラス) であって、三角形分割では**定義そのものが近似になる**。
 	 * 失敗は null (OCCT は自己交差する半径などで普通に失敗する)。 */
-	sPtr<ocShape> op_fillet(double r, char *err = 0, int errsz = 0);
-	sPtr<ocShape> op_chamfer(double d, char *err = 0, int errsz = 0);
+	sPtr<ocShape> op_fillet(double r, char *err = 0, int errsz = 0, const pigBreak *brk = 0);
+	sPtr<ocShape> op_chamfer(double d, char *err = 0, int errsz = 0, const pigBreak *brk = 0);
+
+	/* ★ #3461: 一般アフィン変換 (行優先 3x4 = m00..m23)。
+	 *   translate / rotate / scale / mirror / transform の **共通の入口**。
+	 *   manifold の apply_affine(double[12]) と同じ形にしてある (呼び出し側を揃えるため)。
+	 *
+	 *   ⚠ 線形部が「直交 × 一様スケール」なら gp_Trsf を使う。この場合 **解析曲面が
+	 *   解析曲面のまま**運ばれる (球は球のまま)。そうでなければ gp_GTrsf へ落ちる。
+	 *   後者では OCCT が曲面を BSpline へ変換するので、厳密な球面という性質は失われる
+	 *   (形は正しい)。非等方 scale や剪断を指定した時点で避けられない。 */
+	sPtr<ocShape> op_affine(const double e[12], char *err = 0, int errsz = 0);
 
 	/* ★ 入口: STEP / BREP を読む。**mesh → B-rep ではない** (どちらも解析曲面を
 	 * そのまま持つ形式なので、読むだけで B-rep が手に入る)。失敗は null。 */
-	static sPtr<ocShape> read_file(const char *path);
+	static sPtr<ocShape> read_file(const char *path, const pigBreak *brk = 0);
 
 	double volume() const;      /* BRepGProp::VolumeProperties (厳密な曲面のまま積分) */
 	int    nfaces() const;      /* Face の数。★三角形数ではない (円筒の側面は 1 面) */
+	int    nverts() const;      /* Vertex の数。★稜の端点であって三角形の頂点ではない */
 	int    nsolids() const;
+
+	/* ---- 素性を訊く op (#3487) ----------------------------------------------
+	 * ★ **B-rep のまま**測る (三角形に落とさない)。bbox は Bnd_Box・重心と面積は GProp。
+	 *   球なら表面積 4πr² がそのまま出る (mesh 系の内接多面体とは構造的に違う値)。
+	 * ★ valid の定義は 7 カーネル共通で ① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い
+	 *   (src/h/common/meshprops.h の冒頭)。occt では BRepAlgoAPI_Check が ②③ をまとめて
+	 *   答える (BRepCheck_Analyzer のトポロジ/幾何検査 + BOPAlgo_CheckerSI の自己交差検査)。 */
+	int    op_bbox(double mn[3], double mx[3]) const;
+	int    op_centroid(double c[3]) const;
+	double op_area() const;
+	int    op_valid(const pigBreak *brk = 0) const;
 
 	/* ★★ プロセスに 1 回だけ: **OCCT の診断出力を stdout から追い出す** (#3437)。
 	 *
@@ -159,5 +221,54 @@ private:
  * → triangulate は境界モジュール **occt_mf.so** へ移し、そこで **本物の mfMesh** を作る
  *   (openvdb + openvdb_mf と同じ構図)。occt.so は oc-brep3d だけを扱う。
  */
+
+
+/* ---- ★ #3471: 2D 領域 (平面上の TopoDS_Face)。text() の出力・extrude/revolve の入力 ----
+ *   ocShape と **中身の持ち方は同じ** (TopoDS_Shape + BinTools のバイナリ) だが、
+ *   型名と 4CC を分ける。輪郭は Bezier / B-spline のまま保たれる。 */
+class ocFace2D : public ocGeom {
+public:
+	ocFace2D(sPtr<pigInfo> i = thNULL) : ocGeom(i) {}
+
+	TopoDS_Shape&       shape()       { return s_; }
+	const TopoDS_Shape& shape() const { return s_; }
+	void set_shape(const TopoDS_Shape &s) { s_ = s; }
+
+	virtual sPtr<stdString> get_str();
+
+	virtual const char* meta_tag()  { return OC2_TAG; }
+	virtual const char* type_name() { return OC2_TYPE; }
+	virtual uint16_t    repr_type() { return 129; }   /* B-rep 2D */
+	virtual int         dim()       { return 2; }
+
+	virtual void encode(ocChunkSink&   sink);
+	virtual void decode(ocChunkSource& src);
+	virtual bool write_to(const char *path, const char *unit);
+
+	/* 面積 (area op 用)。GProp_GProps の SurfaceProperties。 */
+	double area() const;
+private:
+	TopoDS_Shape s_;
+};
+
+/* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
+ *   素の oca_err(...) を使うとモジュール名が付かない。 */
+PIG_DEFINE_MODULE_ERR(oca_err, OC_MODULE_NAME)
+
+/* ★ #3498: 中断で終わったならそのエラーを、そうでなければ thNULL を返す。
+ *
+ * ⚠ **失敗を報告する前に必ずこれを見ること**。中断された算法は IsDone()==false で返るので
+ *   「ブールが作れなかった」と見分けがつかず、そのまま報告すると *中断したのに幾何が悪いと
+ *   言う* ことになる。利用者は Ctrl+C を押した本人なので、これは端的に嘘になる。
+ * ⚠ 中断は必ず **エラー**で返す。空や途中の結果を返すとキャッシュに焼き付き、次回以降
+ *   正しい答えとして引かれる (#3489 と同じ形の事故)。 */
+static inline sPtr<pigData>
+oc_abort_err(const pigBreak &b, const char *op)
+{
+	if ( ! b.cancelled() ) return sPtr<pigData>();
+	char m[160];
+	::snprintf(m, sizeof m, "%s: aborted (interrupted)", op ? op : "occt");
+	return sPtr<pigData>(oca_err(m));
+}
 
 #endif

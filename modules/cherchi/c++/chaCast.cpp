@@ -65,7 +65,7 @@ chaCast_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<chMesh> in = ( na > 1 ) ? sPtr<chMesh>::d_cast((*args)[1]) : sPtr<chMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cast: needs a mesh"))));
+		result = cha_err(thNEW(stdString,("cast: needs a mesh")));
 		return;
 	}
 	mesh = in;

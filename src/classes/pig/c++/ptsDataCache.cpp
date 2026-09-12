@@ -197,10 +197,20 @@ TS_STATE(ACT_ptsDataCache_SAVE)
 
 TS_STATE(ACT_ptsDataCache_LOAD)   /* mesh 系: reader の TSE_RETURN (msg_obj=本文 pigData) */
 {
+	/* ★ #3479: reader が読めなかった理由 (TSE_ASSERT + msg_obj=stdString)。
+	 *   METADATA_FINISH の TSE_ASSERT は msg_int なので msg_obj の有無で見分ける。
+	 *   ここで拾わないと「body が null」という事実だけが残り、なぜかが消える。 */
+	if ( ev->type == TSE_ASSERT && ev->source == worker && ev->msg_obj != thNULL ) {
+		sPtr<stdString> why = sPtr<stdString>::d_cast(ev->msg_obj);
+		if ( why.is_notNull() && target_type != thNULL )
+			cache->conv_set_error(target_type->get_str(), why);
+		return 0;
+	}
 	if ( ev->type == TSE_RETURN && ev->source == worker ) {
 		sPtr<pigData> b = sPtr<pigData>::d_cast(ev->msg_obj);
 		/* ★ 全 LOAD: 読んだ body を **自 target_type のエントリ**へ。b==thNULL = decode 失敗 →
-		 * entry は body 無しのまま (FIN で done)。file は valid のまま (メタは書けている)。 */
+		 * entry は body 無しのまま (FIN で done)。file は valid のまま (メタは書けている)。
+		 * ★ #3479: 理由は上の TSE_ASSERT で既に conv_set_error 済み。 */
 		if ( b != thNULL && target_type != thNULL )
 			cache->conv_set_body(target_type->get_str(), b);
 		return rDO|FIN_START;

@@ -68,11 +68,11 @@ mfaExtrude_::compute()
 	sPtr<mfCross> in = ( na > 0 ) ? sPtr<mfCross>::d_cast((*args)[0]) : sPtr<mfCross>();
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("extrude: needs a 2D polygon"))));
+		result = mfa_err(thNEW(stdString,("extrude: needs a 2D polygon")));
 		return;
 	}
 	if ( h == 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("extrude: height must be non-zero"))));
+		result = mfa_err(thNEW(stdString,("extrude: height must be non-zero")));
 		return;
 	}
 	manifold::Manifold m = manifold::Manifold::Extrude(in->cross().ToPolygons(), h);

@@ -1,0 +1,47 @@
+# routing への暗黙依存の **承認済みリスト** (#3485)
+#
+# 各行 = 「あるテストが `module("X.so",{priority:…})` で X を上げているのに、式の中に
+#          X が持たない op がある」箇所。その op は別カーネルへ落ちるので、テストは
+#          **「X はこの op を持たない」に暗黙に依存**している。
+#
+# ⚠ あとで X にその op を配ると実行者が静かに入れ替わる。値が一致してしまう場合は
+#   **テストは落ちず、見たかったものだけが失われる** (#3474 で tube を配ったとき、
+#   4 箇所のうち落ちたのは 1 箇所だけで残り 3 箇所は空振りになっていた)。
+#
+# ここに載っているのは **意図的な依存**だけ。判断の基準:
+#
+#   意図的 … カーネル固有 op が「持ち主へ落ちる」ことを見るテスト。これは routing の検査
+#            そのものなので、`"nef_hybrid"::minkowski(...)` と名指しに直すと **検査の意味が消える**
+#   事故   … 汎用 op (tube / box …) を「別カーネルが作る」前提で使っている。
+#            名指し (`"manifold"::tube(...)`) に直す — リストに足してはいけない
+#
+# 検査: python3 tools/audit_routing_dependency.py --check
+#       (ctest の srava_routing_dependency が呼ぶ)
+#
+# 書式: <テストファイル> <上げたモジュール> <その op のカンマ区切り>
+
+# --- solidify は geogram / nef が持つ。cgal / manifold を上げても持ち主へ落ちる
+srava_geogram.sh   cgal       solidify
+srava_geogram.sh   manifold   solidify
+
+# --- nef 固有 op (minkowski / complement / 3D offset) が、他カーネルを上げても nef へ落ちること。
+#     入力メッシュはわざと別カーネルに作らせている (昇格読みの検証も兼ねる)
+srava_nef.sh       cgal       complement,minkowski
+srava_nef.sh       geogram    minkowski,offset
+srava_nef.sh       manifold   complement
+srava_nef.sh       manifold   complement,minkowski
+
+# --- nonmani (2026-09-06): 非 2-多様体の値を **cgal / manifold に読ませる**のが主題なので
+#     両方を上げている。complement (負の対照の非有界) と nparts (塊の数) は nef 固有なので
+#     持ち主へ落ちる。名指しに直すと「他カーネルを上げても nef 固有 op は落ちる」という
+#     検査そのものが消えるため、意図的な依存として承認する。
+srava_nef.sh       cgal       complement,nparts
+srava_nef.sh       manifold   complement,nparts
+
+# --- openvdb 固有: 入力メッシュを各カーネルに作らせ、voxels は openvdb へ落ちること
+srava_openvdb.sh   cgal       voxels
+srava_openvdb.sh   geogram    voxels
+srava_openvdb.sh   manifold   voxels
+
+# --- cgal 固有: perimeter / repair は cgal だけが持つ。manifold を上げても cgal へ落ちる
+srava_parse.sh     manifold   perimeter,repair

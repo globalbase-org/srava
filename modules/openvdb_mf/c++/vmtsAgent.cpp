@@ -127,11 +127,12 @@ extern const srava_module_descriptor vmtsAgent_descriptor = {
 	/* ★ **codec を持たない**。読み書きは相手側 (libsrava_mf / libsrava_vd) の codec が行う。
 	 *   このモジュールは「両側の本物のクラスを繋ぐ op」だけを提供する。 */
 	.provides      = openvdb_mf_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 2,   /* ★ #3491: v2 = voxelize が内部空洞を保つ (値が変わる) */
 	/* ★ **自分の型を持たない** (新しい型を作らない)。入出力はどちらも相手の型
 	 *   (mf-mesh3d = manifold / vd-grid3d = openvdb)。 */
 	/* ★ **両側の型を申告する**。新しい型は作っていない — 実体は libsrava_mf / libsrava_vd の
 	 *   本物のクラス (mfMesh / vdGrid) なので、in-proc でも d_cast が通る。 */
-	.hash_salt     = "\x01" "VDM",   /* キャッシュキー弁別 */
 	/* initialize: 無し。openvdb::initialize() は vdGrid::ensure_init() が全 op の入口で
 	 * 1 回だけ呼んでいる (このモジュールは EXEC_PROCESS = 1 プロセス 1 モジュール)。
 	 * in-proc 化 (#3419) するときに、ここへ移すかを再検討する。 */

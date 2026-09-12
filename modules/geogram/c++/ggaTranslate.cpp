@@ -66,14 +66,14 @@ ggaTranslate_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ggMesh> in = ( na > 0 ) ? sPtr<ggMesh>::d_cast((*args)[0]) : sPtr<ggMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("translate: needs a geogram mesh"))));
+		result = gga_err(thNEW(stdString,("translate: needs a geogram mesh")));
 		return;
 	}
 	/* ★配列は d_cast でなく obt_array (map/lambda 由来の遅延ノードも解決される)。 */
 	sPtr<pigDataArray> v = ( na > 1 && (*args)[1].is_notNull() ) ? (*args)[1]->obt_array()
 	                                                            : sPtr<pigDataArray>();
 	if ( ! v.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("translate: needs [x,y,z]"))));
+		result = gga_err(thNEW(stdString,("translate: needs [x,y,z]")));
 		return;
 	}
 	double t[3] = { 0.0, 0.0, 0.0 };

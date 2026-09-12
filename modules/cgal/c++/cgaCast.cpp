@@ -77,7 +77,7 @@ cgaCast_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 1 ) ? sPtr<cgMesh>::d_cast((*args)[1]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cast: needs a mesh (2nd arg)"))));
+		result = cga_err(thNEW(stdString,("cast: needs a mesh (2nd arg)")));
 		return;
 	}
 	mesh = in;   /* identity。保存時の WriterMesh が MESH(exact)で再エンコード = float→exact 変換の実体 */

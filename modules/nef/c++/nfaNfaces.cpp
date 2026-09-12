@@ -3,6 +3,7 @@
  *   ★ Nef は面の集まりでなく空間分割なので、数える前に境界へ落とす (volume と同じ経路)。
  *   非有界は境界を持たないので明示エラー。
  */
+#include	<cstdio>
 #include	"pig/c++/ptsCalcBody.h"
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
@@ -66,13 +67,14 @@ nfaNfaces_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nfaces: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("nfaces: needs a Nef mesh")));
 		return;
 	}
 	nfMesh::Mesh m;
 	if ( ! in->to_mesh(m) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("nfaces: an unbounded Nef has no boundary mesh (e.g. the result of complement)"))));
+		char b[256];
+		::snprintf(b, sizeof b, "nfaces: this Nef has no boundary mesh (%s)", nf_why(in));
+		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)m.number_of_faces()));

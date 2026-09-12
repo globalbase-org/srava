@@ -68,12 +68,12 @@ cgaRepair_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("repair: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("repair: needs a mesh")));
 		return;
 	}
 	mesh = in->op_repair();   /* 多態: 3D=autorefine / 2D=even-odd repair */
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("repair: operation failed"))));
+		result = cga_err(thNEW(stdString,("repair: operation failed")));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

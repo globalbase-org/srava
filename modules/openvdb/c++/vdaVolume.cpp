@@ -7,6 +7,7 @@
 #include	"vd/c++/vdGrid.h"
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"ts2/c++/stdString.h"
+#include	<string>
 #include	"_ts2/c++/vdaVolume_.h"
 
 CLASS_TINYSTATE(vd/c++/vdaVolume,pig/c++/ptsCalcBody)
@@ -62,13 +63,22 @@ vdaVolume_::compute()
 {
 	/* ★ #3441: op 内並列 (TBB) は **op あたり**の予算で走らせる。予算未指定なら素通し。
 	 *   ⚠ 包み忘れるとその op だけ無制限になるので、compute() 単位で一律に包む。 */
-	vd_in_arena([&]{
+	std::string vdwhy;
+	/* ★ #3474 続き: 例外境界。openvdb が投げると受け手が無く、ワーカースレッド
+	 *   由来なら agent ごと死ぬ (vdArena.h の vd_arena_guard 参照)。 */
+	if ( ! vd_arena_guard("volume", [&]{
+
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: needs an openvdb grid"))));
+		result = vda_err(thNEW(stdString,("volume: needs an openvdb grid")));
 		return;
 	}
-	result = thNEW(pigDataFloat,(in->volume()));
-	});
+	double v = in->volume(&brk_);
+	/* ★★ #3498: 計測は **途中までの総和**を返してくる。見た目が普通の数値なので、
+	 *   通すと中断が「小さめの正しい答え」として焼き付く (#3489 と同じ形の事故)。 */
+	if ( (result = vd_abort_err(brk_, "volume")) != thNULL ) return;
+	result = thNEW(pigDataFloat,(v));
+	}, vdwhy) )
+		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

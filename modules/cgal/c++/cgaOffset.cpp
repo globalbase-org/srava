@@ -71,16 +71,16 @@ cgaOffset_::compute()
 	int subdiv = ( na > 2 ) ? (int)(*args)[2]->get_int() : 1;   /* 3D 球の細分化(2D は無視) */
 
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("offset: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("offset: needs a mesh")));
 		return;
 	}
 	mesh = in->op_offset(d, subdiv);   /* 多態: 2D=skeleton / 3D=Minkowski(球。d<0 は補集合トリック) */
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,(
+		result = cga_err(thNEW(stdString,(
 		    "offset failed: the input is probably not a simple polygon (self-intersection, "
 		    "duplicate vertices, zero-length edges) or is degenerate. check it with valid() and "
 		    "fix it with repair(), or revise the outline (polygon() thins out duplicates at the "
-		    "seams left by concatenating curves)"))));
+		    "seams left by concatenating curves)")));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

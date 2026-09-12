@@ -134,14 +134,14 @@ cgaExport_::compute()
 	sPtr<cgMesh> mIn = ( na > 1 ) ? sPtr<cgMesh>::d_cast((*args)[1]) : sPtr<cgMesh>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("export: no mesh to write"))));
+		result = cga_err(thNEW(stdString,("export: no mesh to write")));
 		return;
 	}
 	/* 単位(任意の 3 番目の引数)。SVG=width/height、DXF=$INSUNITS に反映。空 / 非対応形式は無視。 */
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
-		result = thNEW(pigDataError,(export_write_error_msg(p, mIn->dim())));
+		result = cga_err(export_write_error_msg(p, mIn->dim()));
 		return;
 	}
 

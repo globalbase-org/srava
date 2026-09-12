@@ -36,9 +36,14 @@ MF='module("manifold.so",{priority:50});'
 
 case "$MODE" in
 solidify)
-	# tube は geogram が持たない op なので manifold に作らせ (priority 50 > cgal 20)、
-	# cast で gg へ渡す (mf の値を gg として読む。wire 形式 "MFM3" は共有)。
-	SELFX='tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
+	# ★ #3485: ここは **意図的な routing 依存** — manifold を上げても solidify は持ち主へ落ちる、
+	#   ことを見ている。名指し ("mod"::op) に直すと **検査の意味が消える**。
+	#   承認済みリスト = test/routing_dependency.txt (ctest srava_routing_dependency が見張る)
+	# tube を manifold に作らせ、cast で gg へ渡す (mf の値を gg として読む。形式 "MFM3" は共有)。
+	# ⚠ 2026-09-05: tube を **geogram 自身も持つ**ようになったので、priority が高いと
+	#   tube が geogram で走り、この検査が見たい「別カーネルが作った値を読む」状況で
+	#   なくなる (値は一致するので **落ちずに意味だけ失われる**)。生成元を名指しして固定する。
+	SELFX='"manifold"::tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
 	rm -rf "$D-a"
 	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MF $GG
 	      var g = cast(\"gg-mesh3d\", $SELFX);
@@ -61,9 +66,11 @@ solidify)
 	echo "GEOGRAM-SOLIDIFY-OK before=$B after=$A" ;;
 mfcross)
 	# mf が作った mesh ("MFM3") を gg が**昇格読み**し、混成ブールが純 mf と同値になること。
-	# ★ mf 側のオペランドは **tube** で作る: geogram は tube を持たないので、geogram が priority 99
-	#   でも routing は manifold へ行く (mf の box を作らせようとしても gg が勝ってしまうため)。
-	TUBE='tube([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
+	# ★ mf 側のオペランドは **tube** で作る (mf の box を作らせようとしても gg が勝ってしまうため)。
+	# ⚠ 2026-09-05: tube を **geogram 自身も持つ**ようになったので、priority が高いと
+	#   tube が geogram で走り、この検査が見たい「別カーネルが作った値を読む」状況で
+	#   なくなる (値は一致するので **落ちずに意味だけ失われる**)。生成元を名指しして固定する。
+	TUBE='"manifold"::tube([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
 	rm -rf "$D-c" "$D-d"
 	# 混成: tube=mf-mesh3d / box=gg-mesh3d (形式はどちらも "MFM3") → gg の sig の
 	# (mf-mesh3d, gg-mesh3d) 行で gg が計算する。★型が違っても形式は同じ、という状態の回帰でもある
@@ -103,7 +110,9 @@ cgcross)
 	#   自己交差 tube を cgal に作らせ、nef が内外を決め直して 48.6088 (mf 経由・geogram と
 	#   独立に一致する値) になることを検証する (旧テストは geogram 経由を見ていたが対象が
 	#   nef に変わっただけで、狙い「cg 入力の solidify が二重計上を正しく解消する」は同じ)。
-	SELFX2='tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
+	# ⚠ 2026-09-05: tube は geogram / nef も持つようになったので、**cgal に作らせる**ことを
+	#   名指しで固定する (ここは「cg 入力の solidify」を見るテスト)。
+	SELFX2='"cgal"::tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
 	OUT3=$(SRAVA_CACHE_DIR="$D-i" SRAVA_SOURCE="$CG $GG module(\"nef_hybrid.so\",{});
 	      var t = $SELFX2;
 	      print(\"BEFORE\", volume(t));

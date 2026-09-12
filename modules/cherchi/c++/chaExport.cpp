@@ -87,7 +87,7 @@ chaExport_::compute()
 	sPtr<chMesh> mIn = ( na > 1 ) ? sPtr<chMesh>::d_cast((*args)[1]) : sPtr<chMesh>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("export: no mesh to write"))));
+		result = cha_err(thNEW(stdString,("export: no mesh to write")));
 		return;
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
@@ -95,7 +95,7 @@ chaExport_::compute()
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
 		char b[256];
 		::snprintf(b, sizeof b, "export: cannot write %s (cherchi supports off/stl/obj)", p);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = cha_err(thNEW(stdString,(b)));
 		return;
 	}
 	pHashKeyType refHash = ch_hash_file(p);

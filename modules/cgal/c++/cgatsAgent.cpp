@@ -46,6 +46,11 @@
 #include	"cg/c++/cgaBox.h"
 #include	"cg/c++/cgaPrism.h"
 #include	"cg/c++/cgaPyramid.h"
+/* ★ #3474: 基本立体をカーネル間で統一 */
+#include	"cg/c++/cgaCylinder.h"
+#include	"cg/c++/cgaCone.h"
+#include	"cg/c++/cgaTorus.h"
+#include	"cg/c++/cgaTetrahedron.h"
 #include	"cg/c++/cgaSphere.h"
 #include	"cg/c++/cgaIcosphere.h"
 #include	"cg/c++/cgaUnion.h"
@@ -53,9 +58,6 @@
 #include	"cg/c++/cgaIntersection.h"
 #include	"cg/c++/cgaDifference.h"
 #include	"cg/c++/cgaExport.h"
-#ifdef SRAVA_HAVE_HDF5
-#include	"cg/c++/cgaVoxelize.h"
-#endif
 #include	"cg/c++/cgaImport.h"
 #include	"cg/c++/cgaTranslate.h"   /* transform 系: 1 mesh + スカラ */
 #include	"cg/c++/cgaRotate.h"
@@ -113,7 +115,6 @@ static const ArgKind SHAPE3_IN[] = { AK_INLINE, AK_INLINE, AK_INLINE };  /* box/
 static const ArgKind SHAPE2_IN[] = { AK_INLINE, AK_INLINE };             /* rect(w,h) 2D */
 static const ArgKind SHAPE1_IN[] = { AK_INLINE };                        /* sphere(r) / boxa([..]) */
 static const ArgKind EXPORT_IN[] = { AK_INLINE, AK_CACHE, AK_INLINE };  /* export(path, mesh, unit) */
-static const ArgKind EXPORTVOX_IN[] = { AK_INLINE, AK_INLINE };  /* export_vox(path, params, mesh…可変) */
 static const ArgKind BINMESH_IN[] = { AK_CACHE, AK_CACHE };  /* 2 mesh 入力(cache ハンドル→reader 読み) */
 /* transform 系: 入力 mesh(cache)1 個 + スカラ/構造(inline)。mesh は reader、残りは value-parse。 */
 static const ArgKind ROTATE_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };             /* rotate(m,axis,deg) */
@@ -130,16 +131,18 @@ static const cgaOpEntry OPS[] = {
 	{ "import",       SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaImport), 0, "->cg-mesh3d;->cg-cross2d" },  /* import(path): 外部ファイル読み */
 	{ "prism",        SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaPrism), 0, "->cg-mesh3d" },
 	{ "pyramid",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaPyramid), 0, "->cg-mesh3d" },
-	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaSphere), 0, "->cg-mesh3d" },  /* sphere(r, seg): seg=円周分割数(既定 32 相当) */
-	{ "icosphere",    SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaIcosphere), 0, "->cg-mesh3d" },  /* icosphere(r, subdiv): subdiv=細分回数(既定0=20面) */
-	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(cgaUnion, cgMesh, cgMesh),        0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },  /* 二項 3D */
-	{ "combine",      BINMESH_IN,2, AK_CACHE, OPWIRE(cgaCombine, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },  /* +++ 交差許容の単純合体(viewer 用) */
-	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(cgaIntersection, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(cgaDifference, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d" },
+	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaCylinder), 0, "->cg-mesh3d" },  /* cylinder(r,h,seg): 原点中心・軸 +Z */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaCone), 0, "->cg-mesh3d" },  /* cone(r,h,seg): 原点中心・軸 +Z */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(cgaTorus), 0, "->cg-mesh3d" },  /* torus(R,r,seg): 原点中心・軸 +Z */
+	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaTetrahedron), 0, "->cg-mesh3d" },  /* tetrahedron(r): 外接球半径 r */
+	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaSphere), 0, "->cg-mesh3d", 0, 0, 1 },  /* sphere(r, seg): seg=円周分割数(既定 32 相当) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "icosphere",    SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaIcosphere), 0, "->cg-mesh3d", 0, 0, 1 },  /* icosphere(r, subdiv): subdiv=細分回数(既定0=20面) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(cgaUnion, cgMesh, cgMesh),        0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d,nfb-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },  /* 二項 3D */
+	{ "combine",      BINMESH_IN,2, AK_CACHE, OPWIRE(cgaCombine, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d,nfb-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },  /* +++ 交差許容の単純合体(viewer 用) */
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(cgaIntersection, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d,nfb-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d", 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(cgaDifference, cgMesh, cgMesh), 0, "[cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d,nfb-mesh3d](2)->cg-mesh3d;[cg-cross2d,mf-cross2d](2)->cg-cross2d" },
 	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(cgaExport, cgMesh), 0, "(cg-mesh3d)->ref;(cg-cross2d)->ref;(mf-mesh3d)->ref;(mf-cross2d)->ref;(gg-mesh3d)->ref" },  /* 出力=D_REF。mf 入力も引受 (Stage2: export の読解 capability を sig 化・cgal は universal reader) */
-#ifdef SRAVA_HAVE_HDF5
-	{ "export_vox",   EXPORTVOX_IN,2,AK_CACHE, OPWIRE(cgaVoxelize, cgMesh), 1, "({cg-mesh3d,mf-mesh3d,gg-mesh3d}...)->ref" },  /* voxel化→vox.h5(出力=D_REF)。末尾メッシュ可変(variadic=1)。HDF5 必須。★#3436 P4: 繰り返し形 {…}… で混在受理を 1 行に明示 (旧 3 行 + sig_repeat_accepts の行跨ぎ合体) */
-#endif
 	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaTranslate, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
 	{ "rotate",       ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaRotate, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
 	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaMirror, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d" },
@@ -148,17 +151,17 @@ static const cgaOpEntry OPS[] = {
 	{ "color",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaColor, cgMesh), 0, "(cg-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-mesh3d)->cg-mesh3d;(mf-cross2d)->cg-cross2d;(gg-mesh3d)->cg-mesh3d" },  /* 面色 f:color (mf 入力も引受=cgal 専用) */
 	{ "rect",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaRect),        0, "->cg-cross2d" },  /* leaf 2D 生成 */
 	{ "ngon",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaNgon), 0, "->cg-cross2d" },  /* 2D 正 n 角形 */
-	{ "circle",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaCircle), 0, "->cg-cross2d" },  /* circle(r, segs): segs=多角形辺数(既定32) */
+	{ "circle",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaCircle), 0, "->cg-cross2d", 0, 0, 1 },  /* circle(r, segs): segs=多角形辺数(既定32) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	{ "polygon",      SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaPolygon), 0, "->cg-cross2d" },  /* 2D 明示点列 */
 	{ "line",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(cgaLine), 0, "->cg-cross2d" },  /* 2D ガイド(寸法線・開ポリライン) */
 	{ "extrude",      MESH1ARG_IN,2,AK_CACHE, OPWIRE(cgaExtrude, cgMesh),     0, "(cg-cross2d)->cg-mesh3d" },  /* 2D→3D 角柱 (次元変化・Q-C) */
-	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaTube), 0, "->cg-mesh3d;->cg-cross2d" },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (3D=掃引立体 / 2D=帯)。import と同じ多出力注釈 */
-	{ "revolve",      ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaRevolve, cgMesh), 0, "(cg-cross2d)->cg-mesh3d" },  /* revolve(m,angle,segs): 2D→3D 回転体 */
+	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaTube), 0, "->cg-mesh3d;->cg-cross2d", 0, 0, 1 },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (3D=掃引立体 / 2D=帯)。import と同じ多出力注釈 */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "revolve",      ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaRevolve, cgMesh), 0, "(cg-cross2d)->cg-mesh3d", 0, 0, 1 },  /* revolve(m,angle,segs): 2D→3D 回転体 */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ★2D のみ (#3440 の 2): **3D offset は nef へ移設**した。3D の中身は Minkowski 和
 	 * (Nef + 凸分解) で、他の幾何カーネルの機能を借りて cgal の顔で出していた = モジュール境界の
 	 * 約束①違反だった (docs/srava_module_reference.md「モジュールの境界」章)。
 	 * 2D は straight skeleton (面取り) で Nef と無関係なので、ここに残る。 */
-	{ "offset",       ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaOffset, cgMesh),      0, "(cg-cross2d)->cg-cross2d" },
+	{ "offset",       ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaOffset, cgMesh),      0, "(cg-cross2d)->cg-cross2d", 0, 0, 2 },  /* ★ nreq=2: 以降は省略可 (既定は op が入れる) */
 	/* ★ #3443: 頂点数 / 面数。planner が cache のバイト列を直接読んで表示していたのを op へ移した。 */
 	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(cgaNverts, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },
 	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(cgaNfaces, cgMesh), 0, "(cg-mesh3d)->value;(cg-cross2d)->value" },
@@ -175,10 +178,10 @@ static const cgaOpEntry OPS[] = {
 	{ "distance",     BINMESH_IN,2, AK_INLINE,OPWIRE(cgaDistance, cgMesh, cgMesh), 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value;(cg-mesh3d,gg-mesh3d)->value;(gg-mesh3d,cg-mesh3d)->value;(gg-mesh3d,gg-mesh3d)->value" },  /* distance(a,b): 値返し(3D 最近接距離・近似) */
 	{ "closest",      BINMESH_IN,2, AK_INLINE,OPWIRE(cgaClosest, cgMesh, cgMesh), 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value;(cg-mesh3d,gg-mesh3d)->value;(gg-mesh3d,cg-mesh3d)->value;(gg-mesh3d,gg-mesh3d)->value" },  /* closest(a,b): 配列返し([d,[pa],[pb]]) */
 	{ "farthest",     BINMESH_IN,2, AK_INLINE,OPWIRE(cgaFarthest, cgMesh, cgMesh), 0, "(cg-mesh3d,cg-mesh3d)->value;(cg-mesh3d,mf-mesh3d)->value;(mf-mesh3d,cg-mesh3d)->value;(mf-mesh3d,mf-mesh3d)->value;(cg-mesh3d,gg-mesh3d)->value;(gg-mesh3d,cg-mesh3d)->value;(gg-mesh3d,gg-mesh3d)->value" },  /* farthest(a,b): 配列返し(頂点総当り・厳密) */
-	{ "thin_spots",   THIN_IN,   4, AK_INLINE,OPWIRE(cgaThinSpots, cgMesh), 0, "(cg-mesh3d)->value;(mf-mesh3d)->value;(gg-mesh3d)->value" },  /* thin_spots(m,t,rays,cone): 肉厚<t の面の[[x,y,z,thk],..](SDF・cone=コーン全角°)・mf 入力も引受 */
+	{ "thin_spots",   THIN_IN,   4, AK_INLINE,OPWIRE(cgaThinSpots, cgMesh), 0, "(cg-mesh3d)->value;(mf-mesh3d)->value;(gg-mesh3d)->value", 0, 0, 2 },  /* thin_spots(m,t,rays,cone): 肉厚<t の面の[[x,y,z,thk],..](SDF・cone=コーン全角°)・mf 入力も引受 */  /* ★ nreq=2: 以降は省略可 (既定は op が入れる) */
 	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(cgaCast, cgMesh),        0, "(cg-mesh3d)->cg-mesh3d;(mf-mesh3d)->cg-mesh3d;(cg-cross2d)->cg-cross2d;(mf-cross2d)->cg-cross2d;(gg-mesh3d)->cg-mesh3d"
 	                                                 ";(ch-mesh3d)->cg-mesh3d"     /* cherchi も MFM3 を名乗る = cg-mf-upgrade が読む */
-	                                                 ";(nfb-mesh3d)->cg-mesh3d"    /* cg-nf-downgrade: NEFB のみ (NEF3=SNC は読めないので申告しない) */ },  /* ★変換 op: identity + mf→cg 昇格。P2c: cast は sig 出力型で routing (目標型を産出できるモジュールへ) → 全出力型 (cg-mesh3d/cg-cross2d) を列挙 */
+	                                                 ";(nfb-mesh3d)->cg-mesh3d"    /* cg-nf-downgrade: NEFB。★ #3499: nf-mesh3d (nef_snc) は橋 nef_cg.so が受ける */ },  /* ★変換 op: identity + mf→cg 昇格。P2c: cast は sig 出力型で routing (目標型を産出できるモジュールへ) → 全出力型 (cg-mesh3d/cg-cross2d) を列挙 */
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -255,7 +258,8 @@ const srava_module_descriptor cgatsAgent_descriptor = {
 	.import_exts   = "off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-cross2d",
 	.export_exts   = "off,stl,obj,ply,3mf,amf,svg,dxf",   /* P2d: amf 追加 (型軸 export routing ② で解決させ arg_module fallback 依存を解消) */
 	.provides      = cgal_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	.hash_salt     = 0,   /* 基準カーネルなのでソルト無し (既存キャッシュキーを byte 不変に保つ) */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 2,   /* ★ #3487: v2 = valid が空メッシュに 0 を返す (共通定義 ① 空でない) */
 	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
 	 *   CGAL のブールは逐次。T1-d 実測でも TBB を引き込まない */
 	.initialize    = 0,   /* 無し */

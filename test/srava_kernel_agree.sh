@@ -33,6 +33,35 @@ case "$MODEL" in
 box)          SRC='print("VAL", volume(box(2,2,3)));' ;;
 sphere)       SRC='print("VAL", volume(sphere(5,32)));' ;;
 icosphere)    SRC='print("VAL", volume(icosphere(5,2)));' ;;
+# ★ #3474: 基本立体 (共通生成器 src/h/common/solids.h)。カーネル差が出る余地が無いので
+#   メッシュ系は完全一致 (tol=0) を要求できる。⚠ occt の cylinder/cone/torus は **解析曲面**
+#   なので内接多面体とは構造的に体積が違う (sphere と同じ理由) → occt は表に入れない。
+pyramid)      SRC='print("VAL", volume(pyramid(5,3,2)));' ;;
+cylinder)     SRC='print("VAL", volume(cylinder(2,3,24)));' ;;
+cone)         SRC='print("VAL", volume(cone(2,3,24)));' ;;
+torus)        SRC='print("VAL", volume(torus(3,0.8,20)));' ;;
+tetrahedron)  SRC='print("VAL", volume(tetrahedron(2)));' ;;
+# ★ **位置**を見るモデル (2026-09-05)。体積は平行移動で変わらないので、素の volume を
+#   突き合わせるだけでは **置き場所のカーネル間不一致を検出できない**。実際に 2 件見逃していた:
+#     ・occt の box   … 原点中心 (他 5 カーネルは角が原点)
+#     ・occt の prism … 原点中心 z=-h/2〜h/2 (cgal / manifold は z=0〜h)
+#   どちらも box:0 / 体積比較を **通っていた**。原点から離した箱で切り取ると位置が値に出る。
+#   ⚠ 切り取り箱も **その カーネル自身の box** なので、box の置き場所が揃っていることが前提。
+#     box_cut がその前提を直接見張る (box が動いたら真っ先にここが落ちる)。
+box_cut)      SRC='print("VAL", volume(box(2,2,2) &&& translate(box(10,10,10),[1,1,1])));' ;;
+# ★ #3474 続き (2026-09-05): prism / icosphere / import も歯抜けを埋めたので表に入れる。
+#   import は **その場で STL を書いて読み直す** (共通の読み手 src/h/common/meshio.h の回帰)。
+prism)        SRC='print("VAL", volume(prism(6,2,1)));' ;;
+icosphere2)   SRC='print("VAL", volume(icosphere(5,2)));' ;;
+importstl)    SRC='export("'"$D"'-io.stl", box(3,4,5)); print("VAL", volume(import("'"$D"'-io.stl")));' ;;
+# ★ #3474 続き (2026-09-05): 2D プリミティブ。2D 型を持つのは cgal / manifold / occt の 3 つ。
+#   rect / ngon / polygon は **平面の折れ線**なので occt でも厳密に一致する。
+#   ⚠ circle は入れない: occt は **厳密な円** (Geom_Circle) で、メッシュ系の内接正多角形とは
+#     面積が構造的に違う (sphere と同じ理由)。occt 側は閉形式 πr² で別途検証する。
+rect2d)       SRC='print("VAL", area(rect(3,4)));' ;;
+ngon2d)       SRC='print("VAL", area(ngon(6,2)));' ;;
+polygon2d)    SRC='print("VAL", area(polygon([[0,0],[4,0],[4,3],[0,3]])));' ;;
+prism_cut)    SRC='print("VAL", volume(prism(6,2,1) &&& box(10,10,1)));' ;;
 union)        SRC='var s = sphere(1.5,24); print("VAL", volume(s ||| translate(s,[1,1,1])));' ;;
 difference)   SRC='print("VAL", volume(box(2,2,2) --- sphere(1.2,24)));' ;;
 intersection) SRC='print("VAL", volume(box(2,2,2) &&& sphere(1.2,24)));' ;;

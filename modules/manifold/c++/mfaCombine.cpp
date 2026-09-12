@@ -89,8 +89,11 @@ mfaCombine_::compute()
 		v.push_back(a2->cross()); v.push_back(b2->cross());
 		geom = thNEW(mfCross,(manifold::CrossSection::Compose(v)));
 	} else {
-		result = thNEW(pigDataError,(thNEW(stdString,("combine: incompatible operands (mixed dimension?)"))));
+		result = mfa_err(thNEW(stdString,("combine: incompatible operands (mixed dimension?)")));
+		return;
 	}
+	/* ★ #3498: Compose も遅延する (mfMesh.h の mf_eval_err の一覧)。 */
+	if ( (result = mf_eval_err(geom, brk_, "combine")) != thNULL ) geom = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

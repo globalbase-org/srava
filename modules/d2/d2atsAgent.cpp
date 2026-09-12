@@ -94,7 +94,8 @@ extern const srava_module_descriptor d2atsAgent_descriptor = {
 	.import_exts   = 0,
 	.export_exts   = 0,
 	.provides      = d2_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	.hash_salt     = "\x01" "D2S",   /* キャッシュキー弁別 (#3427 で manifest.cpp から移動) */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 1,
 	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
 	 *   テスト専用 */
 	.initialize    = 0,   /* 無し */

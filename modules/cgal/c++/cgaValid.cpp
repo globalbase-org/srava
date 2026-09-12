@@ -63,7 +63,7 @@ cgaValid_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("valid: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("valid: needs a mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->op_valid()));

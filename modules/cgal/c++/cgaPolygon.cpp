@@ -72,8 +72,8 @@ cgaPolygon_::compute()
 	mesh = thNEW(cgMesh2D,());
 	int np = pts.is_notNull() ? pts->length() : 0;
 	if ( np < 3 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "polygon: needs >= 3 points [[x,y],...]"))));
+		result = cga_err(thNEW(stdString,(
+		    "polygon: needs >= 3 points [[x,y],...]")));
 		return;
 	}
 	/* 連続重複頂点を間引きながら集める。曲線(arc/bezier/…)を concat で繋ぐと継ぎ目で
@@ -84,8 +84,8 @@ cgaPolygon_::compute()
 	for ( int i = 0 ; i < np ; ++i ) {
 		sPtr<pigDataArray> xy = pts->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! xy.is_notNull() || xy->length() < 2 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
-			    "polygon: each point must be [x,y]"))));
+			result = cga_err(thNEW(stdString,(
+			    "polygon: each point must be [x,y]")));
 			return;
 		}
 		double x = xy->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();
@@ -99,8 +99,8 @@ cgaPolygon_::compute()
 	while ( verts.size() >= 2 && verts.back() == verts.front() )
 		verts.pop_back();
 	if ( verts.size() < 3 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "polygon: needs >= 3 distinct points (fewer than 3 remain after removing duplicates)"))));
+		result = cga_err(thNEW(stdString,(
+		    "polygon: needs >= 3 distinct points (fewer than 3 remain after removing duplicates)")));
 		return;
 	}
 	cgMesh2D::Polygon_2 p(verts.begin(), verts.end());

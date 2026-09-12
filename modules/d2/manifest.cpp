@@ -7,8 +7,10 @@
 
 extern const srava_module_descriptor d2atsAgent_descriptor;   /* d2atsAgent.cpp */
 
-/* ★ #3427: 型登録・ソルト申告の静的自己登録は撤去。記述子 (codecs の tags×types と
- *   hash_salt) から pigModuleRegistry::register_descriptor が登録する。 */
+/* ★ #3427: 型登録・ソルト申告の静的自己登録は撤去。型は記述子 (provides) から
+ *   pigModuleRegistry::register_descriptor が登録する。
+ * ★ #3466 (ABI v17): キャッシュキーのソルトは **記述子から撤去**した。レジストリが
+ *   「モジュール名 + その .so の指紋」から作る (申告するものではなくなった)。 */
 
 SRAVA_MODULE_EXPORT const srava_module_descriptor* srava_module(void)
 {

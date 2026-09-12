@@ -86,15 +86,18 @@ nfaExport_::compute()
 	sPtr<nfMesh> mIn = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("export: no mesh to write"))));
+		result = nfa_err(thNEW(stdString,("export: no mesh to write")));
 		return;
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
-		char b[256];
-		::snprintf(b, sizeof b, "export: cannot write %s (nef supports off/stl/ply/obj; an unbounded Nef cannot be written)", p);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		char b[320];
+		/* ★ #3504: 理由を to_mesh から受け取る。理由が無い = 変換は通ったので拡張子の問題。 */
+		const char *why = mIn->last_error();
+		::snprintf(b, sizeof b, "export: cannot write %s (%s)", p,
+		           why ? why : "nef supports off/stl/ply/obj");
+		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
 	pHashKeyType refHash = nf_hash_file(p);

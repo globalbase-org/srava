@@ -70,11 +70,14 @@ ocaIntersection_::compute()
 	const char *msg = 0;
 	char why[512];              /* ★ 理由の受け皿はローカル (static を置かない) */
 	why[0] = '\0';
-	out = ocShape::bool_from_args(args, "intersection", &msg, why, (int)sizeof why);
+	out = ocShape::bool_from_args(args, "intersection", &msg, why, (int)sizeof why, &brk_);
 	if ( ! out.is_notNull() ) {
+		/* ★ #3498: 中断された算法は IsDone()==false で返る = 失敗と見分けがつかない。
+		 *   幾何のせいにする前に、まず中断を見る (ocShape.h の oc_abort_err)。 */
+		if ( (result = oc_abort_err(brk_, "intersection")) != thNULL ) return;
 		char b[160];
 		::snprintf(b, sizeof b, "intersection: %s", msg ? msg : "OCCT boolean failed");
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = oca_err(thNEW(stdString,(b)));
 	}
 }
 

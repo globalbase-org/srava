@@ -25,6 +25,15 @@ title: srava ドキュメント
   記述子 ABI と、**モジュールが効かないときの診断**:
   [`srava --modules`](srava_install_guide.html#modules)（**どの `.so` が効いているか** = 配置）と
   [`srava --module-info`](srava_install_guide.html#module-info)（**何を申告しているか** = 中身）。
+  同梱モジュールの依存・対応型・op 一覧もここ。幾何カーネルは **cgal.so**（CGAL・厳密）/
+  **manifold.so**（高速）/ **nef_hybrid.so**（Nef 多面体）/ **geogram.so**（厳密 mesh arrangement）/
+  **cherchi.so**（indirect predicates）/ **occt.so**（B-rep・解析曲面）/ **openvdb.so**（ボリューム）、
+  表現をまたぐ**橋渡し** **occt_mf.so** / **openvdb_mf・cg・gg.so**、
+  解析モジュールは **pipe_proximity**（可変太さ配管の自己接近検出・距離調整）。
+  ★ これらは**すべて既定でビルドされる**（`nef_snc.so` だけ既定 OFF・Cygwin は建てられない
+  ものが自動 OFF）。
+- [**モジュール設計**](srava_module_design.html) — 自作モジュール（`.so`）を書くための設計ガイド。
+  記述子 ABI・op 申告・型/4CC 登録・実行方式・cross-module 型変換・ビルド/配置。
 - [**言語リファレンス**](srava_language_reference.html) — 文法・lambda/クロージャ・評価モデル・
   **並列に走るもの / 走らないもの**・2D/3D ディスパッチ・キャッシュ・エラー表示・
   **設定と環境変数**(srava 変数 → 環境変数 → 既定 の解決順・負荷コントロール一覧)。
@@ -36,15 +45,6 @@ title: srava ドキュメント
 - [**螺旋巻きつけライブラリ**](srava_roll_reference.html) — 標準ライブラリ `std/roll.sra`（芯パイプに
   太さ可変パイプを密接に巻きつけて螺旋ホーンを生成する継続法）の関数リファレンス。**要 pipe_proximity
   モジュール**。ドライバ例は `examples/roll_sample.sra`。
-- [**モジュールリファレンス**](srava_module_reference.html) — モジュール機構（`.so`）の概要と、同梱
-  モジュールの依存・対応型・op 一覧。幾何カーネルは **cgal.so**（CGAL・厳密）/ **manifold.so**（高速）/
-  **nef_snc.so・nef_hybrid.so**（Nef 多面体）/ **geogram.so**（厳密 mesh arrangement）/
-  **cherchi.so**（indirect predicates）/ **occt.so**（B-rep・解析曲面）/ **openvdb.so**（ボリューム）、
-  表現をまたぐ**橋渡し** **occt_mf.so** / **openvdb_mf・cg・gg.so**、
-  解析モジュールは **pipe_proximity**（可変太さ配管の自己接近検出・距離調整）。
-  ★ 既定でビルドされるのは cgal / manifold / nef / pipe_proximity で、残りは opt-in。
-- [**モジュール設計**](srava_module_design.html) — 自作モジュール（`.so`）を書くための設計ガイド。
-  記述子 ABI・op 申告・型/4CC 登録・実行方式・cross-module 型変換・ビルド/配置。
 - [**k-Wave 音響シミュレーション**](srava_kwave.html) — srava の形状を `export_vox` で voxel 化し、
   格子音響ソルバ **k-Wave** で解く連携ガイド（vox.h5 → `vox2input.py` → input.h5 → ソルバ・断面 PNG）。
 

@@ -52,9 +52,19 @@ public:
 	/* -- 派生スレッドが使う API。戻り値は下の関数定義のヘッダコメント参照 -- */
 	int	next_record();
 
+	/* ★ #3479: errCode を立てた **理由**。errCode は -1/-2 の 2 値しかなく、TSE_RETURN の
+	 *   msg_int に載った後は誰も読んでいなかった (parent は msg_obj が null なら「読めなかった」
+	 *   としか分からない)。拒否した本人が書いた一文を parent が引けるようにする。 */
+	sPtr<stdString>	err_why() { return errWhy; }
+
 protected:
+	/* 派生が errCode と一緒に立てる。文字列リテラル前提 (寿命は .so と同じ)。 */
+	void	set_err(int code, const char *why)
+		{ errCode = code; if ( why != 0 ) errWhy = thNEW(stdString,(why)); }
+
 	int	fd;
 	int	errCode;
+	sPtr<stdString>	errWhy;          /* errCode の理由 (無ければ thNULL) */
 	INTEGER64	consumed;        /* 論理読み出し offset(pread 用) */
 	uint32_t	writerPid;       /* streamhdr 由来。死活監視ハンドル */
 	/* ★ writer プロセスの起動時刻 (2026-08-26)。pid と対で初めてプロセスの同一性が決まる。 */
@@ -75,8 +85,8 @@ TS_END_IMPLEMENT
 
 TS_BEGIN_INTERFACE
 #include	"ts2/c++/sRptr.h"
+#include	"ts2/c++/stdString.h"   /* #3479: errWhy を派生の inline から作るため完全型が要る */
 class ptsObject;
-class stdString;
 TS_END_INTERFACE
 
 #endif
@@ -87,7 +97,7 @@ ptsWireCacheStreamReader_::ptsWireCacheStreamReader_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    fd = -1; errCode = 0; consumed = 0; writerPid = 0; writerStart = 0;
+    fd = -1; errCode = 0; errWhy = thNULL; consumed = 0; writerPid = 0; writerStart = 0;
 }
 
 
@@ -214,12 +224,18 @@ TS_STATE(FIN_START)
 TS_STATE(FIN_ptsWireCacheStreamReader_START)
 {
 	if ( fd >= 0 ) { ::close(fd); fd = -1; }
+	/* ★ #3479: 読めなかったときは **理由**を先に送る (TSE_RETURN は result か errCode の
+	 *   どちらか一方しか載せられないため、文字列は別イベントで渡す)。METADATA_FINISH の
+	 *   TSE_ASSERT は msg_int なので、受け手は msg_obj の有無で見分けられる。 */
+	if ( result == thNULL && errWhy.is_notNull() )
+		parent->eventHandler(thNEW(stdEvent,(TSE_ASSERT,ifThis,sPtr<stdObject>::d_cast(errWhy))));
 	if ( result.is_notNull() )
 		parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,result)));
 	else
 		parent->eventHandler(thNEW(stdEvent,(TSE_RETURN,ifThis,(INTEGER64)errCode)));
 	/* ★ §9: result はイベントに載せた (受け手が持つ) ので手放す。バッファも空に。 */
 	result = thNULL;
+	errWhy = thNULL;
 	_cacheFileName = thNULL;
 	meta.length(0);
 	rec_payload.length(0);

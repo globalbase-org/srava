@@ -8,6 +8,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"cg/c++/cgMesh.h"
+#include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/cgaRotate_.h"
@@ -70,58 +71,21 @@ void
 cgaRotate_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<cgMesh>  in      = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
-	sPtr<pigData> axisArg = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
-	double        deg     = ( na > 2 ) ? (*args)[2]->get_flt() : 0.0;
+	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
+	sPtr<pigData> arg = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
+	double        deg = ( na > 2 ) ? (*args)[2]->get_flt() : 0.0;
 
-	double rad = deg * M_PI / 180.0;
-	double c = ::cos(rad), s = ::sin(rad);
-
-	/* 回転軸の単位ベクトル (ux,uy,uz) を決める。axis 引数は:
-	 *   - 文字列 "x"/"y"/"z": 主軸ショートハンド
-	 *   - 配列 [x,y,z]: 任意軸(原点通過)。正規化する。[0,0,0] 等の退化はエラー。 */
-	double ux = 0, uy = 0, uz = 1;   /* 既定 z */
-	sPtr<pigDataArray> av = axisArg.is_notNull() ? axisArg->obt_array()
-	                                             : sPtr<pigDataArray>();
-	if ( av.is_notNull() ) {
-		if ( av->length() < 3 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
-			    "rotate: axis vector needs 3 components [x,y,z]"))));
-			mesh = thNEW(cgMesh3D,());
-			return;
-		}
-		double x = av->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();
-		double y = av->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
-		double z = av->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt();
-		double len = ::sqrt(x*x + y*y + z*z);
-		if ( len == 0.0 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
-			    "rotate: degenerate axis vector [0,0,0]"))));
-			mesh = thNEW(cgMesh3D,());
-			return;
-		}
-		ux = x/len; uy = y/len; uz = z/len;
-	} else {
-		const char* axis = axisArg.is_notNull() ? axisArg->get_str()->get_str() : "z";
-		if      ( ::strcmp(axis, "x") == 0 ) { ux = 1; uy = 0; uz = 0; }
-		else if ( ::strcmp(axis, "y") == 0 ) { ux = 0; uy = 1; uz = 0; }
-		else if ( ::strcmp(axis, "z") == 0 ) { ux = 0; uy = 0; uz = 1; }
-		else {
-			sPtr<stdString> msg = thNEW(stdString,("rotate: unknown axis '"));
-			msg = msg->add(axis)->add("' (expected \"x\"/\"y\"/\"z\" or [x,y,z])");
-			result = thNEW(pigDataError,(msg));
-			mesh   = thNEW(cgMesh3D,());
-			return;
-		}
+	/* ★ 引数の解釈と行列の組み立ては **common/affine.h** (カーネル非依存・7 モジュール共通)。
+	 *   受け付ける書き方だけでなく **拒否の理由** もそこに集約してある (#3486)。
+	 *   理由の受け皿 buf は呼び手が持つ (モジュール側に static を置かない)。 */
+	double e[12];
+	const char *why = 0;
+	char buf[256];
+	if ( ! srava_affine::matrix_rotate(arg, deg, e, &why, buf, (int)sizeof buf) ) {
+		result = cga_err(thNEW(stdString,(why)));
+		mesh = thNEW(cgMesh3D,());
+		return;
 	}
-
-	/* Rodrigues の回転行列(原点通過の任意軸 u まわり、右手系・反時計回り)。主軸はこの特例。 */
-	double C = 1.0 - c;
-	double e[12] = {
-	    c + ux*ux*C,     ux*uy*C - uz*s,  ux*uz*C + uy*s,  0.0,
-	    uy*ux*C + uz*s,  c + uy*uy*C,     uy*uz*C - ux*s,  0.0,
-	    uz*ux*C - uy*s,  uz*uy*C + ux*s,  c + uz*uz*C,     0.0
-	};
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<cgMesh>();
 }
 

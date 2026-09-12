@@ -72,7 +72,7 @@ mfaCast_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<mfGeom> in = ( na > 1 ) ? sPtr<mfGeom>::d_cast((*args)[1]) : sPtr<mfGeom>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cast: needs a mesh/cross (2nd arg)"))));
+		result = mfa_err(thNEW(stdString,("cast: needs a mesh/cross (2nd arg)")));
 		return;
 	}
 	mesh = in;   /* identity(mfMesh/mfCross 共通・既に Manifold)。cg→mf downgrade は reader が有理数→double 化して渡す */

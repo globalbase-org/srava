@@ -78,12 +78,12 @@ mfaColor_::compute()
 
 	int r = 150, g = 150, b = 150;
 	if ( ! srava_color::parse_spec(spec, r, g, b) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "color: 2nd arg must be a name (\"red\"...), \"#RRGGBB\", or [r,g,b] (0-255)"))));
+		result = mfa_err(thNEW(stdString,(
+		    "color: 2nd arg must be a name (\"red\"...), \"#RRGGBB\", or [r,g,b] (0-255)")));
 		return;
 	}
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("color: needs a 3D mesh (2D is not supported)"))));
+		result = mfa_err(thNEW(stdString,("color: needs a 3D mesh (2D is not supported)")));
 		return;
 	}
 	mesh = in->op_color(r, g, b);

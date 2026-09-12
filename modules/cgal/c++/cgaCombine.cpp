@@ -73,13 +73,13 @@ cgaCombine_::compute()
 	sPtr<cgMesh> ma = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	sPtr<cgMesh> mb = ( na > 1 ) ? sPtr<cgMesh>::d_cast((*args)[1]) : sPtr<cgMesh>();
 	if ( ! ma.is_notNull() || ! mb.is_notNull() ) {
-		result = thNEW(pigDataError,(cga_missing_operand_msg("combine",
-		     (na>0)?(*args)[0]:sPtr<pigData>(), (na>1)?(*args)[1]:sPtr<pigData>(), na)));
+		result = cga_err(cga_missing_operand_msg("combine",
+		     (na>0)?(*args)[0]:sPtr<pigData>(), (na>1)?(*args)[1]:sPtr<pigData>(), na));
 		return;
 	}
 	mesh = ma->op_combine(mb);   /* 多態: 3D=copy_face_graph / 2D=Pwh 連結。次元を知らない */
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("combine: incompatible operands (mixed dimension?)"))));
+		result = cga_err(thNEW(stdString,("combine: incompatible operands (mixed dimension?)")));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

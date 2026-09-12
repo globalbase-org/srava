@@ -28,11 +28,14 @@
  *   ptsCalcBody 等の共通経路には置けない (置くと層構造が壊れる)。
  */
 #include <tbb/task_arena.h>
+#include <exception>
+#include <string>
 
 /* 現在の予算 (vdGrid.cpp が持つ)。0 以下 = 指定なし = TBB の既定 (コア数)。 */
 int vd_op_thread_budget();
 
-/* 予算が指定されていれば task_arena の中で、無ければそのまま f を実行する。 */
+/* 予算が指定されていれば task_arena の中で、無ければそのまま f を実行する。
+ * ⚠ これは **例外を素通しする**。op から直接使わないこと (下の vd_arena_guard を使う)。 */
 template<class F>
 inline void
 vd_in_arena(F&& f)
@@ -41,6 +44,44 @@ vd_in_arena(F&& f)
 	if ( n <= 0 ) { f(); return; }          /* 指定なし = 従来どおり */
 	tbb::task_arena arena(n);
 	arena.execute(f);
+}
+
+/* ★★ #3474 続き (2026-09-05): **例外境界つき**の arena 実行。op はこちらを使う。
+ *
+ *   ⚠ openvdb 系 3 モジュール (openvdb / openvdb_mf / openvdb_cg / openvdb_gg) には
+ *     catch が **1 つも無かった**。ライブラリが投げると受け手が居ないまま伝播し、
+ *     ワーカースレッド由来なら agent ごと死ぬ (geogram で実際に踏んだ形・occt は
+ *     Standard_Failure 専用の catch を、cherchi は ch_guard を持って対処済み)。
+ *     実例: 活性ボクセル 0 の格子に levelSetVolume を掛けると
+ *     "LevelSetMeasure does not support empty grids" を throw する。
+ *
+ *   ★ TBB は **ワーカースレッドで投げられた例外を捕まえて execute() の呼び出し元で
+ *     rethrow する**ので、この層に境界を置けば op 内並列からの throw も受けられる。
+ *
+ *   ★ 捕まえたら **黙って握り潰さない** — 理由を why に書いて 0 を返し、呼び出し側が
+ *     自分のモジュール名つきのエラーにする (out/mesh は未設定のままなので、
+ *     get_result() が result を優先して返す)。
+ *
+ *   使い方 (op の compute() は丸ごとこれで包む):
+ *       std::string why;
+ *       if ( ! vd_arena_guard("union", [&]{ … }, why) )
+ *           result = vda_err(thNEW(stdString,(why.c_str())));
+ */
+template<class F>
+inline int
+vd_arena_guard(const char *op, F&& f, std::string &why)
+{
+	try {
+		vd_in_arena(f);
+		return 1;
+	} catch ( const std::exception &e ) {
+		/* openvdb の例外は std::exception 派生で、what() に型名が入る
+		 * (例 "RuntimeError: LevelSetMeasure does not support empty grids") */
+		why = std::string(op) + ": openvdb failed (" + e.what() + ")";
+	} catch ( ... ) {
+		why = std::string(op) + ": openvdb failed (unknown exception)";
+	}
+	return 0;
 }
 
 #endif

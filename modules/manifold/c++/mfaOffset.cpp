@@ -69,8 +69,8 @@ mfaOffset_::compute()
 	sPtr<mfCross> in = ( na > 0 ) ? sPtr<mfCross>::d_cast((*args)[0]) : sPtr<mfCross>();
 	double d = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "offset: Manifold kernel supports 2D offset only (use exact kernel for 3D)"))));
+		result = mfa_err(thNEW(stdString,(
+		    "offset: Manifold kernel supports 2D offset only (use exact kernel for 3D)")));
 		return;
 	}
 	manifold::CrossSection r = in->cross().Offset(d, manifold::CrossSection::JoinType::Round, 2.0, 0);

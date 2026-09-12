@@ -18,6 +18,7 @@ host は入力 mesh の**型でディスパッチ**先を決める（例: `union
 | 幾何カーネル | [geogram.so](#geogram) / [cherchi.so](#cherchi) | **ON** |
 | ボリューム | [openvdb.so](#openvdb) | **ON** |
 | ボリューム橋渡し | [openvdb_mf.so / openvdb_cg.so / openvdb_gg.so](#openvdb_bridge) | **ON**（`openvdb_cg` は CGAL をリンクするので **GPL**・`-DSRAVA_MODULE_OPENVDB_CG_GPL=OFF` で外せる） |
+| Nef 橋渡し | [nef_cg.so / nef_mf.so](#nef_bridge) | `nef_snc.so` と連動（既定 **OFF**） |
 | B-rep | [occt.so](#occt) / [occt_mf.so](#occt_mf) | **ON**（system の OpenCASCADE が要る） |
 | 解析 | [pipe_proximity.so](#pipe_proximity) | **ON** |
 | デモ／テスト | [demo.so / d2.so / d3.so / d4.so / d5.so](#demo) | **ON** |
@@ -75,7 +76,8 @@ FetchContent で取得してビルドするため時間がかかり、`occt` は
 **まとめてロードしたいとき**:
 
 ```
-include "module/all.sra";        // 実カーネル一式を optional で一括ロード (lib/module/all.sra)
+include "module/all.sra";        // 同梱 12 本を optional で一括ロード (lib/module/all.sra)
+include "module/demo.sra";       // デモ／テスト用 5 本 (demo/d2/d3/d4/d5)。通常は不要
 ```
 ```sh
 SRAVA_MODULE_ALL=1 srava foo.sra   # 環境変数でも同じことができる
@@ -86,12 +88,20 @@ SRAVA_MODULE_ALL=1 srava foo.sra   # 環境変数でも同じことができる
 > **ビルドツリーには `lib/` が置かれない**ので、install せずにビルドツリーで使うなら
 > `SRAVA_PATH=<ソースツリー>/lib` を明示する。見つからなければ **`include: cannot find` で明示エラー**に
 > なる(探した場所がメッセージに出る)。黙って無視はしない。
-> ⚠ `all.sra` に入るのは cgal / geogram / manifold / occt / openvdb / **nef_hybrid**。
-> `nef_snc.so` は同一プロセスに 2 変種を同居させる特殊用途なので入っていない。
-> ⚠ さらに `nef_snc.so` は **既定でビルドもされない**（2026-08-31 以降）。使うには
-> `-DSRAVA_MODULE_NEF_SNC=ON` でビルドし直す必要がある — 入れずに `module("nef_snc.so",{})` を
-> 呼ぶと `cannot open shared object file` になる。
-> ⚠ 橋渡しモジュール（`openvdb_mf` / `openvdb_cg` / `openvdb_gg`）も入っていない。
+> ⚠ **収録範囲**（2026-09-01 に見直し・2026-09-07 に Nef 橋渡しを追加）: `all.sra` は同梱 20 本のうち **14 本**を並べる。
+>
+> | ファイル | 収録 |
+> |---|---|
+> | `module/all.sra` | cgal / manifold / nef_hybrid / geogram / cherchi / openvdb / openvdb_mf / openvdb_cg / openvdb_gg / nef_cg / nef_mf / occt / occt_mf / pipe_proximity（14 本） |
+> | `module/demo.sra` | demo / d2 / d3 / d4 / d5（5 本・デモ／テスト専用。**install されない**ので install 済みツリーでは全部スキップされる） |
+> | どちらにも無い | `nef_snc.so`（1 本） |
+>
+> ⚠ `nef_snc.so` はどちらにも入れない。実カーネルの変種で、**既定でビルドもされない**
+> （2026-08-31 以降）。使うには `-DSRAVA_MODULE_NEF_SNC=ON` でビルドし直したうえで
+> `module("nef_snc.so",{});` と明示的に書く — 入れずに呼ぶと `cannot open shared object file` になる。
+>
+> ⚠ ロードは無料ではない。モジュール本数は srava の起動固定費に効くので、使う `.so` が
+> 決まっているなら `all.sra` ではなく個別に `module()` するほうが速い。
 > ⚠ サードパーティのプラグイン（`pipe_proximity`）と依存ゼロのトイ実装（`d2`-`d5` / `demo`）も
 > 入っていない。`pipe_scene_adjust` 等が `undefined variable` になるのはこのため（仕様）。
 > ⚠ ビルド構成によって存在しない `.so` があるので、`all.sra` の各行は `{optional: 1}` で書かれている。
@@ -109,12 +119,16 @@ SRAVA_MODULE_ALL=1 srava foo.sra   # 環境変数でも同じことができる
 
 ```
 $ srava --module-info occt_mf
-occt_mf  (abi=16 prio=0 /usr/local/lib/srava/modules/occt_mf.so)
+occt_mf  (abi=24 prio=0 /usr/local/lib/srava/modules/occt_mf.so)
     exec_caps=process(0x2)  exec_default=process  make_agent=yes
-    arity=0  import=-  export=-  hash_salt=yes  initialize=no  configure=no
-    ops (1):
-      triangulate        nin=2 wire=1
+    grace=0(kill at once)  panic=off
+    arity=0  cache_version=1  import=-  export=-  initialize=no  configure=no
+    cache_salt=|occt_mf|v1
+    ops (2):
+      triangulate        nin=2 wire=[ocGeom]
         sig = (oc-brep3d)->mf-mesh3d
+      polygonize         nin=2 wire=[ocGeom]
+        sig = (oc-cross2d)->mf-cross2d
     provides (hierarchy / declared type names / tags probed against create):
       ocGeom             types = oc-brep3d
                          create=yes reader=yes writer=yes match=yes
@@ -158,12 +172,50 @@ module("geogram.so", { threads: 4 });          // ⑦ op 内並列の上限 (受
 | `"off"` | **アンロード（`dlclose`）**（2026-08-28）。そのモジュールの型・4CC・codec・実行体・拡張子は**どこからも見えなくなる**（#3439）。以後 `module(so,{...})` で読み直せる。★**一度でも使われたモジュールは落とせない**（`.so` 由来のオブジェクトが生きうるため明示エラー）。★**未ロードへの `"off"` も明示エラー** — 載っているかは `module_loaded(so)` で判定する。旧 `"on"` は撤去（再ロードは `module(so,{...})`）|
 | `{optional: 1}` | **見つからない / ロードできなくてもエラーにしない**（静かに諦める）。ビルド構成によって存在しない `.so` があるため、便宜スクリプト（`module/all.sra`）はこれで書かれている |
 | `{arity: N}` | **n 項ブールを何項まで 1 回の呼び出しで渡すか**（#3436 P4）。記述子の申告（そのモジュールが受けられる最大項数）とは別で、こちらは **policy**（実際に何項で渡すか）。「木の段数を減らす」ことと「1 回の呼び出しを重くする」ことのトレードオフを、スクリプトを変えずに切り替えられる。★ 受けられる上限はモジュールが決める（例: geogram / cherchi は 32）ので、それを超える指定は上限で頭打ちになる |
-| `{threads: N}` | **op 内並列の上限**。受け取るのは記述子の `configure` フックを持つモジュールだけ（現在は geogram / openvdb）。`N<=0` は「制限を解除して既定へ戻す」。⚠ 絞れば速くなるとは限らない（同上） |
+| `{threads: N}` | **op 内並列の上限**。受け取るのは記述子の `configure` フックを持つモジュールだけ（現在は geogram / openvdb / cherchi）。`N<=0` は「制限を解除して既定へ戻す」。⚠ 絞れば速くなるとは限らない（同上） |
 
 - 選択そのものは型でディスパッチされるので、`union(mfBody, mfBody)` は `module` 無しでも manifold.so に行く。
   `module(..., {priority})` が効くのは**型が決まらない生成 op の既定**（どの幾何カーネルで `box` を作るか等）。
 - `{exec_default}` は機能は変えず**実行方式だけ**を変える（in-proc は速い・process は重い op を分離できる。
   詳細は[モジュール設計](srava_module_design.html)）。
+
+---
+
+## 型変換の規約 — `cast` と橋渡しモジュールの分担 {#conversion}
+
+> ★ ひさ指示（2026-09-01・#3471）。**どちらに置くかの唯一の基準は「精度パラメータが要るか」。**
+
+| | 置き場所 | 例 |
+|---|---|---|
+| **精度を変えない変換** | 各カーネルの `cast` | `cast("cg-mesh3d", mfMesh)`（double→EPECK 昇格）<br>`cast("mf-mesh3d", cgMesh)`（EPECK→double 降格） |
+| **精度パラメータを要する変換** | **橋渡しモジュールの明示 op** | `triangulate(brep, defl)`（`occt_mf.so`）<br>`voxelize(mesh, dx)`（`openvdb_cg.so` 他）<br>`isosurface(grid, iso)`（同上） |
+
+### なぜ `cast` に精度を持たせないか
+
+**① `cast` の引数は「目標型名」であって、そこに粒度の居場所が無い。**
+`cast(T, x)` は `decide_out_module()` が `T` を見て「その型を産出できるモジュール」へ振る、という
+**型軸ディスパッチの入口**。ここに第 3 引数として粒度を足すと、`cast` が「型変換」と「精度指定」の
+2 つの意味を持つ。実際 `cast` は 2026-08-28 に「出力型だけ見て sig の入力申告を無視し、**黙って
+誤った値を返す**」穴を踏んでおり、意味を増やす方向は同じ穴を広げる。
+
+**② 精度が要る変換は「同じ入力から違う結果」が出る。** `defl` を変えれば三角形の数が変わり、
+`dx` を変えればボクセルの数が変わる。値ベースの DAG では、その値が**キャッシュキーに現れなければ
+ならない**。`cast` の引数に紛れ込ませるより、**op の名前と引数として表に出す**ほうが正しい。
+
+**③ 前例がそうなっている。** B-rep → メッシュ（3D で「曲面を三角形に落とす」= 粒度が要る）は
+`cast` ではなく `occt_mf.so` の `triangulate(s, defl)` として実装されている。
+
+```c
+static const pigArgKind TRI_IN[] = { AK_CACHE, AK_INLINE };   /* triangulate(s, defl) */
+{ "triangulate", TRI_IN, 2, AK_CACHE, ..., "(oc-brep3d)->mf-mesh3d" }
+```
+
+### 帰結
+
+- ⚠ **`cast(oc-cross2d, …) -> cg-cross2d` のような「曲線を折れ線に落とす」変換は `cast` に置けない。**
+  2D で「曲線 → 折れ線」に粒度が要るのは、3D で「曲面 → 三角形」に粒度が要るのと同じ問題。
+  橋渡しモジュールの明示 op として置く（→ [occt.so の 2D](#occt) の注記）
+- `cast` で書けるのは、**同じものを別の表現で持ち直すだけ**の変換に限る
 
 ---
 
@@ -184,7 +236,7 @@ srava は op を 2 通りの方式で実行する。どちらになるかは**�
 | `manifold` | `THREAD｜PROCESS` | **thread** | 値が共有に耐える |
 | `pipe_proximity` | `THREAD｜PROCESS` | **thread** | 幾何型を持たず値だけをやり取りする |
 | `cgal` | `PROCESS` のみ | process | EPECK の値が共有に耐えない |
-| `nef_snc` / `nef_hybrid` | `PROCESS` のみ | process | 同上（Nef も EPECK 上に構築される） |
+| `nef_snc` / `nef_hybrid` / `nef_cg` / `nef_mf` | `PROCESS` のみ | process | 同上（Nef も EPECK 上に構築される） |
 | `geogram` / `cherchi` / `occt` / `occt_mf` | `PROCESS` のみ | process | プロセス全体のグローバル初期化を持つ。in-proc の安全性は未検証 |
 | `openvdb` / `openvdb_mf` / `openvdb_cg` / `openvdb_gg` | `THREAD｜PROCESS` | process | ⚠ **thread も可能**だが既定は process のまま（下記） |
 | `demo` | `PROCESS` のみ | process | デモ／テスト用 |
@@ -249,7 +301,7 @@ manifold.so の高速結果を無損失に読み込んで検算・精密加工�
 | CGAL | **6.x**（`find_package(CGAL REQUIRED)`） | 幾何コア（Nef_polyhedron_3 / Polygon_with_holes_2 等） |
 | GMP / MPFR | システム提供 | EPECK の厳密有理数演算 |
 | Boost | システム提供 | CGAL 依存 |
-| HDF5 | `find_package(HDF5 COMPONENTS C)`（`export_vox` 用のみ） | ボクセル書き出し |
+| HDF5 | `find_package(HDF5 COMPONENTS C)`（`export_vox` 用のみ・**`openvdb_cg.so` が使う**） | ボクセル書き出し |
 
 **サポートする型**（この 2 型を読み書き）:
 
@@ -278,15 +330,19 @@ manifold.so の高速結果を無損失に読み込んで検算・精密加工�
 
 ```
 box, boxa, import, prism, pyramid, sphere, icosphere,
+cylinder, cone, torus, tetrahedron, empty2d, empty3d,
 union, combine, intersection, difference,
-export, export_vox, translate, rotate, mirror, scale, transform,
+export, translate, rotate, mirror, scale, transform,
 color, rect, ngon, circle, polygon, line, extrude, tube, revolve, offset(2D のみ),
 area, valid, repair, section, volume, perimeter, centroid, bbox,
 distance, closest, farthest, thin_spots, cast
 ```
 
-cgal.so 固有の op: **pyramid, line, export_vox, repair, perimeter, distance,
-closest, farthest, thin_spots**（manifold.so には無い）。`tube` と `color` は #3415 で manifold.so にも
+cgal.so 固有の op: **line, repair, perimeter, distance,
+closest, farthest, thin_spots**（manifold.so には無い）。
+⚠ `export_vox` は 2026-09-01（#3468）に **`openvdb_cg.so` へ移設**した（cgal の幾何とは無関係な
+「メッシュ全般 → vox.h5」の仕事だったため）。さらに #3469 で **`vd-grid3d` も受ける**ようになり、
+1 つの h5 にカーネル混在レイヤを書ける。`tube` と `color` は #3415 で manifold.so にも
 移植済み（掃引の幾何は `src/h/common/tube.h`、色指定の解釈は `src/h/common/colorspec.h`、
 色つき 3MF/AMF のライタは `src/h/common/mesh3mf.h` を両モジュールが共有する）。
 
@@ -331,9 +387,10 @@ closest, farthest, thin_spots**（manifold.so には無い）。`tube` と `colo
 **サポートする op**（cgal.so のサブセット・`offset` は 2D 専用）:
 
 ```
-box, boxa, sphere, icosphere,
+box, boxa, sphere, icosphere, prism, pyramid,
+cylinder, cone, torus, tetrahedron, empty2d, empty3d,
 union, intersection, difference, combine,
-export, cast, polygon, prism, revolve,
+export, cast, polygon, revolve,
 translate, rotate, scale, mirror, transform,
 area, valid, volume, bbox, centroid,
 import, rect, circle, ngon, extrude, section, offset, tube, color
@@ -387,16 +444,31 @@ op** を持つ。**3D の `offset` を引き受ける唯一のカーネル**で�
 | `nef_hybrid` | `nfb-mesh3d` | `NEFB` | `NEF3` | hybrid 表現の Nef 多面体 |
 
 - 互いの 4CC を **readonly で読める**ので、片方が書いた結果をもう片方に流せる。
+- **他カーネルへも出せる**（#3478 / 2026-09-06 拡張）。`nef_hybrid` は有界・2-多様体の値を
+  厳密境界形式だけで書き、それ以外でも**境界が取れる限り** SNC の後ろに厳密境界を併記する。
+  `nef_snc` は本体を常に SNC に保ったまま、同じく境界が取れれば併記する。どちらも
+  `cast("mf-mesh3d", x)` / `cast("cg-mesh3d", x)` が通る。
+  - ★ 併記の条件は「2-多様体か」ではなく **「境界表現を取れるか」**。`nef` は marked volume
+    ごとの**全シェル**から境界を作れるので、稜だけで接する 2 立体の和や `convex_decomposition`
+    の結果（どちらも 2-多様体ではない）も出せる。境界では各塊が**別の連結成分**として出る。
+  - ⚠ 通らないのは **非有界**（`complement` の結果など）だけ。行き先の型に表現が無いためで、
+    明示エラーになり理由も出る。
+  - ⚠ 2-多様体でない値を `nef_hybrid` が**境界だけ**で書くことはない。境界だけを書き戻すと
+    内部の仕切り面が消え、`convex_decomposition` の結果が 1 塊に化ける（点集合は同じでも
+    `nparts` / `part` の答えが変わる）ため、SNC を本体・境界を付録として両方書く。
+  `manifold.so` / `cgal.so` は CGAL Nef に依存しないまま（GPL 非汚染・#3440）で、
+  読んでいるのは併記された境界であって SNC ではない。
 
 **サポートする op**:
 
 | 分類 | op |
 |---|---|
-| 生成 | `box` / `boxa` / `sphere` |
+| 生成 | `box` / `boxa` / `sphere` / `icosphere` / `prism` / `pyramid` / `cylinder` / `cone` / `torus` / `tetrahedron` / `tube` / `empty3d` |
+| 入力 | `import`（`stl` / `off`） |
 | ブール | `union` / `intersection` / `difference` / `complement` |
 | Nef 固有 | `minkowski` / `offset`（**3D**）/ `convex_decomposition` / `nparts` / `part` / `unify` / `solidify` |
-| 変換 | `translate` / `cast` |
-| 計測 | `nverts` / `nfaces` / `volume` |
+| 変換 | `translate` / `rotate` / `scale` / `mirror` / `transform` / `cast` |
+| 計測 | `nverts` / `nfaces` / `volume` / `bbox` / `centroid` / `area` / `valid` |
 | I/O | `export` |
 
 **実行方式**: `PROCESS` のみ（`exec_default=process`）。Nef も EPECK 上に構築されるので値が共有に耐えない。
@@ -431,7 +503,8 @@ CGAL corefinement と**同じ厳密解**を出しながら、多重ブールで*
   geogram のブールは厳密だが**結果メッシュの頂点は double に落ちる**（EPECK のように有理数を持ち回らない）ため。
 - ★**4CC は形式の名前であって型の名前ではない**ので、形式が同じなら**同じ 4CC を共有する**。
   型の区別（`gg-mesh3d` / `mf-mesh3d`）は
-  codec 行の `types` の申告と**型スタンプ**が担い、キャッシュの弁別は `hash_salt` が担うので衝突しない。
+  codec 行の `types` の申告と**型スタンプ**が担い、キャッシュの弁別は
+  **キャッシュソルト**(モジュール名 + `cache_version`・`--module-info` の `cache_salt` 行)が担うので衝突しない。
   おかげで、cgal が geogram の値を読む経路（`cg-mf-upgrade`）も manifold と共通の 1 本で済む。
   > 逆に、4CC を分けたままにすると「同じ形式に 2 つの名前がある」状態が残り、読み側の codec が
   > モジュールの数だけ増える。
@@ -448,14 +521,16 @@ CGAL corefinement と**同じ厳密解**を出しながら、多重ブールで*
 
 | 分類 | op |
 |---|---|
-| 生成 | `box` / `boxa` / `sphere` |
+| 生成 | `box` / `boxa` / `sphere` / `icosphere` / `prism` / `pyramid` / `cylinder` / `cone` / `torus` / `tetrahedron` / `tube` / `empty3d` |
+| 入力 | `import`（`stl` / `off`） |
 | ブール（二項） | `union` / `intersection` / `difference` |
-| 変換 | `translate` / `cast` |
-| 計測 | `volume` / `nverts` / `nfaces` |
+| 変換 | `translate` / `rotate` / `scale` / `mirror` / `transform` / `cast` |
+| 計測 | `volume` / `nverts` / `nfaces` / `bbox` / `centroid` / `area` / `valid` |
 | 出力 | `export`（`off` / `stl` / `obj` / `ply`） |
 | ★固有 | **`solidify`** |
 
-- `sphere` は共通生成器 `common/geodesic.h` を使うので、頂点と面の並びが cgal / manifold / nef と一致する。
+- 基本立体は共通生成器（`common/geodesic.h` / `common/solids.h`）を使うので、頂点と面の並びが
+  cgal / manifold / nef / cherchi と一致する。掃引管 `tube` も共通（`common/tube.h`）。
   ただし**体積は最下位桁がずれる**（geogram は発散定理を double で積む・cgal は厳密有理数を積んで最後に丸める）。
 - ★**`solidify(m)`** — 自己交差した閉メッシュから**内外を決め直して**ソリッドにする。arrangement で交差を解き、
   radial sort で外側シェルだけを残す。**cgal は自己交差を素通りして誤った体積を返し、manifold も同じ誤値、
@@ -505,8 +580,18 @@ geogram と同じ **mesh arrangement** 系だが、厳密性の作り方が違�
 - **4CC(readonly)**: `MESH`（cgal の厳密有理数テキスト）を昇格読みで受ける（`ch-cg-upgrade`）。
   パーサは `src/h/common/exact_wire.h` を共有するので、cherchi.so は **CGAL をリンクしない**。
 
-**op**: `box` / `boxa` / `sphere` / `union` / `intersection` / `difference` / `volume` / `nverts` / `nfaces` /
-`export`（off,stl,obj）/ `cast` / `translate`。
+**op**: `box` / `boxa` / `sphere` / `icosphere` / `prism` / `pyramid` / `cylinder` / `cone` / `torus` /
+`tetrahedron` / `tube` / `empty3d` / `import`（stl,off）/ `union` / `intersection` / `difference` /
+`volume` / `nverts` / `nfaces` / `bbox` / `centroid` / `area` / `valid` /
+`export`（off,stl,obj）/ `cast` /
+`translate` / `rotate` / `scale` / `mirror` / `transform`。
+
+- 基本立体と掃引管は共通生成器（`common/solids.h` / `geodesic.h` / `tube.h`）なので、頂点と面の並びが
+  他カーネルと一致する。
+- ★ ブールの**オペランドが空**（面を 1 つも持たない）のときは、arrangement へ渡す前に
+  **集合演算として畳む**（`A ∩ ∅ = ∅` など）。cherchi は全オペランドを 1 本のソウプへ連結して
+  三角形ごとに label を振る方式なので、そのまま渡すと「そのオペランドは最初から無かった」ことになり、
+  空集合が `{}`（fold の中立元）と区別できなくなる。
 
 **⚠ 既知の限界 — オペランドの配置が退化していると壊れる**:
 
@@ -521,6 +606,13 @@ geogram と同じ **mesh arrangement** 系だが、厳密性の作り方が違�
 - ⇒ **priority は 3**（既定 routing に入れない）。CAD 的な使い方では「面で接する立体の和」は
   普通に出てくるので、既定にすると黙って誤る。**明示して使うカーネル**として置いてある。
 - ⇒ モデルは **一般の位置**で書く（接触ちょうどを避ける）。
+
+**op 内並列**: `module("cherchi.so", { threads: N })` で 1 op あたりの上限を絞れる（`N<=0` で解除）。
+IRMB のブールは `tbb::parallel_for` を直に呼んでおり、**上流にコンパイル時スイッチが無い**
+（srava が渡す `TBB_PARALLEL` は Cinolib の octree にしか効かない）。そこで呼び出し側を
+`tbb::task_arena` で囲んで絞っている（openvdb と同じ手法）。
+⚠ `task_arena` は**スレッドプールを縮めない**ので、効いたかは**スレッド数や wall ではなく
+CPU 時間**で見ること。
 
 **⚠ `solidify`（#3445）は持たない**。IRMB の分類は「**他の label の内側か**」で決まるため、
 自己交差した *1 枚の* メッシュには効かない（重なる 2 箱を 1 ラベルで union させても内側の面が落ちない）。
@@ -562,10 +654,12 @@ FetchContent で取得して静的リンクする（規約 B）。
 
 | 分類 | op |
 |---|---|
+| 生成 | `box` / `boxa` / `sphere` / `icosphere` / `prism` / `pyramid` / `cylinder` / `cone` / `torus` / `tetrahedron` / `tube` / `empty3d`<br>★ **どれも末尾に `dx`（ボクセルサイズ）を取る**（`sphere(r, dx)` / `prism(n, h, r, dx)` …）。ボリューム表現に分割数は意味を持たず、合成は transform の一致を要求するので **省略できない** |
+| 入力 | `import(path, dx)`（`stl` / `off`） |
 | 出入り | `voxelize(mesh, dx)` / `isosurface(v, iso)` |
 | ブール（二項） | `union` / `intersection` / `difference` |
 | 加工 | `offset(v, d)` / `renormalize(v[, halfWidth])` |
-| 計測 | `volume` / `voxels` |
+| 計測 | `volume` / `voxels` / `bbox` / `centroid` / `area` / `valid`<br>⚠ `valid` は共通定義の ①（空でない）だけを見る。②（閉じている）③（自己交差が無い）は **距離場では構造的に恒真** |
 
 - ★`voxelize` の第 2 引数は**分割数ではなくボクセル間隔 `dx`**。OpenVDB の CSG は 2 つの
   level set が**同じ transform を持つことを要求する**ので、形ごとに `dx` がばらつくと
@@ -609,6 +703,53 @@ op 内並列の上限は **2 通り**で指定できる。どちらも「**1 つ
 
 ## occt.so {#occt}
 
+> ## ★ `occt` の 2D — `oc-cross2d`（#3471・2026-09-01）
+>
+> `occt.so` は **2 つの型**を名乗る:
+>
+> | 型 | 4CC | 中身 |
+> |---|---|---|
+> | `oc-brep3d` | `BREP` | B-rep ソリッド |
+> | **`oc-cross2d`** | **`BRP2`** | **平面上の `TopoDS_Face`**（輪郭は Bezier / B-spline のまま） |
+>
+> ⚠ 「OCCT に 2D が無い」は正確には **2D の位相が無い**という意味。曲線側
+> （`Geom2d_BezierCurve` / `Geom2d_BSplineCurve` / `GCE2d_*` / `Geom2dAPI_*` / `BRepBuilderAPI_MakeEdge2d`）
+> は揃っているので、「2D 領域」は平面上の Face として表せる。
+>
+> 入口は `text(fontPath, str[, size])`（TrueType の字形）。出口は `extrude` / `revolve`。
+> ★ フォントは **パス必須**で `import` と同じ D_REF 扱い（詳細は
+> [関数リファレンス §text](srava_function_reference.html)）。
+>
+> ⚠ `occt.so` は `TKV3d` をリンクする（`StdPrs_BRepFont` がそこに居るため）。名前のとおり
+> 可視化側のライブラリだが、`RenderGlyph` は表示に触らないので**ヘッドレスで動く**。
+>
+> ★ 2D 領域を折れ線へ落とすのは **`occt_mf.so` の `polygonize(cross2d, defl)`**（#3472）。
+>
+> ⚠ **OCCT のバージョンに注意**: 7.8.1 には「境界だけで接する立体の融合が接触面を消してしまい、
+> `xor` が `union` の値を返す」上流欠陥がある（7.9 系では解消）。ctest の `srava_occt_contact` が
+> これを検出する →
+> [インストールガイド §3](srava_install_guide.html)。
+> **`cast` には置けない** — 曲線を折れ線に落とすには**粒度の指定が要る**ため
+> （3D で `triangulate(s, defl)` が `cast` でないのと同じ理由。`defl` の単位も揃えてある）。
+> → [型変換の規約](#conversion) / [関数リファレンス §polygonize](srava_function_reference.html)
+
+> ## ⚠⚠ `occt` の `tube` は他カーネルと **形が違う**（#3470・2026-09-01）
+>
+> `tube` は **カーネルによって出る形が変わる唯一の op**。**厳密に一致させることはできない。**
+>
+> | | 背骨 | 断面 | `segs` |
+> |---|---|---|---|
+> | `cgal` / `manifold` | 点を直線で結ぶ**折れ線** | `segs` 角形近似の円 | 効く |
+> | **`occt`** | 点を**通る C2 の B-spline** | **厳密な円** | **無視** |
+>
+> 精度の問題ではなく**表現の違い**なので、許容誤差を緩めても一致しない
+> （`kernel_agree` の表にも入れていない。`occt` の `sphere` を入れられないのと同じ理由）。
+> `"cgal"::tube(…)` / `"occt"::tube(…)` と**明示的に選ぶ**こと（#3467）。
+>
+> occt 版を使う価値は「解析曲面として持てる」こと — `offset` が厳密（Steiner の公式と一致）・
+> `fillet`/`chamfer` が効く・STEP に実物の曲面が載る。詳細は
+> [関数リファレンス §tube](srava_function_reference.html) を参照。
+
 **`-DSRAVA_MODULE_OCCT=ON`（既定 OFF）**。Open CASCADE Technology（LGPL-2.1 + 例外）を
 `find_package` でシステムから使う（**規約 C**。Debian が `libocct-*` を配っており、自前ビルドは
 非常に重い）。OCCT 自体が素の `tbb;tbbmalloc` をリンク要求に持つため、TBB は
@@ -628,20 +769,32 @@ op 内並列の上限は **2 通り**で指定できる。どちらも「**1 つ
 
 | 分類 | op |
 |---|---|
-| 生成 | `box(w,h,d)` / `sphere(r, seg)` / `cylinder(r, h)` / `torus(R, r)` |
+| 生成（3D） | `box(w,h,d)` / `boxa` / `sphere(r[, seg])` / `cylinder(r, h[, seg])` / `torus(R, r[, seg])` / `cone(r, h[, seg])` / `prism(n,h,r)` / `pyramid(n,h,r)` / `tetrahedron(r)` / `icosphere(r[, subdiv])` / `tube` / `empty3d` |
+| 生成（2D） | `rect(w,h)` / `ngon(n,r)` / `polygon(pts)` / `circle(r[, segs])` / `text` / `empty2d` |
 | ブール（二項） | `union` / `intersection` / `difference` |
 | 加工 | `offset(s, d)` / **`fillet(s, r)`** / **`chamfer(s, d)`** |
 | 入口 | `import(path)` … **STEP / .brep** |
 | 出口 | `export(path, s)` … **STEP / .brep**（`triangulate` は別モジュール → [occt_mf.so](#occt_mf)） |
-| 計測 | `volume` / `nfaces` |
+| 計測 | `volume` / `nfaces` / `bbox` / `centroid` / `area` / `valid`<br>★ **B-rep のまま**積むので、球の表面積は `4πr²` ちょうど（メッシュ系の内接多面体とは構造的に違う値）。`valid` は `BRepAlgoAPI_Check`（妥当性 + 自己交差） |
 
-#### ★ 生成 — どれも厳密で、分割数を持たない
+#### ★ 生成 — **解析曲面**の組と、**平面多面体**の組がある
+
+曲面を持つものは厳密で、分割数（`seg` / `subdiv`）は**受け取るが無視する** — 近似しないので
+意味を持たないため。引数の個数はメッシュ系と揃えてあり、揃えないと同じ式が実行カーネル次第で
+引数個数エラーになる。
 
 | op | 体積 | Face 数 |
 |---|---|---|
 | `sphere(r[, seg])` | 4/3·π·r³（**`seg` に依存しない** — 球面 1 枚として持つ） | 1 |
-| `cylinder(r, h)` | π·r²·h | **3**（円筒 1 + 平面 2） |
-| `torus(R, r)` | 2π²·R·r² | **1** |
+| `cylinder(r, h[, seg])` | π·r²·h | **3**（円筒 1 + 平面 2） |
+| `cone(r, h[, seg])` | π·r²·h/3 | **2**（円錐面 1 + 平面 1） |
+| `torus(R, r[, seg])` | 2π²·R·r² | **1** |
+| `circle(r[, segs])`（2D） | π·r²（面積） | 1 |
+
+一方 **`prism` / `pyramid` / `tetrahedron` / `icosphere` / `rect` / `ngon` / `polygon`** は
+**平面の集まり**なので、メッシュ系と**厳密に一致する**（`box` と同じ理由）。`icosphere` が
+ここに入るのは、それが近似球ではなく**測地多面体そのもの**だから。
+⇒ カーネル一致の検査表には、この平面多面体の組だけを入れている。
 
 ★ `nfaces` は **三角形数ではなく Face 数**。トーラスが「1 面」なのがこの表現の要点で、
 同じ形をメッシュ系に持たせれば数千面になる。`torus` は「メッシュでは必ず近似になるが
@@ -678,6 +831,27 @@ reverse engineering の入口は、依然として**作らない**。
 
 ★ **STEP 往復は表現を落とさない** — 書いて読み直しても解析曲面のまま（Face 数も保たれる）。
 メッシュ形式（STL/OBJ…）へ書くと三角形に落ちるので、B-rep を保ったまま外へ出す出口は STEP / `.brep`。
+
+## nef_cg.so / nef_mf.so {#nef_bridge}
+
+**概要**: **`nef_snc.so` と他カーネルの橋渡しモジュール**。`cast` 1 op だけを持ち、
+Nef の値（`nf-mesh3d`）から**本物の `cgMesh3D`**（`cg-mesh3d`）／**本物の `mfMesh`**（`mf-mesh3d`）を作る。
+
+`nef_snc.so` はキャッシュに **SNC（Nef 本来の表現）だけ**を書く。SNC の読み取りには CGAL Nef が要り、
+`cgal.so` も `manifold.so` もそれに依存しない方針なので、その cache を直接読むことはできない。
+変換をこの 2 本に切り出すことで、**`cast` を書いたときだけ**境界表現への変換コストを払う。
+
+> ⚠ `nef_hybrid.so` には橋渡しが要らない。あちらは普通の立体を厳密境界の形式で書くので、
+> `cgal.so` / `manifold.so` がそのまま読める。橋が受けるのは `nf-mesh3d` だけ。
+
+> ⚠ `-DSRAVA_MODULE_NEF_SNC=ON` のときにビルドされる（`nef_mf.so` はさらに manifold が要る）。
+> `module/all.sra` には入っているので、`nef_snc.so` を明示ロードすれば併せて使える。
+
+**サポートする型**: `nf-mesh3d`(NEF3) を読み、`nef_cg` は `cg-mesh3d`(MESH)、`nef_mf` は `mf-mesh3d`(MFM3) を書く。
+
+**サポートする op**: `cast(型名, s)` のみ。
+
+変換できないのは**境界表現を取れない値**（非有界 — `complement` の結果など）で、そのときは明示エラーになる。
 
 ## occt_mf.so {#occt_mf}
 

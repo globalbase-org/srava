@@ -69,7 +69,7 @@ nfaNparts_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nparts: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("nparts: needs a Nef mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->op_nparts()));

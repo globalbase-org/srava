@@ -20,16 +20,35 @@
 #include	"gg/c++/ggMesh.h"
 #include	"gg/c++/ggaBox.h"
 #include	"gg/c++/ggaSphere.h"
+/* ★ #3474: 基本立体をカーネル間で統一 */
+#include	"gg/c++/ggaPyramid.h"
+#include	"gg/c++/ggaCylinder.h"
+#include	"gg/c++/ggaCone.h"
+#include	"gg/c++/ggaTorus.h"
+#include	"gg/c++/ggaTetrahedron.h"
+#include	"gg/c++/ggaPrism.h"
+#include	"gg/c++/ggaIcosphere.h"
+#include	"gg/c++/ggaImport.h"
+#include	"gg/c++/ggaEmpty3D.h"
+#include	"gg/c++/ggaTube.h"
 #include	"gg/c++/ggaUnion.h"
 #include	"gg/c++/ggaIntersection.h"
 #include	"gg/c++/ggaDifference.h"
 #include	"gg/c++/ggaSolidify.h"
 #include	"gg/c++/ggaVolume.h"
+#include	"gg/c++/ggaBbox.h"
+#include	"gg/c++/ggaCentroid.h"
+#include	"gg/c++/ggaArea.h"
+#include	"gg/c++/ggaValid.h"
 #include	"gg/c++/ggaNverts.h"
 #include	"gg/c++/ggaNfaces.h"
 #include	"gg/c++/ggaExport.h"
 #include	"gg/c++/ggaCast.h"
 #include	"gg/c++/ggaTranslate.h"
+#include	"gg/c++/ggaRotate.h"
+#include	"gg/c++/ggaScale.h"
+#include	"gg/c++/ggaMirror.h"
+#include	"gg/c++/ggaTransform.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ggtsAgent_.h"
 
@@ -47,11 +66,25 @@ static const pigArgKind BINMESH_IN[] = { AK_CACHE, AK_CACHE };               /* 
 static const pigArgKind CAST_IN[]    = { AK_INLINE, AK_CACHE };              /* cast(type, mesh) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };                         /* mesh 1 個入力 */
 static const pigArgKind MESH1ARG_IN[]= { AK_CACHE, AK_INLINE };              /* translate(m,[x,y,z]) */
+static const pigArgKind ROTATE_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };  /* rotate(m,axis,deg) */
 
 static const pigOpEntry OPS[] = {
 	{ "box",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaBox),          0, "->" GG_TYPE },
 	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaBox),          0, "->" GG_TYPE },
-	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaSphere),       0, "->" GG_TYPE },
+	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
+	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaPyramid), 0, "->" GG_TYPE },  /* pyramid(n,h,r) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaCylinder), 0, "->" GG_TYPE },  /* cylinder(r,h,seg) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaCone), 0, "->" GG_TYPE },  /* cone(r,h,seg) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaTorus), 0, "->" GG_TYPE },  /* torus(R,r,seg) */
+	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaTetrahedron), 0, "->" GG_TYPE },  /* tetrahedron(r) */
+	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
+	{ "prism",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaPrism), 0, "->" GG_TYPE },  /* prism(n,h,r) */
+	{ "icosphere",     SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaIcosphere), 0, "->" GG_TYPE, 0, 0, 1 },  /* icosphere(r,subdiv) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaImport), 0, "->" GG_TYPE },  /* import(path): STL/OFF */
+	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(ggaEmpty3D), 0, "->" GG_TYPE },  /* 空集合(3D)。{} は中立元なので別物 */
+	/* ★ nreq=1: segs は省略可 (既定 32 は op が入れる)。掃引は common/tube.h。 */
+	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaTube), 0, "->" GG_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
+	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaSphere),       0, "->" GG_TYPE, 0, 0, 1 },  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ブール: 自型どうし + 混成 (片側が mf の raw double mesh)。混成は cache reader の
 	 * gg-mf-upgrade codec が MFM3 → gg へ昇格読みして成立する。
 	 * ★all-foreign ((mf,mf)) は書かない — manifold 自身が同じ op を持つので曖昧になる (disjoint 原則)。
@@ -61,9 +94,9 @@ static const pigOpEntry OPS[] = {
 	 *   ② 厳密 (cg) と double (gg) を混ぜた結果を gg で受けるのは**表現力の高→低への落下**で、
 	 *      それは cast だけがやってよい (モジュール境界の約束 ②)。cgal が受けるのが正しい。
 	 *   単独入力の op (cast / solidify) は落下先が明示されているので (cg-mesh3d) 行を持つ。 */
-	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(ggaUnion, ggGeom, ggGeom),        1, "[" GG_TYPE ",mf-mesh3d](32)->" GG_TYPE, 1 /* ★可換 */ },
-	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(ggaIntersection, ggGeom, ggGeom), 1, "[" GG_TYPE ",mf-mesh3d](32)->" GG_TYPE, 1 /* ★可換 */ },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(ggaDifference, ggGeom, ggGeom),   1, "[" GG_TYPE ",mf-mesh3d](32)->" GG_TYPE },
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(ggaUnion, ggGeom, ggGeom),        1, "[" GG_TYPE ",mf-mesh3d,ch-mesh3d](32)->" GG_TYPE, 1 /* ★可換 */ },
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(ggaIntersection, ggGeom, ggGeom), 1, "[" GG_TYPE ",mf-mesh3d,ch-mesh3d](32)->" GG_TYPE, 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(ggaDifference, ggGeom, ggGeom),   1, "[" GG_TYPE ",mf-mesh3d,ch-mesh3d](32)->" GG_TYPE },
 	/* ★ #3445: 自己交差した境界からのソリッド再構成。geogram は arrangement + radial sort で
 	 * 内外を決め直せる = cgal (素通り) / manifold (同じ誤値) / nef (受け取れない) が持たない能力。
 	 * nef の solidify と同じく **明示 op** (既定の変換経路には置かない)。 */
@@ -75,11 +108,26 @@ static const pigOpEntry OPS[] = {
 	 *   同じ "MFM3" なので変換すら起きない。nef も (mf)->nf を持つが priority で geogram が勝つ
 	 *   (下の梯子を参照) = **double 入力は double のまま速い方で解かれる**。 */
 	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(ggaVolume, ggGeom),       0, "(" GG_TYPE ")->value" },
+	/* ★ #3487: 値の素性を訊く op。どれも →value で 2D 型を要さない。無いと確認のためだけに
+	 * 別カーネルへ cast させることになり、**cast が通らない値では確認手段そのものが消える**
+	 * (#3478 の非有界・非多様体)。中身は common/meshprops.h (valid の共通定義もそこ)。 */
+	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(ggaBbox, ggGeom),     0, "(" GG_TYPE ")->value" },
+	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(ggaCentroid, ggGeom), 0, "(" GG_TYPE ")->value" },
+	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(ggaArea, ggGeom),     0, "(" GG_TYPE ")->value" },
+	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(ggaValid, ggGeom),    0, "(" GG_TYPE ")->value" },
 	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(ggaNverts, ggGeom),       0, "(" GG_TYPE ")->value" },
 	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(ggaNfaces, ggGeom),       0, "(" GG_TYPE ")->value" },
 	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(ggaExport, ggGeom),       0, "(" GG_TYPE ")->ref" },
-	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(ggaCast, ggGeom),         0, "(" GG_TYPE ")->" GG_TYPE ";(mf-mesh3d)->" GG_TYPE ";(cg-mesh3d)->" GG_TYPE },
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(ggaCast, ggGeom),         0, "(" GG_TYPE ")->" GG_TYPE ";(mf-mesh3d)->" GG_TYPE ";(cg-mesh3d)->" GG_TYPE ";(ch-mesh3d)->" GG_TYPE   /* ★ #3464: 同じ精度クラス (MFM3) */ },
 	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(ggaTranslate, ggGeom),    0, "(" GG_TYPE ")->" GG_TYPE },
+	/* ★ #3486: アフィン変換 4 op。translate だけあって残り 3 本が無いと、式の途中で
+	 * **カーネルが裏返る** (rotate を書いた瞬間に cgal/manifold へ落ちる)。4 本とも
+	 * 3D→3D で 2D 型を要さないので、2D 型を持たないこのカーネルでも置ける。
+	 * 引数の解釈と行列作りは common/affine.h・適用は ggMesh::apply_affine。 */
+	{ "rotate",       ROTATE_IN,  3,AK_CACHE, OPWIRE(ggaRotate, ggGeom),       0, "(" GG_TYPE ")->" GG_TYPE },
+	{ "scale",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(ggaScale, ggGeom),        0, "(" GG_TYPE ")->" GG_TYPE },
+	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(ggaMirror, ggGeom),       0, "(" GG_TYPE ")->" GG_TYPE },
+	{ "transform",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(ggaTransform, ggGeom),    0, "(" GG_TYPE ")->" GG_TYPE },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -161,10 +209,13 @@ extern const srava_module_descriptor ggtsAgent_descriptor = {
 	.exec_default  = EXEC_PROCESS,
 	.ops           = OPS,
 	.n_ops         = N_OPS,
-	.import_exts   = "",   /* なし (import は他カーネルで入れて cast する) */
+	/* ★ #3474 続き: import を持つので **拡張子を申告する** (未申告だとロード時に拒否)。
+	 *   読み手は common/meshio.h。対応形式は STL / OFF だけ。 */
+	.import_exts   = "stl:" GG_TYPE ",off:" GG_TYPE,   /* なし (import は他カーネルで入れて cast する) */
 	.export_exts   = "off,stl,obj,ply",   /* (GEO::mesh_save の拡張子ディスパッチ) */
 	.provides      = geogram_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	.hash_salt     = GG_SALT,   /* キャッシュキー弁別 */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 1,
 	.initialize    = 0,   /* 無し */
 	/* ★ v10 (#3441): module("geogram.so",{threads:N}) で GEO::Process::set_max_threads を
 	 * 呼ぶ opt-in の口。既定 (threads 未指定) は従来どおり GEO::initialize() 任せ (nproc)。 */

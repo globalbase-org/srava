@@ -35,6 +35,7 @@
 #include	<string>     /* rev4 B-2b: 型シグネチャ parse */
 #include	<vector>
 #include	<climits>
+#include	<algorithm>   /* ★ #3477: 内省 op の priority 降順 stable_sort */
 
 #ifndef SRAVA_MODULE_SYSDIR
 #define SRAVA_MODULE_SYSDIR "/usr/local/lib/srava/modules"   /* install 既定 (CMake で上書き) */
@@ -74,7 +75,10 @@ protected:
 	/* ★ #3436 P4: n 項ノードを k 項の木へ分解する (docs/sig_grammar_design.md §5)。 */
 	virtual int		try_decompose();
 	virtual int		decide_out_module();
-	int			decide_executor(const char *op);   /* rev4 B-2b: 型ディスパッチ (解決不能 -1) */
+	/* rev4 B-2b: 型ディスパッチ (解決不能 -1)。
+	 * ★ #3467: onlyModule >= 0 なら **その module だけ**を候補にする (`module::op` の指名)。
+	 *   指名は sig の代わりではなく候補の絞り込みなので、絞ったうえで sig 照合はそのまま走る。 */
+	int			decide_executor(const char *op, int onlyModule);
 	/* routing 不能のエラー文 (入力型 + その op が受け付ける sig の列挙)。 */
 	std::string		unroutable_message(const sPtr<pigModuleRegistry> &reg, const char *op);
 	/* ★ #3436 P4 §6.2: 引数の種別/個数を op 表 (in[]/nin/variadic) と突き合わせる。合致なら空。 */
@@ -519,15 +523,19 @@ module_of_type(const sPtr<pigModuleRegistry> &reg, const char *type)
  *   **fold 形の行なら申告された N** (上限なし = INT_MAX・fold 形でなければ -1) を返す。 */
 /* ★ 2026-08-28: wantOut != 0 なら **出力型がそれに一致する行だけ**を候補にする (cast 用)。
  *   0 なら従来どおり入力型の照合のみ。 */
+/* ★ #3467: onlyModule >= 0 なら **その module だけ**を候補にする (`module::op` の指名)。
+ *   指名は候補の絞り込みであって sig の代わりではないので、絞ってから通常どおり sig を照合する
+ *   ⇒ 指名したモジュールの sig が入力型を受けなければ -1 = エラー (暗黙の cast は入れない)。 */
 static int
 sig_dispatch(const sPtr<pigModuleRegistry> &reg, const char *op,
              const std::vector<std::string>& insets, std::string *outType, int *foldN,
-             const char *wantOut = 0)
+             const char *wantOut = 0, int onlyModule = -1)
 {
 	if ( reg == thNULL ) return -1;
 	int nmod = reg->count();
 	int best = -1; long bestPrio = LONG_MIN; std::string bestOut; int bestN = -1;
 	for ( int m = 1 ; m < nmod ; ++m ) {
+		if ( onlyModule >= 0 && m != onlyModule ) continue;   /* ★ #3467: 指名で絞る */
 		const char *sig = reg->op_sig(m, op);
 		if ( sig == 0 ) continue;               /* この module は op 未注釈 */
 		std::string all = sig;
@@ -554,7 +562,7 @@ sig_dispatch(const sPtr<pigModuleRegistry> &reg, const char *op,
 }
 
 int
-pigfModuleAgent_::decide_executor(const char *op)
+pigfModuleAgent_::decide_executor(const char *op, int onlyModule)
 {
 	/* 文字列引数でカーネルが決まる op (cast=目標カーネル名・import/export=拡張子) は型では振れない
 	 *   → -1 で既存の専用ロジックへ委ねる。 */
@@ -585,7 +593,7 @@ pigfModuleAgent_::decide_executor(const char *op)
 	 *   foreign 入力型を **明示列挙** する方式へ移行 (cgal は universal reader なので (cg,mf)/(mf,cg) 等を
 	 *   直接持つ・all-foreign は自型カーネルが持つので書かない = sig が disjoint で priority 曖昧なし)。 */
 	std::string bestOut;
-	int best = sig_dispatch(reg, op, insets, &bestOut, 0);
+	int best = sig_dispatch(reg, op, insets, &bestOut, 0, 0, onlyModule);
 	if ( best >= 0 ) {
 		/* ★ 2026-08-19: sig の出力トークンを **そのまま** memo する。以前は "value" を thNULL へ
 		 *   畳んでいたが、それだと「値出力だから型が無い」と「型が絞れなかった」が同じ thNULL に
@@ -640,7 +648,8 @@ op_is_decomposable(const sPtr<pigModuleRegistry> &reg, const char *op)
  * ⚠ k=2 のとき、旧パーサの中央分割とは **端数の組み方だけ**違う (節点数は同じ n-1・深さも同じ)。
  *   n が 2 の冪なら完全に同じ木。中間キャッシュのキーが動くだけで、計算量は変わらない。 */
 static sPtr<pigData>
-build_ktree(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, int n, int k)
+build_ktree(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, int n, int k,
+            sPtr<pigData> modexpr)
 {
 	sArray<sPtr<pigData> > cur;
 	cur.length(n);
@@ -659,6 +668,10 @@ build_ktree(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, i
 			node->set_op_name(op);
 			node->set_out_cache(1);
 			node->set_info(info);
+			/* ★ #3467: 分解して作った節点にも指名を継がせる。継がせないと
+			 *   `"occt"::union(a,b,c)` が **指名なしの二項 union** に分解され、指名が黙って
+			 *   消える (n 項と 2 項で行き先が変わる = 最も見つけにくい種類の食い違い)。 */
+			if ( modexpr.is_notNull() ) node->set_module_expr(modexpr->clone());
 			cur[m++] = node;                       /* ★ 前詰め (m <= i なので読み書きが衝突しない) */
 		}
 		cur.length(m);
@@ -669,7 +682,8 @@ build_ktree(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, i
 /* 順序保持の左 fold を k 個ずつ (非可換 op = difference)。
  * ⚠ k=2 のとき旧 build_leftfold と同じ木 (((a-b)-c)-d)。 */
 static sPtr<pigData>
-build_kleftfold(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, int n, int k)
+build_kleftfold(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& e, int n, int k,
+                sPtr<pigData> modexpr)
 {
 	sPtr<pigData> acc = thNULL;
 	int i = 0;
@@ -689,6 +703,7 @@ build_kleftfold(sPtr<stdString> op, sPtr<pigInfo> info, sArray<sPtr<pigData> >& 
 		node->set_op_name(op);
 		node->set_out_cache(1);
 		node->set_info(info);
+		if ( modexpr.is_notNull() ) node->set_module_expr(modexpr->clone());   /* ★ #3467 */
 		acc = node;
 	}
 	return acc;
@@ -710,6 +725,25 @@ pigfModuleAgent_::try_decompose()
 	if ( ! op_is_decomposable(reg, op) )
 		return 0;
 
+	/* ★ #3467: 指名があれば **群のサイズ決定 (k) も指名したモジュールの N/N' で決める**。
+	 *   ここでは解決できないケースを黙って -1 に倒す (エラーの出し分けは decide_out_module の
+	 *   仕事で、分解しなければそちらが同じ入力で必ず走る)。 */
+	int qualModule = -1;
+	{
+		sPtr<pigData> me = ( _front.is_notNull() ) ? _front->get_module_expr()
+		                                           : sPtr<pigData>(thNULL);
+		if ( me.is_notNull() ) {
+			sPtr<pigData> mv = me->compact();
+			sPtr<stdString> ms = ( mv.is_notNull() && ! mv->is_error() ) ? mv->get_str()
+			                                                            : sPtr<stdString>(thNULL);
+			const char *mn = ms.is_notNull() ? ms->get_str() : "";
+			if ( mn[0] != '\0' ) {
+				qualModule = reg->id_of_name(mn);
+				if ( qualModule <= 0 ) return 0;   /* 解決できない → decide_out_module がエラーにする */
+			}
+		}
+	}
+
 	/* 幾何引数の型列。★ 値引数が 1 つでもあれば「固定部あり」= 分解しない (§5.1)。
 	 *   固定引数を各群へ複製すると意味が変わるため (export_vox の path など)。 */
 	std::vector<std::string> insets;
@@ -727,7 +761,7 @@ pigfModuleAgent_::try_decompose()
 	 *   何項で投げるかは **N' (policy)** が決める。両方が n を許すときだけそのまま投げる。 */
 	{
 		std::string ot; int foldN = -1;
-		int m0 = sig_dispatch(reg, op, insets, &ot, &foldN);
+		int m0 = sig_dispatch(reg, op, insets, &ot, &foldN, 0, qualModule);
 		if ( m0 >= 0 ) {
 			int lim0 = reg->arity(m0);                        /* N' */
 			if ( foldN >= 2 && foldN < lim0 ) lim0 = foldN;   /* N  */
@@ -740,7 +774,7 @@ pigfModuleAgent_::try_decompose()
 	 *   群ごとに型が偏りうる (docs §5.2 / §9-4: 群のサイズ決定は混成でしか出ないので後回し可)。 */
 	std::vector<std::string> probe(insets.begin(), insets.begin() + 2);
 	std::string ot; int foldN = -1;
-	int m = sig_dispatch(reg, op, probe, &ot, &foldN);
+	int m = sig_dispatch(reg, op, probe, &ot, &foldN, 0, qualModule);
 	if ( m < 0 )
 		return 0;                                  /* 2 項でも行き先が無い → 通常経路が明示エラー */
 	int lim = reg->arity(m);                       /* N' (policy) */
@@ -749,34 +783,35 @@ pigfModuleAgent_::try_decompose()
 	int k = lim;
 	while ( k > 2 ) {                              /* 受け手が居なければ群を縮めて引き直す */
 		std::vector<std::string> pk(insets.begin(), insets.begin() + k);
-		if ( sig_dispatch(reg, op, pk, 0, 0) >= 0 ) break;
+		if ( sig_dispatch(reg, op, pk, 0, 0, 0, qualModule) >= 0 ) break;
 		--k;
 	}
 	if ( k < 2 )
 		return 0;
 
 	/* 木の形は **可換フラグ**が決める (§5.3)。★ ここは eval 時 (= モジュールが実際に dlopen 済み)
-	 * なので op_commutative() は正しい値を返せる。可換なら自前で get_hashkey() 昇順に並べ替える
-	 * (旧 normalize() の parse 時ソートに依存していたが、#3452 でモジュール登録が起動時 eager-load
-	 * から eval 時の module() 呼び出しへ移り、parse 直後には 1 本もロードされていないため
-	 * normalize() 側の op_commutative() は常に false を返す回帰が発生した。normalize() は撤去し、
-	 * ここと compute_arg_hash() の 2 箇所へソートを移設する)。
-	 * 引数は 1) の is_error() で compact ゲートを通っている (継続は delayed pair) ので
-	 * get_hashkey() は非ブロッキングに評価できる (pigfAgent::compute_arg_hash と同じ前提)。 */
+	 * なので op_commutative() は正しい値を返せる。可換なら均衡木 (build_ktree)、非可換なら
+	 * 左 fold (build_kleftfold)。
+	 * ★ #3500 (2026-09-07): **引数は並べ替えない**。以前はここで get_hashkey() 昇順に
+	 *   ソートしていた (旧 normalize() の parse 時ソートの移設先) が、外した。理由:
+	 *     1) 予測できない … 並び順が各引数の結果ハッシュに依存し、そのハッシュはモジュール
+	 *        記述子の指紋 (名前 + cache_version) を含むので、**幾何に無関係な版を上げるだけで
+	 *        木の形が変わる** (#3492 で実測)。ソースを見ても中間データの大きさ = かかる時間が
+	 *        読めない。
+	 *     2) 得ているものが小さい … 目的は a|||b と b|||a の正規化だが、順が違えば中間データが
+	 *        大きく異なるので、実際に共有できるのは最終ノードだけ。
+	 *     3) 失っているものが大きい … 同じ模型・同じ結果でも、畳む順が違うだけで実行時間が
+	 *        **倍の桁で**変わる (メッシュのブールを直接やるカーネルで顕著・実測は #3500)。
+	 *   ⇒ **ソースに書かれた順**でそのまま畳む。キャッシュキーの正規化 (二項ノードで
+	 *   a|||b と b|||a を同一キーにする) は pigfAgent::compute_arg_hash 側に残してある。 */
 	int commutative = reg->op_commutative(op);
 	sArray<sPtr<pigData> > e;
 	e.length(n);
 	for ( int i = 0 ; i < n ; ++i ) e[i] = args[i];
-	if ( commutative ) {
-		for ( int i = 1 ; i < n ; ++i )
-			for ( int j = i ; j > 0 && (uint64_t)( pig_is_delayed(e[j-1]) ? e[j-1]->cdr()->cdr() : e[j-1] )->get_hashkey()
-			                        >  (uint64_t)( pig_is_delayed(e[j])   ? e[j]->cdr()->cdr()   : e[j]   )->get_hashkey() ; --j ) {
-				sPtr<pigData> t = e[j-1]; e[j-1] = e[j]; e[j] = t;
-			}
-	}
+	sPtr<pigData> me2 = ( _front.is_notNull() ) ? _front->get_module_expr() : sPtr<pigData>(thNULL);
 	sPtr<pigData> root = commutative
-	    ? build_ktree(opn, _front->get_info(), e, n, k)
-	    : build_kleftfold(opn, _front->get_info(), e, n, k);
+	    ? build_ktree(opn, _front->get_info(), e, n, k, me2)
+	    : build_kleftfold(opn, _front->get_info(), e, n, k, me2);
 	_front->set_result(root);
 	return 1;
 }
@@ -795,8 +830,16 @@ arg_kind_violation_impl(const pigOpEntry *e, const std::vector<int>& isGeom, con
 		::snprintf(buf, sizeof buf, "%s: too many arguments (takes %d)", op, e->nin);
 		return std::string(buf);
 	}
-	if ( e->variadic ? ( n < e->nin ) : ( n != e->nin ) ) {
-		::snprintf(buf, sizeof buf, "%s: expected %d argument(s), got %d", op, e->nin, n);
+	/* ★ #3474 続き: **必須の個数** は nreq (0 = 全部必須 = 従来どおり)。nreq..nin の範囲は
+	 *   省略形として通し、**既定値は op の compute() が入れる** (どの op も自前で持っている)。
+	 *   パーサが固定 arity へ組み直す必要が無くなり、余分な引数の握り潰しも起きない。 */
+	int req = ( e->nreq > 0 ) ? e->nreq : e->nin;
+	if ( e->variadic ? ( n < e->nin ) : ( n < req ) ) {
+		if ( req == e->nin )
+			::snprintf(buf, sizeof buf, "%s: expected %d argument(s), got %d", op, e->nin, n);
+		else
+			::snprintf(buf, sizeof buf, "%s: expected %d to %d argument(s), got %d",
+			    op, req, e->nin, n);
 		return std::string(buf);
 	}
 	for ( int i = 0 ; i < n ; ++i ) {
@@ -915,6 +958,55 @@ pigfModuleAgent_::decide_out_module()
 		return MODULE_NONE;
 	}
 
+	/* ★ #3467: `モジュール::op(…)` の指名を解決する。**cast/import/export の特別扱いより前**。
+	 *
+	 *   ★ 指名は **候補の絞り込み**であって sig の代わりではない。ここでは名前 → module id の
+	 *     解決と「その op を持つか」までを見て、**入力型が合うか (sig 照合) は通常の routing に
+	 *     そのまま任せる**。暗黙の cast は入れない ⇒ 「op sig がディスパッチの唯一の真実」を保つ。
+	 *
+	 *   ★ `""::op` は「planner に任せる」= 指名なしと**完全に同一**。ループ内で条件分岐なしに
+	 *     書けるようにするため (空文字を特別扱いせず素通しする)。
+	 *
+	 *   ⚠ 指名は args に入っていないので compute_arg_hash には現れない。キーに現れるのは
+	 *     **解決結果 (outModule) から作られるソルト** (#3466) だけ ⇒ 「同じモジュールに解決されれば
+	 *     同じキー」が自動的に成立する。 */
+	int qualModule = -1;
+	{
+		sPtr<pigData> me = ( _front.is_notNull() ) ? _front->get_module_expr()
+		                                           : sPtr<pigData>(thNULL);
+		if ( me.is_notNull() ) {
+			sPtr<pigData> mv = me->compact();
+			if ( mv.is_notNull() && mv->is_error() )
+				{ err = mv; return MODULE_NONE; }      /* 指名式そのもののエラーを伝播 */
+			sPtr<stdString> ms = ( mv.is_notNull() ) ? mv->get_str() : sPtr<stdString>(thNULL);
+			const char *mn = ms.is_notNull() ? ms->get_str() : "";
+			if ( mn[0] != '\0' ) {
+				int id = reg->id_of_name(mn);
+				/* ① そのモジュールが未ロード / 名前が違う。 */
+				if ( id <= 0 || reg->descriptor(id) == 0 ) {
+					char buf[256];
+					::snprintf(buf, sizeof buf,
+					    "module qualifier '%s': no such module is loaded "
+					    "(check the name against `srava --modules`, or load it with module(\"%s.so\", {}))",
+					    mn, mn);
+					err = thNEW(pigDataError,(buf, _front->get_info(), 1));
+					return MODULE_NONE;
+				}
+				/* ② ロードされているが、その op を持たない。 */
+				if ( reg->supports_op(id, op) == 0 ) {
+					char buf[256];
+					::snprintf(buf, sizeof buf,
+					    "module qualifier '%s': that module does not implement op '%s' "
+					    "(see `srava --module-info %s` for the ops it declares)",
+					    mn, op, mn);
+					err = thNEW(pigDataError,(buf, _front->get_info(), 1));
+					return MODULE_NONE;
+				}
+				qualModule = id;
+			}
+		}
+	}
+
 	/* ★ rev4 Phase C: cast(target_type, mesh) — **目標型**への明示変換 (§9.3-5)。旧 cast("exact"/"manifold")
 	 *   のカーネル名指しを廃止 (エイリアス互換なし・ひさ判断)。args[0] = 目標型名 ("cg-mesh3d"/"mf-mesh3d"
 	 *   /"cg-cross2d"/"mf-cross2d")。その型をサポートするカーネル (tag→module_of_tag) へ振り、出力型を目標型に固定。
@@ -950,10 +1042,12 @@ pigfModuleAgent_::decide_out_module()
 			int nmod = reg->count();
 			int m = -1;
 			if ( insets_known ) {
-				m = sig_dispatch(reg, "cast", insets, 0, 0, tname);
+				m = sig_dispatch(reg, "cast", insets, 0, 0, tname, qualModule);
 			} else {
-				for ( int mm = 1 ; mm < nmod ; ++mm )
+				for ( int mm = 1 ; mm < nmod ; ++mm ) {
+					if ( qualModule >= 0 && mm != qualModule ) continue;   /* ★ #3467 */
 					if ( sig_produces(reg, mm, "cast", tname) ) { m = mm; break; }
+				}
 			}
 			if ( m >= 0 ) {
 				outTypeList = thNEW(stdString,(tname));   /* 出力型 = 目標型 */
@@ -1019,6 +1113,7 @@ pigfModuleAgent_::decide_out_module()
 			int best = -1; long bestPrio = LONG_MIN; std::string bestType;
 			int nmod = reg->count();
 			for ( int m = 1 ; m < nmod ; ++m ) {
+				if ( qualModule >= 0 && m != qualModule ) continue;   /* ★ #3467 */
 				if ( reg->can_import_ext(m, ext) != 1 ) continue;   /* 読めない/不明は除外 */
 				long pr = reg->priority(m);
 				if ( pr > bestPrio ) {
@@ -1062,6 +1157,7 @@ pigfModuleAgent_::decide_out_module()
 			 *   P2d: 旧 arg_module (値に格納された module id を読む) を module_of_type (入力の型 → 産出 module)
 			 *   の型軸判定へ置換。自型の mesh 型はその module が自明に読めるので export できる。 */
 			int meshK = module_of_type(reg, inType.c_str());
+			if ( qualModule >= 0 && meshK != qualModule ) meshK = -1;   /* ★ #3467: 指名を優先 */
 			if ( meshK > 0 && reg->can_export_ext(meshK, ext) == 1 ) {
 				outTypeList = thNEW(stdString,("ref"));          /* 出力 = D_REF レコード */
 				return meshK;                                   /* ① 自カーネルが書ける */
@@ -1073,6 +1169,7 @@ pigfModuleAgent_::decide_out_module()
 			int nExtOk = 0;   /* 拡張子は書けるが型で弾かれた、を区別するため (#3439 ⑦) */
 			int nmod = reg->count();
 			for ( int m = 1 ; m < nmod ; ++m ) {
+				if ( qualModule >= 0 && m != qualModule ) continue;   /* ★ #3467 */
 				if ( reg->can_export_ext(m, ext) != 1 ) continue;
 				++nExtOk;
 				if ( typed && ! sig_accepts_input(reg, m, "export", inType) ) continue;
@@ -1108,7 +1205,29 @@ pigfModuleAgent_::decide_out_module()
 	 *   入力型が多候補で未確定 / cast・import・export) は -1 が返り、下の既存カーネルロジックへフォールバック
 	 *   (op 単位 coexistence)。全 op が精密な単一型を伝播できるようになれば下のロジックと名指しは撤去可。 */
 	{
-		int te = decide_executor(op);
+		int te = decide_executor(op, qualModule);
+		/* ★ #3467 ③: 指名したモジュールは op を持つ (② で確認済) のに解決できなかった
+		 *   = その op の **sig が入力型を受け付けない**。①② と直す場所が違うので分けて言う。 */
+		if ( te == -1 && qualModule >= 0 ) {
+			std::string ins;
+			for ( int k = 0 ; k < args.length() ; ++k ) {
+				std::string ts = arg_type_set(args[k]);
+				if ( ts.empty() || ts == "value" || ts == "ref" ) continue;
+				if ( ! ins.empty() ) ins += ",";
+				ins += ts;
+			}
+			const char *mn = reg->name_of_id(qualModule);
+			const char *sg = reg->op_sig(qualModule, op);
+			char buf[416];
+			::snprintf(buf, sizeof buf,
+			    "module qualifier '%s': op '%s' does not accept input type(s) %s "
+			    "(its sig is '%s'; qualification narrows the candidates, it does not insert a cast — "
+			    "convert explicitly with cast(<target type>, ...))",
+			    mn ? mn : "?", op,
+			    ins.empty() ? "(no geometry input)" : ins.c_str(), sg ? sg : "(none)");
+			err = thNEW(pigDataError,(buf, _front->get_info(), 1));
+			return MODULE_NONE;
+		}
 		if ( te >= 0 ) {
 			/* ★ #3436 P4 §6.2: モジュールが決まった直後に **引数の種別と個数**を
 			 *   in[]/nin/variadic と突き合わせる。従来この検査は agent 側 (ptsGenericAgent) に
@@ -1224,4 +1343,104 @@ pigfModuleAgent_::decide_out_module()
 		return MODULE_NONE;
 	}
 	return modId;
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ * ★ #3477: 実行時の内省 op 3 本 (modules / type_of / which)
+ *
+ *   いまどのモジュールが載っていて、ある式がどのカーネルで走るのかを **スクリプトから問う**。
+ *   ここに置くのは、sig の解析 (parse_sigline) と型スタンプの読み方 (arg_type_set) が
+ *   このファイルにあるため — **dispatch と同じ判定**を使わないと内省の意味がない
+ *   (別実装の答えは「実際にどう走るか」を保証しない)。
+ * ═════════════════════════════════════════════════════════════════════ */
+
+/* priority 降順・同点は登録順 (= dispatch が候補を見る順) に module id を並べる。 */
+static void
+pig_modules_by_priority(const sPtr<pigModuleRegistry> &reg, std::vector<int> &out)
+{
+	int n = reg->count();
+	for ( int i = 0 ; i < n ; ++i ) out.push_back(i);
+	/* 安定ソート = 同点のとき登録順が保たれる (tie-break が「どの行を書いたか」で揺れない)。 */
+	std::stable_sort(out.begin(), out.end(),
+	    [&](int a, int b) { return reg->priority(a) > reg->priority(b); });
+}
+
+void
+pigDataOperatorModules::_start()
+{
+	sPtr<pigModuleRegistry> reg = pig_current_registry();
+	if ( reg == thNULL ) {
+		result = thNEW(pigDataError,("modules: no module registry (no app)", info, PE_FATAL));
+		return;
+	}
+	std::vector<int> ids;
+	pig_modules_by_priority(reg, ids);
+	std::string s;
+	for ( size_t i = 0 ; i < ids.size() ; ++i ) {
+		const char *nm = reg->name_of_id(ids[i]);
+		if ( nm == 0 ) continue;
+		char buf[128];
+		::snprintf(buf, sizeof buf, "%s%s:%d", s.empty() ? "" : " ", nm, reg->priority(ids[i]));
+		s += buf;
+	}
+	result = thNEW(pigDataString,(s.c_str()));
+}
+
+void
+pigDataOperatorTypeOf::_start()
+{
+	if ( args.length() < 1 ) {
+		result = thNEW(pigDataError,("type_of needs one argument", info, PE_FATAL));
+		return;
+	}
+	/* ★ compact しない。compact すると幾何が **その場で force** され、内省したいだけなのに
+	 *   計算を走らせてしまう。型スタンプは継続 pair (delayed) の car に載っているので、
+	 *   arg_type_set は非ブロッキングで読める (dispatch が使っているのと同じ経路)。 */
+	std::string t = arg_type_set(args[0]);
+	if ( t.empty() ) t = "value";       /* スカラ・文字列・配列は幾何型を持たない */
+	result = thNEW(pigDataString,(t.c_str()));
+}
+
+void
+pigDataOperatorWhich::_start()
+{
+	if ( args.length() < 1 ) {
+		result = thNEW(pigDataError,("which needs an op name", info, PE_FATAL));
+		return;
+	}
+	sPtr<pigData> ov = args[0]->compact();
+	if ( ov->is_error() ) { result = ov; return; }
+	std::string op = ov->get_str()->get_str();
+	/* 2 番目以降は絞り込みの入力型 (省略可)。★ ここは型 **名** の文字列なので compact してよい。 */
+	std::vector<std::string> want;
+	for ( int k = 1 ; k < args.length() ; ++k ) {
+		sPtr<pigData> tv = args[k]->compact();
+		if ( tv->is_error() ) { result = tv; return; }
+		std::string t = tv->get_str()->get_str();
+		if ( ! t.empty() ) want.push_back(t);
+	}
+	sPtr<pigModuleRegistry> reg = pig_current_registry();
+	if ( reg == thNULL ) {
+		result = thNEW(pigDataError,("which: no module registry (no app)", info, PE_FATAL));
+		return;
+	}
+	std::vector<int> ids;
+	pig_modules_by_priority(reg, ids);
+	std::string s;
+	for ( size_t i = 0 ; i < ids.size() ; ++i ) {
+		int m = ids[i];
+		if ( reg->supports_op(m, op.c_str()) != 1 ) continue;
+		/* 入力型が指定されていれば、**すべて**を受理する候補だけ残す。 */
+		int ok = 1;
+		for ( size_t j = 0 ; ok && j < want.size() ; ++j )
+			if ( ! sig_accepts_input(reg, m, op.c_str(), want[j]) ) ok = 0;
+		if ( ! ok ) continue;
+		const char *nm = reg->name_of_id(m);
+		const char *sg = reg->op_sig(m, op.c_str());
+		char buf[512];
+		::snprintf(buf, sizeof buf, "%s%s:%d:%s", s.empty() ? "" : " ",
+		    nm ? nm : "?", reg->priority(m), sg ? sg : "(none)");
+		s += buf;
+	}
+	result = thNEW(pigDataString,(s.c_str()));
 }

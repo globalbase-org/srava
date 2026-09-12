@@ -16,9 +16,20 @@
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigOpEntry.h"
 #include	"pig/c++/ptsCalcBody.h"
-#include	"nf/c++/nfMesh.h"   /* NF_TYPE / NF_TAG / NF_MODULE_NAME / NF_SALT */
+#include	"nf/c++/nfMesh.h"   /* NF_TYPE / NF_TAG / NF_MODULE_NAME */
 #include	"nf/c++/nfaBox.h"
 #include	"nf/c++/nfaSphere.h"
+/* ★ #3474: 基本立体をカーネル間で統一 */
+#include	"nf/c++/nfaPyramid.h"
+#include	"nf/c++/nfaCylinder.h"
+#include	"nf/c++/nfaCone.h"
+#include	"nf/c++/nfaTorus.h"
+#include	"nf/c++/nfaTetrahedron.h"
+#include	"nf/c++/nfaPrism.h"
+#include	"nf/c++/nfaIcosphere.h"
+#include	"nf/c++/nfaImport.h"
+#include	"nf/c++/nfaEmpty3D.h"
+#include	"nf/c++/nfaTube.h"
 #include	"nf/c++/nfaUnion.h"
 #include	"nf/c++/nfaIntersection.h"
 #include	"nf/c++/nfaDifference.h"
@@ -31,11 +42,19 @@
 #include	"nf/c++/nfaUnify.h"
 #include	"nf/c++/nfaSolidify.h"
 #include	"nf/c++/nfaVolume.h"
+#include	"nf/c++/nfaBbox.h"
+#include	"nf/c++/nfaCentroid.h"
+#include	"nf/c++/nfaArea.h"
+#include	"nf/c++/nfaValid.h"
 #include	"nf/c++/nfaNverts.h"
 #include	"nf/c++/nfaNfaces.h"
 #include	"nf/c++/nfaExport.h"
 #include	"nf/c++/nfaCast.h"
 #include	"nf/c++/nfaTranslate.h"
+#include	"nf/c++/nfaRotate.h"
+#include	"nf/c++/nfaScale.h"
+#include	"nf/c++/nfaMirror.h"
+#include	"nf/c++/nfaTransform.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/nftsAgent_.h"
 
@@ -53,21 +72,35 @@ static const pigArgKind BINMESH_IN[] = { AK_CACHE, AK_CACHE };               /* 
 static const pigArgKind CAST_IN[]    = { AK_INLINE, AK_CACHE };              /* cast(type, mesh) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };                         /* mesh 1 個入力 */
 static const pigArgKind MESH1ARG_IN[]= { AK_CACHE, AK_INLINE };              /* translate(m,[x,y,z]) */
+static const pigArgKind ROTATE_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };  /* rotate(m,axis,deg) */
 static const pigArgKind OFFSET_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };  /* offset(m, d, subdiv) */
 
 static const pigOpEntry OPS[] = {
 	{ "box",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaBox),          0, "->" NF_TYPE },
 	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaBox),          0, "->" NF_TYPE },
-	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaSphere),       0, "->" NF_TYPE },
+	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
+	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaPyramid), 0, "->" NF_TYPE },  /* pyramid(n,h,r) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaCylinder), 0, "->" NF_TYPE },  /* cylinder(r,h,seg) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaCone), 0, "->" NF_TYPE },  /* cone(r,h,seg) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaTorus), 0, "->" NF_TYPE },  /* torus(R,r,seg) */
+	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaTetrahedron), 0, "->" NF_TYPE },  /* tetrahedron(r) */
+	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
+	{ "prism",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaPrism), 0, "->" NF_TYPE },  /* prism(n,h,r) */
+	{ "icosphere",     SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaIcosphere), 0, "->" NF_TYPE, 0, 0, 1 },  /* icosphere(r,subdiv) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaImport), 0, "->" NF_TYPE },  /* import(path): STL/OFF */
+	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(nfaEmpty3D), 0, "->" NF_TYPE },  /* 空集合(3D)。{} は中立元なので別物 */
+	/* ★ nreq=1: segs は省略可 (既定 32 は op が入れる)。掃引は common/tube.h。 */
+	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaTube), 0, "->" NF_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
+	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaSphere),       0, "->" NF_TYPE, 0, 0, 1 },  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ブール: 自型どうし + **混成** (片側が cg / mf / gg)。混成は cache reader の昇格読みで成立する
 	 * (nf-cg-upgrade: MESH → nf / nf-mf-upgrade: MFM3 → nf)。
 	 * ★ gg-mesh3d は 4CC が MFM3 (manifold と共有する形式) なので **nf-mf-upgrade がそのまま読む**
 	 *   = codec は不要で sig の宣言だけで開通する (2026-08-25 追加)。nef は geogram より先に
 	 *   書かれたので gg 型が存在せず、追随が漏れていた。
 	 * ★all-foreign ((cg,cg)) は書かない — cgal 自身が同じ op を持つので曖昧になる (disjoint 原則)。 */
-	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(nfaUnion, nfGeom, nfGeom),        1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
-	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(nfaIntersection, nfGeom, nfGeom), 1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(nfaDifference, nfGeom, nfGeom),   1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d](*)->" NF_TYPE },
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(nfaUnion, nfGeom, nfGeom),        1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(nfaIntersection, nfGeom, nfGeom), 1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(nfaDifference, nfGeom, nfGeom),   1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE },
 	/* ★Nef 固有: 補集合。cgal(corefinement)/manifold には無い op = 多カーネルの質的な差。
 	 * nef しか持たない op なので all-foreign (cg-mesh3d) を書いてよい (曖昧にならない)。 */
 	{ "complement",   MEASURE_IN,1, AK_CACHE, OPWIRE(nfaComplement, nfGeom),   0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
@@ -93,7 +126,7 @@ static const pigOpEntry OPS[] = {
 	 * cgal.so に置くのは約束①違反だった。**2D offset は cgal.so に残る** (straight skeleton・Nef 無関係)
 	 * ので、ここで申告するのは **3D の型だけ**。minkowski と同じく nef 固有 = all-foreign を書いてよい。
 	 * 結果は nf 型。cg で続けたいときは利用者が cast("cg-mesh3d", ...) を書く (約束②)。 */
-	{ "offset",       OFFSET_IN, 3, AK_CACHE, OPWIRE(nfaOffset, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
+	{ "offset",       OFFSET_IN, 3, AK_CACHE, OPWIRE(nfaOffset, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE, 0, 0, 2 },  /* ★ nreq=2: 以降は省略可 (既定は op が入れる) */
 	/* ★Nef 固有: 凸分解 (#3441)。凸片は 1 つの mesh の中に別々の連結成分として入る
 	 * (mesh の配列を返せないため。返し方の検討は #3441 に記録)。個数だけなら convex_pieces。 */
 	{ "convex_decomposition", MEASURE_IN,1, AK_CACHE, OPWIRE(nfaConvexDecomposition, nfGeom), 0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
@@ -124,10 +157,25 @@ static const pigOpEntry OPS[] = {
 	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNverts, nfGeom), 0, "(" NF_TYPE ")->value" },
 	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNfaces, nfGeom), 0, "(" NF_TYPE ")->value" },
 	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaVolume, nfGeom),       0, "(" NF_TYPE ")->value" },
+	/* ★ #3487: 値の素性を訊く op。どれも →value で 2D 型を要さない。無いと確認のためだけに
+	 * 別カーネルへ cast させることになり、**cast が通らない値では確認手段そのものが消える**
+	 * (#3478 の非有界・非多様体)。中身は common/meshprops.h (valid の共通定義もそこ)。 */
+	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(nfaBbox, nfGeom),     0, "(" NF_TYPE ")->value" },
+	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(nfaCentroid, nfGeom), 0, "(" NF_TYPE ")->value" },
+	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(nfaArea, nfGeom),     0, "(" NF_TYPE ")->value" },
+	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(nfaValid, nfGeom),    0, "(" NF_TYPE ")->value" },
 	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(nfaExport, nfGeom),       0, "(" NF_TYPE ")->ref" },
 	/* cast は sig の**出力型**で routing される。cg→nf の実変換は nf-cg-upgrade codec が担う。 */
-	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(nfaCast, nfGeom),         0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(nfaCast, nfGeom),         0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE ";(ch-mesh3d)->" NF_TYPE   /* ★ #3464: cherchi も MFM3 を名乗る = mf と同じ経路 */ },
 	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaTranslate, nfGeom),    0, "(" NF_TYPE ")->" NF_TYPE },
+	/* ★ #3486: アフィン変換 4 op。translate だけあって残り 3 本が無いと、式の途中で
+	 * **カーネルが裏返る** (rotate を書いた瞬間に cgal/manifold へ落ちる)。4 本とも
+	 * 3D→3D で 2D 型を要さないので、2D 型を持たないこのカーネルでも置ける。
+	 * 引数の解釈と行列作りは common/affine.h・適用は nfMesh::apply_affine。 */
+	{ "rotate",       ROTATE_IN,  3,AK_CACHE, OPWIRE(nfaRotate, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "scale",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaScale, nfGeom),        0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaMirror, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "transform",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaTransform, nfGeom),    0, "(" NF_TYPE ")->" NF_TYPE },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -191,10 +239,22 @@ extern const srava_module_descriptor nftsAgent_descriptor = {
 	.exec_default  = EXEC_PROCESS,
 	.ops           = OPS,
 	.n_ops         = N_OPS,
-	.import_exts   = "",   /* なし (import は cgal/manifold 経由で入れて cast する) */
+	/* ★ #3474 続き: import を持つので **拡張子を申告する** (未申告だとロード時に拒否)。
+	 *   読み手は common/meshio.h。対応形式は STL / OFF だけ。 */
+	.import_exts   = "stl:" NF_TYPE ",off:" NF_TYPE,   /* なし (import は cgal/manifold 経由で入れて cast する) */
 	.export_exts   = "off,stl,ply,obj",   /* */
 	.provides      = nef_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	.hash_salt     = NF_SALT,   /* キャッシュキー弁別 */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 5,   /* ★★ v5 (#3507・2026-09-10): SNC の framing を **ブロック分割**へ変更
+	                       *   ([u32 blocklen][block]…[u32 0])。全長の前置をやめたので書き手が
+	                       *   全文を作らなくてよくなり、4 GiB の上限も消えた。
+	                       *   ★★ v4 (#3499・2026-09-07): **nef_snc が付録の境界を書くのをやめた**
+	                       *   (常に NF_FORM_SNC)。他カーネルへ渡す cast は橋モジュール
+	                       *   nef_cg.so / nef_mf.so が持つ。hybrid の書き方は変えていないが、
+	                       *   版番号は 2 変種で共有している (同一記述子) ので両方上がる。
+	                       *   ★ v3 (2026-09-06): 境界を併記する条件を is_simple() から
+	                       *   「to_mesh が成功するか」へ広げた (非 2-多様体でも境界は取れる)。
+	                       *   ★ #3478: v2 = nef_snc が SNC の後ろに厳密境界を併記 */
 	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
 	 *   CGAL Nef ベース。T1-d 実測で TBB 依存ゼロ */
 	.initialize    = 0,   /* 無し */

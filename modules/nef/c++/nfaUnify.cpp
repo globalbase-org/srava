@@ -74,13 +74,13 @@ nfaUnify_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("unify: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("unify: needs a Nef mesh")));
 		return;
 	}
 	mesh = in->op_unify_shells();
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("unify: cannot rebuild a solid (an unbounded Nef, or nothing to unify)"))));
+		result = nfa_err(thNEW(stdString,
+		    ("unify: cannot rebuild a solid (an unbounded Nef, or nothing to unify)")));
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

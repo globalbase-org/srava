@@ -74,7 +74,7 @@ ggaDifference_::compute()
 	if ( ! mesh.is_notNull() ) {
 		char b[600];   /* geogram の FATAL 文は長い (file/line 付き) */
 		::snprintf(b, sizeof b, "difference: %s", msg ? msg : "boolean failed");
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = gga_err(thNEW(stdString,(b)));
 	}
 }
 

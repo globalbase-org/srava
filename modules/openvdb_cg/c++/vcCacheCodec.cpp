@@ -39,8 +39,11 @@ static int vc_match_vd(sPtr<pigData> b) { return sPtr<vdGrid>::d_cast(b).is_notN
  *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
 extern const pigModuleType openvdb_cg_provides[];
 const pigModuleType openvdb_cg_provides[] = {
-	{ &cgMesh::WIRE, "cg-mesh3d",
-	  "MESH" },
+	/* ★ #3468: タグを cgal_provides と **同一**にした ("MESH,PLY2,MFM3,MFC2,NEFB")。
+	 *   実体は libsrava_cg の同じ cgMesh::WIRE なので、これだけで export_vox が
+	 *   mf/gg/nfb のメッシュを受けられる = **変換コードは 0 行**。 */
+	{ &cgMesh::WIRE, "cg-mesh3d,cg-cross2d",
+	  "MESH,PLY2,MFM3,MFC2,NEFB,NEF3" },   /* ★ #3478: cgal_provides と同一に保つ */
 	{ &vdGeom::WIRE, VD_TYPE,
 	  VD_TAG },
 	{ 0, 0, 0 },

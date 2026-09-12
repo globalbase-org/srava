@@ -28,6 +28,12 @@
 #include	"mf/c++/mfaCast.h"
 #include	"mf/c++/mfaPolygon.h"
 #include	"mf/c++/mfaPrism.h"
+/* ★ #3474: 基本立体をカーネル間で統一 */
+#include	"mf/c++/mfaPyramid.h"
+#include	"mf/c++/mfaCylinder.h"
+#include	"mf/c++/mfaCone.h"
+#include	"mf/c++/mfaTorus.h"
+#include	"mf/c++/mfaTetrahedron.h"
 #include	"mf/c++/mfaRevolve.h"
 #include	"mf/c++/mfaVolume.h"
 #include	"mf/c++/mfaBbox.h"
@@ -76,19 +82,25 @@ static const pigArgKind MESH1ARG_IN[] = { AK_CACHE, AK_INLINE };  /* translate/s
 static const pigOpEntry OPS[] = {
 	{ "box",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(mfaBox),          0, "->mf-mesh3d" },  /* leaf 3D */
 	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(mfaBox), 0, "->mf-mesh3d" },  /* 寸法を array(構造 inline)で */
-	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaSphere), 0, "->mf-mesh3d" },  /* sphere(r, seg): seg=円周分割数(既定 32 相当) */
-	{ "icosphere",    SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaIcosphere), 0, "->mf-mesh3d" },  /* icosphere(r, subdiv): subdiv=細分回数(既定0=20面) */
-	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(mfaUnion, mfGeom, mfGeom),        1, "[mf-mesh3d](*)->mf-mesh3d;[mf-cross2d](*)->mf-cross2d", 1 /* ★可換 */ },
-	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(mfaIntersection, mfGeom, mfGeom), 1, "[mf-mesh3d](*)->mf-mesh3d;[mf-cross2d](*)->mf-cross2d", 1 /* ★可換 */ },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(mfaDifference, mfGeom, mfGeom), 1, "[mf-mesh3d](*)->mf-mesh3d;[mf-cross2d](*)->mf-cross2d" },
+	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaSphere), 0, "->mf-mesh3d", 0, 0, 1 },  /* sphere(r, seg): seg=円周分割数(既定 32 相当) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "icosphere",    SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaIcosphere), 0, "->mf-mesh3d", 0, 0, 1 },  /* icosphere(r, subdiv): subdiv=細分回数(既定0=20面) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(mfaUnion, mfGeom, mfGeom),        1, "[mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->mf-mesh3d;[mf-cross2d](*)->mf-cross2d", 1 /* ★可換 */ },
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(mfaIntersection, mfGeom, mfGeom), 1, "[mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->mf-mesh3d;[mf-cross2d](*)->mf-cross2d", 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(mfaDifference, mfGeom, mfGeom), 1, "[mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->mf-mesh3d;[mf-cross2d](*)->mf-cross2d" },
 	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(mfaExport, mfGeom), 0, "(mf-mesh3d)->ref;(mf-cross2d)->ref" },  /* 出力=D_REF キャッシュ */
 	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(mfaCast, mfGeom),         0, "(mf-mesh3d)->mf-mesh3d;(mf-cross2d)->mf-cross2d"
 	                                                  ";(cg-mesh3d)->mf-mesh3d;(cg-cross2d)->mf-cross2d"   /* mf-cg-downgrade: MESH/PLY2 */
 	                                                  ";(gg-mesh3d)->mf-mesh3d;(ch-mesh3d)->mf-mesh3d"     /* geogram/cherchi は MFM3 を名乗る */
-	                                                  ";(nfb-mesh3d)->mf-mesh3d"                            /* mf-nf-downgrade: NEFB のみ (NEF3 は読めない) */ },  /* 変換 op: identity。P2c: cast は sig 出力型で routing → manifold の全出力型 (mf-mesh3d/mf-cross2d) を列挙。cg→mf downgrade は mf_codecs の mf-cg-downgrade codec (MESH→mf-mesh3d / PLY2→mf-cross2d) が担う */
+	                                                  ";(nfb-mesh3d)->mf-mesh3d"     /* mf-nf-downgrade: NEFB。★ #3499: nf-mesh3d (nef_snc) は橋 nef_mf.so が受ける */ },  /* 変換 op: identity。P2c: cast は sig 出力型で routing → manifold の全出力型 (mf-mesh3d/mf-cross2d) を列挙。cg→mf downgrade は mf_codecs の mf-cg-downgrade codec (MESH→mf-mesh3d / PLY2→mf-cross2d) が担う */
 	{ "polygon",      SHAPE1_IN, 1, AK_CACHE, OPWIRE(mfaPolygon), 0, "->mf-cross2d" },  /* polygon([[x,y]...]): 2D 断面 */
 	{ "prism",        SHAPE3_IN, 3, AK_CACHE, OPWIRE(mfaPrism), 0, "->mf-mesh3d" },  /* prism(n,h,r) */
-	{ "revolve",      REVOLVE_IN,3, AK_CACHE, OPWIRE(mfaRevolve, mfGeom), 0, "(mf-cross2d)->mf-mesh3d" },  /* revolve(cross,angle,segs): 2D→3D */
+	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
+	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(mfaPyramid), 0, "->mf-mesh3d" },  /* pyramid(n,h,r) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(mfaCylinder), 0, "->mf-mesh3d" },  /* cylinder(r,h,seg) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(mfaCone), 0, "->mf-mesh3d" },  /* cone(r,h,seg) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(mfaTorus), 0, "->mf-mesh3d" },  /* torus(R,r,seg) */
+	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(mfaTetrahedron), 0, "->mf-mesh3d" },  /* tetrahedron(r) */
+	{ "revolve",      REVOLVE_IN,3, AK_CACHE, OPWIRE(mfaRevolve, mfGeom), 0, "(mf-cross2d)->mf-mesh3d", 0, 0, 1 },  /* revolve(cross,angle,segs): 2D→3D */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(mfaVolume, mfGeom),       0, "(mf-mesh3d)->value" },
 	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(mfaBbox, mfGeom), 0, "(mf-mesh3d)->value" },  /* bbox(mesh): 値返し */
 	{ "translate",    MESH1ARG_IN,2, AK_CACHE,OPWIRE(mfaTranslate, mfGeom), 0, "(mf-mesh3d)->mf-mesh3d;(mf-cross2d)->mf-cross2d" },  /* translate(m, [x,y,z]) */
@@ -107,15 +119,15 @@ static const pigOpEntry OPS[] = {
 	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(mfaCentroid, mfGeom), 0, "(mf-mesh3d)->value" },  /* centroid(mesh): 配列返し */
 	{ "import",       SHAPE1_IN, 1, AK_CACHE, OPWIRE(mfaImport), 0, "->mf-mesh3d" },  /* import(path): STL/OFF */
 	{ "rect",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaRect),         0, "->mf-cross2d" },  /* leaf 2D */
-	{ "circle",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaCircle), 0, "->mf-cross2d" },  /* circle(r,segs): 2D */
+	{ "circle",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaCircle), 0, "->mf-cross2d", 0, 0, 1 },  /* circle(r,segs): 2D */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	{ "ngon",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaNgon), 0, "->mf-cross2d" },  /* ngon(n,r): 2D */
 	{ "extrude",      MESH1ARG_IN,2, AK_CACHE,OPWIRE(mfaExtrude, mfGeom),      0, "(mf-cross2d)->mf-mesh3d" },  /* 2D→3D */
-	{ "combine",      BINMESH_IN,2, AK_CACHE, OPWIRE(mfaCombine, mfGeom, mfGeom), 0, "[mf-mesh3d](2)->mf-mesh3d;[mf-cross2d](2)->mf-cross2d", 1 /* ★可換 */ },  /* combine(a,b) */
+	{ "combine",      BINMESH_IN,2, AK_CACHE, OPWIRE(mfaCombine, mfGeom, mfGeom), 0, "[mf-mesh3d,gg-mesh3d,ch-mesh3d](2)->mf-mesh3d;[mf-cross2d](2)->mf-cross2d", 1 /* ★可換 */ },  /* combine(a,b) */
 	{ "section",      SECTION_IN,4, AK_CACHE, OPWIRE(mfaSection, mfGeom), 0, "(mf-mesh3d)->mf-cross2d" },  /* section(mesh,P,N,mode): 3D→2D(Z) */
 	{ "empty2d",      0,         0, AK_CACHE, OPWIRE(mfaEmpty2D), 0, "->mf-cross2d" },  /* 空集合(2D)。{} は中立元なので別物 */
 	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(mfaEmpty3D), 0, "->mf-mesh3d" },   /* 空集合(3D) */
-	{ "offset",       REVOLVE_IN,3, AK_CACHE, OPWIRE(mfaOffset, mfGeom),       0, "(mf-cross2d)->mf-cross2d" },  /* ★2D 専用 */
-	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaTube),        0, "->mf-mesh3d;->mf-cross2d" },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (#3415・掃引は cgal と共通の common/tube.h) */
+	{ "offset",       REVOLVE_IN,3, AK_CACHE, OPWIRE(mfaOffset, mfGeom),       0, "(mf-cross2d)->mf-cross2d", 0, 0, 2 },  /* ★2D 専用 */  /* ★ nreq=2: 以降は省略可 (既定は op が入れる) */
+	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaTube),        0, "->mf-mesh3d;->mf-cross2d", 0, 0, 1 },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (#3415・掃引は cgal と共通の common/tube.h) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	{ "color",        MESH1ARG_IN,2, AK_CACHE,OPWIRE(mfaColor, mfGeom),       0, "(mf-mesh3d)->mf-mesh3d" },  /* color(m, c): 頂点プロパティ ch3..5 に RGB。3D 専用 (2D は cgal 同様エラー)。色つき export は 3MF/AMF */
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
@@ -184,7 +196,8 @@ extern const srava_module_descriptor mfatsAgent_descriptor = {
 	.import_exts   = "stl:mf-mesh3d,off:mf-mesh3d",   /* rev4 Phase C: 型付き (3D) */
 	.export_exts   = "stl,off,3mf,amf",   /* 色つき 3MF/AMF も (共通ライタ common/mesh3mf.h) */
 	.provides      = manifold_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	.hash_salt     = "\x01" "MFM",   /* キャッシュキー弁別 (#3427 で manifest.cpp から移動) */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 2,   /* ★ #3487: v2 = valid が自己交差も見る (共通定義 ③) */
 	.initialize    = 0,   /* 無し */
 	.configure     = 0,   /* ★ v10 (#3441): opts フックは未使用(このモジュールは module() の
 	                       *   opts を消費しない) */

@@ -1,0 +1,6 @@
+#ifndef ___ocaTetrahedron_cpp_H___
+#define ___ocaTetrahedron_cpp_H___
+
+#include	"_ts2/c++/ocaTetrahedron_pb.h"
+
+#endif

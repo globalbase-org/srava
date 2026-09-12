@@ -90,15 +90,21 @@ ocaExport_::compute()
 	sPtr<ocShape> mIn = ( na > 1 ) ? sPtr<ocShape>::d_cast((*args)[1]) : sPtr<ocShape>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("export: no shape to write"))));
+		result = oca_err(thNEW(stdString,("export: no shape to write")));
 		return;
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
-	if ( ! mIn->write_to(p, unitS->get_str()) ) {
+	if ( ! mIn->write_to(p, unitS->get_str(), &brk_) ) {   /* ★ #3503 続き */
+		/* ★ 中断も「書けなかった」として返ってくるので、先に旗を見る。 */
+		if ( (result = oc_abort_err(brk_, "export")) != thNULL ) return;
 		char b[256];
+#ifdef SRAVA_OCCT_STEP
 		::snprintf(b, sizeof b, "export: cannot write %s (occt supports step/stp/brep)", p);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+#else
+		::snprintf(b, sizeof b, "export: cannot write %s (this occt build supports brep only)", p);
+#endif
+		result = oca_err(thNEW(stdString,(b)));
 		return;
 	}
 	pHashKeyType refHash = oc_hash_file(p);

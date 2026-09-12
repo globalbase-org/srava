@@ -61,6 +61,25 @@ public:
 	virtual int	launch_failed();
 	/* 子プロセスが終了していれば waitpid の生 status、まだ/該当なしなら -1。基底は -1。 */
 	virtual int	child_status();
+	/* ★ #3503: 撤収の猶予 (ミリ秒) を伝える。**pigfAgent が起動直後に 1 回だけ**呼ぶ —
+	 * 実効値の解決 (env > module() > 記述子) は registry の仕事で、mediator は結果だけ受け取る。
+	 *   0 = 即座に畳む / >0 = この時間だけ待つ / -1 = 待ち続ける (自分で畳まれると宣言)
+	 * ⚠ 意味は派生で違う: External は「SIGKILL までの猶予」・Internal は
+	 *   「planner を abort するまでの猶予」(殺せるプロセスが無いので抜ける手がそれしかない)。
+	 * 基底は何もしない。 */
+	/* ★ #3503: この mediator が **子プロセスを持つ種類か** (External=1 / Internal=0)。
+	 * ⚠ @c agent_pid() では判別できない — fork が完了するまで 0 なので、起動窓の External が
+	 *   in-proc に見えてしまう。planner の panic 待ちは「子を持ちうる者が 1 つも居ない」を
+	 *   確かめる必要があるので、**構築時から確定している**種別が要る。
+	 * ⚠⚠ 下と同じ理由で **public**。 */
+	virtual int	is_external();
+	/* ⚠⚠ **public に置くこと**。protected だと tscpp2 が interface 側に override を
+	 *   生成せず、glue が基底を **修飾付き (非仮想)** で呼ぶため、エラーも警告も出ないまま
+	 *   基底の no-op が走り続ける (pigfAgent::priority が踏んだのと同じ罠。#3503 で再度踏んだ —
+	 *   猶予が一切効かず gms=0 のままだった)。 */
+	virtual void	set_grace_ms(int ms);
+	/* ★ #3503: in-proc の abort 猶予。Internal だけが使う。⚠ 上と同じ理由で **public**。 */
+	virtual void	set_panic_ms(int ms);
 	/* ★ このメディエータが担当しているモジュール名 (in-proc のみ・無ければ thNULL)。
 	 * 「いま走っている op はどのモジュールのものか」を caller 鎖から引くのに使う
 	 * (pig_current_module_id)。process 実行では agent プロセスに .so が 1 本しか無いので
@@ -127,6 +146,25 @@ ptsMediator_::child_status()
 {
 	return -1;   /* 子プロセスを持たない実装 (in-proc thread 等) */
 }
+/* ★ #3503: 基底は受け取るだけで何もしない (mediator によって意味が違う)。 */
+void
+ptsMediator_::set_grace_ms(int)
+{
+}
+
+/* ★ #3503: 基底は受け取るだけ (Internal だけが使う)。 */
+void
+ptsMediator_::set_panic_ms(int)
+{
+}
+
+/* ★ #3503: 基底は「子プロセスを持たない」。External だけが 1 を返す。 */
+int
+ptsMediator_::is_external()
+{
+	return 0;
+}
+
 
 sPtr<stdString>
 ptsMediator_::module_name()

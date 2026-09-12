@@ -91,7 +91,7 @@ mfaExport_::compute()
 	sPtr<mfMesh> mIn = ( na > 1 ) ? sPtr<mfMesh>::d_cast((*args)[1]) : sPtr<mfMesh>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("export: no mesh to write"))));
+		result = mfa_err(thNEW(stdString,("export: no mesh to write")));
 		return;
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
@@ -99,7 +99,7 @@ mfaExport_::compute()
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
 		char b[256];
 		::snprintf(b, sizeof b, "export: cannot write %s (mf supports STL/OFF)", p);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = mfa_err(thNEW(stdString,(b)));
 		return;
 	}
 	pHashKeyType refHash = hash_file(p);

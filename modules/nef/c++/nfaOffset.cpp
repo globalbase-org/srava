@@ -79,7 +79,7 @@ nfaOffset_::compute()
 	int subdiv = ( na > 2 ) ? (int)(*args)[2]->get_int() : 1;   /* 近似球の細分化 (既定 1) */
 
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("offset: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("offset: needs a Nef mesh")));
 		return;
 	}
 	/* ★ 近似球の細分化は **0〜6**。範囲外は**黙って丸めずに明示エラー**にする。
@@ -94,18 +94,18 @@ nfaOffset_::compute()
 		    "offset: subdiv=%d is out of range (0-6). 6 is the highest level measured to complete, "
 		    "and it takes 13 minutes there (per level the error drops 4x and the cost rises 5-25x). "
 		    "7 and above are unverified", subdiv);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
 	/* ★非有界は Minkowski が取れない (CGAL は黙って片方を返す) → 先に弾く。 */
 	if ( ! in->is_bounded() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("offset: an unbounded Nef cannot be offset (e.g. the result of complement)"))));
+		result = nfa_err(thNEW(stdString,
+		    ("offset: an unbounded Nef cannot be offset (e.g. the result of complement)")));
 		return;
 	}
 	mesh = in->op_offset(d, subdiv);
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("offset: computation failed"))));
+		result = nfa_err(thNEW(stdString,("offset: computation failed")));
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

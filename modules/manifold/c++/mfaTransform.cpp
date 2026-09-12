@@ -9,6 +9,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"mf/c++/mfMesh.h"
+#include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/mfaTransform_.h"
@@ -69,23 +70,22 @@ mfaTransform_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<mfGeom> in = ( na > 0 ) ? sPtr<mfGeom>::d_cast((*args)[0]) : sPtr<mfGeom>();
-	sPtr<pigDataArray> mat = ( na > 1 ) ? (*args)[1]->obt_array()
-	                                    : sPtr<pigDataArray>();
+	sPtr<pigData> arg = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
 
-	int nm = mat.is_notNull() ? mat->length() : 0;
-	if ( nm != 12 && nm != 16 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "transform: matrix must have 12 (3x4) or 16 (4x4) elements"))));
+	/* ★ 引数の解釈と行列の組み立ては **common/affine.h** (カーネル非依存・7 モジュール共通)。
+	 *   受け付ける書き方だけでなく **拒否の理由** もそこに集約してある (#3486)。
+	 *   理由の受け皿 buf は呼び手が持つ (モジュール側に static を置かない)。 */
+	double e[12];
+	const char *why = 0;
+	char buf[256];
+	if ( ! srava_affine::matrix_transform(arg, e, &why, buf, (int)sizeof buf) ) {
+		result = mfa_err(thNEW(stdString,(why)));
 		mesh = thNEW(mfMesh,(manifold::Manifold()));
 		return;
 	}
-
-	/* 行優先で m00..m23 の 12 要素を取り出す(16 要素なら最終行を読み飛ばす)→ 3D 多態 apply_affine へ。 */
-	double e[12];
-	for ( int i = 0 ; i < 12 ; ++i )
-		e[i] = mat->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->get_flt();
-
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<mfGeom>();
+	/* ★ #3498: Manifold::Transform は **遅延**する (mfMesh.h の mf_eval_err の一覧)。 */
+	if ( (result = mf_eval_err(mesh, brk_, "transform")) != thNULL ) mesh = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

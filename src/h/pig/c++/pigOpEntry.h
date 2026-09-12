@@ -79,21 +79,39 @@ struct pigWireClass {
 
 /* op 1 個ぶんの配線: 計算本体の生成子と、**cache 引数**が欲しい本体クラスの列。
  * ⚠ want は **cache 引数 (AK_CACHE) だけ**を出現順に並べる (AK_INLINE の位置は数えない)。
- *   可変長 op (variadic=1 かつ vtail_value=0) の尾部は **最後の要素が繰り返す**。 */
+ *   可変長 op (variadic=1 かつ vtail_value=0) の尾部は **最後の要素が繰り返す**。
+ *
+ * ★★ #3469 (ABI v19・2026-09-01): 1 スロットは **候補列** (0 終端) になった。
+ *   export_vox が「メッシュ **または** ボリューム格子」を受けるようになり、
+ *   「このスロットはこのクラス 1 つ」では表現できなくなったため。
+ *   材料化は候補を **前から順に試し、最初に成功したもの**を使う (ptsGenericAgent)。
+ *   ⚠ 単一クラスのスロットは要素 1 の候補列になるだけで、既存の OPS 行は無改変。 */
 struct pigOpWiring {
-	pigCalcFactory              mkCalc;
-	const pigWireClass* const*  want;    /* nwant 個。幾何 cache 引数なしなら 0 */
-	int                         nwant;
+	pigCalcFactory                    mkCalc;
+	const pigWireClass* const* const* want;  /* nwant スロット。各要素が 0 終端の候補列 */
+	int                               nwant; /* 幾何 cache 引数なしなら 0 (want も 0 可) */
 };
 
-/* OPS 行に書く配線。Calc = 計算本体クラス、In... = cache 引数が欲しい本体クラス。
+/* ★ #3469: 1 スロットが受け入れる本体クラスの **候補列**。
+ *   OPS 行では OPWIRE(Calc, cgMesh, PIGWIRE_ANY(cgMesh, vdGrid)) のように混ぜて書ける。 */
+template<class... T> struct pigWireAny {
+	static constexpr const pigWireClass* L[] = { &T::WIRE..., 0 };
+};
+#define PIGWIRE_ANY(...) pigWireAny<__VA_ARGS__>
+
+/* 単一クラスを書いたスロットを候補列 1 個へ包む (既存の OPS 行の書き方を保つため)。 */
+template<class T> struct pigWireSlotOf            { using type = pigWireAny<T>; };
+template<class... T> struct pigWireSlotOf<pigWireAny<T...> > { using type = pigWireAny<T...>; };
+
+/* OPS 行に書く配線。Calc = 計算本体クラス、In... = cache 引数のスロット
+ * (本体クラス 1 つ、または PIGWIRE_ANY(...) の候補列)。
  *   { "union", BINMESH_IN, 2, AK_CACHE, OPWIRE(cgaUnion, cgMesh, cgMesh), 1, "…", 1 }
  * ★ 文字列ではなく **クラス**で縛るので、クラスを消せば/改名すればコンパイルが落ちる。 */
 template<class Calc, class... In> struct pigOpWire {
 	static sPtr<ptsCalcBody>
 	mk(sPtr<ptsObject> p, sArray<sPtr<pigData> >* a, sPtr<stdString> t) { return thNEW(Calc,(p, a, t)); }
-	static constexpr const pigWireClass* W[] = { &In::WIRE..., 0 };
-	static constexpr pigOpWiring WIRING       = { &mk, W, (int)sizeof...(In) };
+	static constexpr const pigWireClass* const* W[] = { pigWireSlotOf<In>::type::L..., 0 };
+	static constexpr pigOpWiring WIRING             = { &mk, W, (int)sizeof...(In) };
 };
 #define OPWIRE(Calc, ...) (&pigOpWire<Calc __VA_OPT__(,) __VA_ARGS__>::WIRING)
 
@@ -125,8 +143,12 @@ struct pigOpEntry {
 
 	/* ★ #3436 P4 (docs/sig_grammar_design.md §5.3): **可換か** (1=可換・既定 0)。
 	 *   fold 形の op を木に分解するときの形を決める:
-	 *       可換 ON  … get_hashkey() 昇順にソート → 均衡 k 分木 (a,b,c と c,b,a が同一木)
+	 *       可換 ON  … **書かれた順のまま**均衡 k 分木 (a,b,c と c,b,a は別の木)
 	 *       可換 OFF … 順序保持の左 fold を k 個ずつ (difference)
+	 *   ★ #3500: 可換でも **引数は並べ替えない**。以前は get_hashkey() 昇順にソートしていたが、
+	 *     畳む順で中間結果の大きさ = 実行時間が変わるうえ、そのハッシュは記述子の指紋
+	 *     (名前 + cache_version) を含むので **幾何に無関係な版を上げるだけで木が変わっていた**。
+	 *     正規化は二項ノードのキャッシュキー (compute_arg_hash) にだけ残す。
 	 *   キャッシュキーの正規化 (pigfAgent::compute_arg_hash) もこの申告を見る。★ どちらも eval 時
 	 *   (pigfModuleAgent::try_decompose / pigfAgent::compute_arg_hash) にしか正しく引けない —
 	 *   #3452 でモジュール登録が起動時 eager-load から eval 時の module() 呼び出しへ移ったため、
@@ -143,6 +165,29 @@ struct pigOpEntry {
 	 *     planner 側に引数種別の検査を置いた瞬間に、その嘘が正しい呼び出しを弾いた。
 	 *   ⚠ 末尾に足すこと (OPS[] は位置指定初期化子)。既定 0 が従来の意味と一致する。 */
 	int               vtail_value;
+
+	/* ★ #3474 続き (ひさ設計 2026-09-05): **必須の引数個数**。0 = 既定 = 「nin 個すべて必須」
+	 *   なので既存の OPS 行は 1 行も書き換えずに従来どおりの意味になる。
+	 *
+	 *   ⚠ これが無いあいだ、「省略できる引数」を表現する手段が記述子に無かった。arity 検査が
+	 *     `n != nin` の **完全一致**を要求するので、`sphere(r)` のような省略形はパーサ側で
+	 *     **固定 arity のノードに組み直して**通すしかなく、その特例が
+	 *       pushArg(arg0); if (na>=2) pushArg(arg1); else pushArg(既定);
+	 *     と添字直書きだったため **index 2 以降が黙って捨てられて**いた
+	 *     (`sphere(1,32,5)` が第 3 引数を捨てて通る。検査が見るのは組み上がったノードの args
+	 *      なので、検査より上流で消えた引数は誰にも気づかれない)。
+	 *
+	 *   ★★ 既定値を **パーサが持てない**のが本質 (ひさ指摘)。パーサはどのモジュールが実行するか
+	 *     知らない (routing は eval 時) のに、同じ op 名でも引数の意味がモジュールで違う:
+	 *         sphere(r, seg)  … メッシュ系。seg は省略可
+	 *         sphere(r, dx)   … openvdb。dx はボクセルサイズで **省略できない**
+   	 *     ⇒ 「何個まで省略してよいか」は **そのモジュールの記述子**が言い (nreq)、
+	 *        **既定値そのものは op の compute() が入れる** (どの op も既に
+	 *        `( na > k ) ? … : 既定` の形で持っている)。パーサは来た引数をそのまま渡すだけ。
+	 *
+	 *   検査: n > nin → too many / n < (nreq ? nreq : nin) → too few / その間は OK。
+	 *   ⚠ **必ず末尾に足すこと** (OPS[] は位置指定初期化子・commutative / vtail_value と同じ理由)。 */
+	int               nreq;
 };
 
 #endif

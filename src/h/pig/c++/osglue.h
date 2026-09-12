@@ -135,6 +135,21 @@ int osglue_env_int(const char *name, int def);
 struct pigCfgEntry { const char *var; const char *env; const char *def; int ini_only; };
 const struct pigCfgEntry *pigcfg_table(void);
 
+/* ★★ #3508 (2026-09-10): ワーカーゲートの **入場順**。GATE_ORDER / SRAVA_GATE_ORDER の値。
+ *   fifo  … 到着順 (priority() を参照しない = 末尾追加経路)
+ *   lifo  … 生成通し番号の負値で並べる。深さ優先の *代理指標*。対照用に残す
+ *   delta … **その agent が生きている cache 値をいくつ増減させるか** (out - k) で並べる。既定。
+ *           同点 (葉どうし / 二項どうし) は stdLimitSemaphore::insNeq(0) で LIFO に倒す (#3509)。
+ * ★ 値は pigfAgent (キーの選択) と ptsApplication (セマフォへの反映) の両方が見る。 */
+enum {
+	PIG_GATE_ORDER_FIFO  = 0,
+	PIG_GATE_ORDER_LIFO  = 1,
+	PIG_GATE_ORDER_DELTA = 2
+};
+#define	PIG_GATE_ORDER_DEFAULT	"delta"
+int         pig_gate_order_parse(const char *name);   /* 未知の名前は既定 (delta) */
+const char *pig_gate_order_name(int order);
+
 /* ★ #3419 §12 (T6-a): 指定 pid がこれまでに消費した CPU 時間 (マイクロ秒)。0=成功 / -1=取得不能。
  * user + system の合計。**累積値**なので、呼び手は 2 点間の差分を経過時間で割って
  * 「いま何コアぶん使っているか」(C_CPU) を出す。

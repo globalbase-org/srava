@@ -21,6 +21,9 @@
 #include	"cg/c++/cgMesh.h"
 #include	"vc/c++/vcaVoxelize.h"
 #include	"vc/c++/vcaIsosurface.h"
+#ifdef SRAVA_HAVE_HDF5
+#include	"vc/c++/vcaExportVox.h"
+#endif
 #include	"_ts2/c++/vctsAgent_.h"
 
 #include	<stdio.h>    /* SRAVA_LOAD_LOG の診断出力 */
@@ -38,12 +41,33 @@ mkCalcT(sPtr<ptsObject> parent, sArray<sPtr<pigData> > *args, sPtr<stdString> ta
 
 static const pigArgKind VOXELIZE_IN[] = { AK_CACHE, AK_INLINE };   /* voxelize(mesh, dx) */
 static const pigArgKind GRIDISO_IN[]  = { AK_CACHE, AK_INLINE };   /* isosurface(v, iso) */
+#ifdef SRAVA_HAVE_HDF5
+static const pigArgKind EXPORTVOX_IN[] = { AK_INLINE, AK_INLINE }; /* export_vox(path, params, mesh…可変) */
+#endif
 
 static const pigOpEntry OPS[] = {
-	/* ★ 境界の変換 2 本だけ。格子演算は openvdb.so が持つ (このモジュールは繋ぐだけ)。
+	/* ★ 境界の変換 2 本 (+ #3468 で export_vox)。格子演算は openvdb.so が持つ。
 	 *   ★ **codec ではなく普通の op** — 両側を知っているので dx / iso を素直に引数で取れる。 */
 	{ "voxelize",   VOXELIZE_IN, 2, AK_CACHE, OPWIRE(vcaVoxelize, cgMesh),   0, "(cg-mesh3d)->" VD_TYPE },
 	{ "isosurface", GRIDISO_IN,  2, AK_CACHE, OPWIRE(vcaIsosurface, vdGeom), 0, "(" VD_TYPE ")->cg-mesh3d" },
+#ifdef SRAVA_HAVE_HDF5
+	/* ★ #3468: cgal.so から移設。メッシュを Cartesian 格子へボクセル化し中立な vox.h5 を書く。
+	 *   末尾メッシュ可変 (variadic=1)。出力 = D_REF。★ 幾何は cgal のリーダ (libsrava_cg の
+	 *   cgMesh::WIRE) が読むので、下の provides でタグを cgal と揃えてある = 変換コード 0 行。
+	 *   ⚠ このモジュールは幾何カーネルではない仕事も持つことになった。名前 (openvdb ⇄ cgal の
+	 *     橋渡し) と実態がずれるが、改名はユーティリティ系モジュールの整理と一緒に判断する。 */
+	/* ★ #3469: sig を広げて **vd-grid3d も受ける** = 1 つの h5 にカーネル混在レイヤ。
+	 *   sig を広げるだけで routing は自動 (planner は型を見てモジュールを選ぶ)。
+	 *   ⚠ nf-mesh3d (nef_snc の SNC 表現) は入れない — cgal のリーダは NEF3 を読めない
+	 *     (読めるのは nfb-mesh3d = NEFB のみ)。 */
+	/* ★ #3469 (ABI v19): 尾部のスロットは **メッシュ または ボリューム格子**。
+	 *   材料化は cgMesh を先に試し、読めなければ vdGeom を試す。
+	 *   ⚠ 配線は**クラスではなく階層**で行う (WIRE は階層の根に 1 つ)。vdGrid と書いても
+	 *     継承した vdGeom::WIRE を指すので、実態に合わせて vdGeom と書く
+	 *     (isosurface の OPWIRE(vcaIsosurface, vdGeom) と同じ)。 */
+	{ "export_vox", EXPORTVOX_IN, 2, AK_CACHE, OPWIRE(vcaExportVox, PIGWIRE_ANY(cgMesh, vdGeom)), 1,
+	  "({cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d,nfb-mesh3d," VD_TYPE "}...)->ref" },
+#endif
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -127,11 +151,12 @@ extern const srava_module_descriptor vctsAgent_descriptor = {
 	/* ★ **codec を持たない**。読み書きは相手側 (libsrava_mf / libsrava_vd) の codec が行う。
 	 *   このモジュールは「両側の本物のクラスを繋ぐ op」だけを提供する。 */
 	.provides      = openvdb_cg_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 2,   /* ★ #3491: v2 = voxelize が内部空洞を保つ (値が変わる) */
 	/* ★ **自分の型を持たない** (新しい型を作らない)。入出力はどちらも相手の型
 	 *   (mf-mesh3d = manifold / vd-grid3d = openvdb)。 */
 	/* ★ **両側の型を申告する**。新しい型は作っていない — 実体は libsrava_mf / libsrava_vd の
 	 *   本物のクラス (mfMesh / vdGrid) なので、in-proc でも d_cast が通る。 */
-	.hash_salt     = "\x01" "VDC",   /* キャッシュキー弁別 */
 	/* initialize: 無し。openvdb::initialize() は vdGrid::ensure_init() が全 op の入口で
 	 * 1 回だけ呼んでいる (このモジュールは EXEC_PROCESS = 1 プロセス 1 モジュール)。
 	 * in-proc 化 (#3419) するときに、ここへ移すかを再検討する。 */

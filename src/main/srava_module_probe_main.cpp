@@ -43,9 +43,27 @@ int main(int argc, char **argv)
 		};
 		int ng = 0;
 		for ( size_t i = 0 ; i < sizeof cases / sizeof cases[0] ; ++i ) {
-			srava_module_descriptor d = { SRAVA_MODULE_ABI, "selftest", 0, 0, 0u, 0,
-			                              cases[i].ops, 1, cases[i].imp, cases[i].exp,
-			                              0, 0, 0, 0, 0 };
+			/* ★ #3466: 位置指定初期化子をやめた。旧 { …, 0, 0, 0, 0, 0 } は provides 以降の
+			 *   5 個を埋めていたが、ABI v17 で hash_salt が消えて **初期化子が多すぎる**という
+			 *   コンパイルエラーになった (= 記述子のレイアウト変更を型検査が捕えた)。
+			 *   名前で書けば以後フィールドが増減しても静かにずれない。 */
+			srava_module_descriptor d = {
+				.abi_version  = SRAVA_MODULE_ABI,
+				.name         = "selftest",
+				.priority     = 0,
+				.make_agent   = 0,
+				.exec_caps    = 0u,
+				.exec_default = 0,
+				.ops          = cases[i].ops,
+				.n_ops        = 1,
+				.import_exts  = cases[i].imp,
+				.export_exts  = cases[i].exp,
+				.provides     = 0,
+				.cache_version = 1,   /* ★ v18 (#3466): 結果の版 (手で上げる) */
+				.arity        = 0,
+				.initialize   = 0,
+				.configure    = 0,
+			};
 			bool got = ! pig_descriptor_violation(&d).empty();
 			if ( got != cases[i].bad ) {
 				std::fprintf(stderr, "SELFTEST-FAIL: %s (violation=%d, 期待 %d)\n",

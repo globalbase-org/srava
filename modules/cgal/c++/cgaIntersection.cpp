@@ -70,8 +70,8 @@ cgaIntersection_::compute()
 	sPtr<cgMesh> ma = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	sPtr<cgMesh> mb = ( na > 1 ) ? sPtr<cgMesh>::d_cast((*args)[1]) : sPtr<cgMesh>();
 	if ( ! ma.is_notNull() || ! mb.is_notNull() ) {
-		result = thNEW(pigDataError,(cga_missing_operand_msg("intersection",
-		     (na>0)?(*args)[0]:sPtr<pigData>(), (na>1)?(*args)[1]:sPtr<pigData>(), na)));
+		result = cga_err(cga_missing_operand_msg("intersection",
+		     (na>0)?(*args)[0]:sPtr<pigData>(), (na>1)?(*args)[1]:sPtr<pigData>(), na));
 		return;
 	}
 	mesh = ma->op_intersection(mb);   /* 多態 */
@@ -82,7 +82,7 @@ cgaIntersection_::compute()
 		      "share coplanar faces, and must not self-intersect (an earlier boolean may have made "
 		      "invalid geometry — check valid()). Overlap operands slightly (e.g. by 0.01) instead of "
 		      "making them exactly touch.";
-		result = thNEW(pigDataError,(thNEW(stdString,(m))));
+		result = cga_err(thNEW(stdString,(m)));
 	}
 }
 

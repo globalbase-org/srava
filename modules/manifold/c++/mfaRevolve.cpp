@@ -70,11 +70,11 @@ mfaRevolve_::compute()
 	double        angle = ( na > 1 ) ? (*args)[1]->get_flt() : 360.0;
 	int           nseg  = ( na > 2 ) ? (int)(*args)[2]->get_int() : 32;
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("revolve: needs a 2D polygon"))));
+		result = mfa_err(thNEW(stdString,("revolve: needs a 2D polygon")));
 		return;
 	}
 	if ( angle <= 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("revolve: angle must be > 0"))));
+		result = mfa_err(thNEW(stdString,("revolve: angle must be > 0")));
 		return;
 	}
 	if ( angle > 360.0 ) angle = 360.0;

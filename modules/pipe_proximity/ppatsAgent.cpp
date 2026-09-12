@@ -37,6 +37,11 @@
 #include	"_ts2/c++/ppatsAgent_.h"
 
 #include	<string.h>
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] pipe_proximity/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(ppa_err, "pipe_proximity")
+
 
 CLASS_TINYSTATE(pipe/c++/ppatsAgent,pig/c++/ptsAgent)
 
@@ -126,7 +131,22 @@ extern const srava_module_descriptor ppatsAgent_descriptor = {
 	.import_exts   = 0,
 	.export_exts   = 0,
 	.provides      = 0,   /* 無し */
-	.hash_salt     = 0,   /* 基準カーネル/解析モジュールはソルト無し */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 1,
+	/* ★★ #3503: **graceful のみ** (kill も panic もされない)。#3502 続きで *全 op・全経路* が
+	 * 中断要求を見るようにしたので名乗れる — 現時点でこれを名乗れる唯一のモジュール。
+	 *
+	 *   pipe_adjust / pipe_scene_adjust   本体 (cdRun / adjust / adjustScene の反復境界)
+	 *                                     + 後段の分離パス + ポリッシュ
+	 *   pipe_proximity / pipe_scene_proximity   ペア列挙の境界
+	 *   pipe_sample                       サンプル点の境界
+	 *
+	 * ⚠ 「op を配線した」ではなく「**その op の全経路**」で判断すること。#3502 の初版は
+	 *   主経路だけ配線して後段 (sepIter=600 回の分離パスと polish) が残っており、
+	 *   中断後に *劣化した結果が成功として返る*状態だった。
+	 * ⚠ ここを -1 にした以上、中断点を持たない経路を足したら **必ずここも見直す**。
+	 *   見落とすと Ctrl+C で永久ハングする (in-proc なら planner ごと)。 */
+	.grace_ms      = -1,
 	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
 	 *   raw pthread。⚠ ロード済みライブラリからは検出できない */
 	.initialize    = 0,   /* 無し */
@@ -157,7 +177,7 @@ TS_STATE(ACT_ppatsAgent_WAIT)
 		case C_OP: {
 			op = mpkt->str;
 			if ( op == thNULL ) {
-				err = thNEW(pigDataError,("pipe plugin: missing op name"));
+				err = ppa_err("pipe plugin: missing op name");
 				return rDO|ACT_ppatsAgent_ERROR;
 			}
 			argv.length(0);
@@ -167,18 +187,18 @@ TS_STATE(ACT_ppatsAgent_WAIT)
 		}
 		case C_ARG_DATA: {
 			if ( op == thNULL ) {
-				err = thNEW(pigDataError,("arg before C_OP"));
+				err = ppa_err("arg before C_OP");
 				return rDO|ACT_ppatsAgent_ERROR;
 			}
 			int idx = (int)mpkt->idx;
 			sPtr<pigData> d = mpkt->data;
 			if ( d == thNULL || d->is_error() ) {
-				err = ( d != thNULL ) ? d : sPtr<pigData>(thNEW(pigDataError,("inline arg decode error")));
+				err = ( d != thNULL ) ? d : sPtr<pigData>(ppa_err("inline arg decode error"));
 				return rDO|ACT_ppatsAgent_ERROR;
 			}
 			if ( d->is_cache() ) {
 				/* プラグインは値引数のみ (process 版 serve の C_ARG_PATH 拒否と対称)。 */
-				err = thNEW(pigDataError,("pipe plugin: value arguments only (got a mesh handle)"));
+				err = ppa_err("pipe plugin: value arguments only (got a mesh handle)");
 				return rDO|ACT_ppatsAgent_ERROR;
 			}
 			if ( idx >= argv.length() ) argv.length(idx + 1);
@@ -188,9 +208,9 @@ TS_STATE(ACT_ppatsAgent_WAIT)
 		case C_ARG_END: {
 			outCache = sPtr<pigDataCache>::d_cast(mpkt->data);
 			if ( outCache == thNULL ) {
-				err = thNEW(pigDataError,(
+				err = ppa_err(
 				    "ppatsAgent: C_ARG_END without a target cache path"
-				    " (planner must name the output cache)"));
+				    " (planner must name the output cache)");
 				return rDO|ACT_ppatsAgent_ERROR;
 			}
 			gotEnd = 1;
@@ -203,7 +223,7 @@ TS_STATE(ACT_ppatsAgent_WAIT)
 	}
 	/* 計算開始前なので待つ子は無い → 中断を結果に畳む (§6.3)。 */
 	if ( is_destroyed() ) {
-		err = thNEW(pigDataError,("aborted: agent was destroyed"));
+		err = ppa_err("aborted: agent was destroyed");
 		return rDO|ACT_ppatsAgent_ERROR;
 	}
 	return 0;
@@ -223,7 +243,7 @@ TS_STATE(ACT_ppatsAgent_CALC)
 		/* destroy されていたら結果を捨てて中断 (calc のエラーがあれば優先リレー)。 */
 		if ( is_destroyed() ) {
 			err = ( cr != thNULL && cr->is_error() ) ? cr
-			    : sPtr<pigData>(thNEW(pigDataError,("aborted: agent was destroyed")));
+			    : sPtr<pigData>(ppa_err("aborted: agent was destroyed"));
 			return rDO|ACT_ppatsAgent_ERROR;
 		}
 		if ( cr != thNULL && cr->is_error() ) {
@@ -239,7 +259,7 @@ TS_STATE(ACT_ppatsAgent_CALC)
 	/* destroy の作法 (ひさ指示): 子へ destroy を送り TSE_RETURN を待つ。即 FIN しない。 */
 	if ( is_destroyed() ) {
 		if ( calc.is_notNull() ) { calc->destroy(); return 0; }
-		err = thNEW(pigDataError,("aborted: agent was destroyed"));
+		err = ppa_err("aborted: agent was destroyed");
 		return rDO|ACT_ppatsAgent_ERROR;
 	}
 	return 0;
@@ -248,7 +268,7 @@ TS_STATE(ACT_ppatsAgent_CALC)
 TS_STATE(ACT_ppatsAgent_ERROR)
 {
 	set_result( ( err != thNULL ) ? err
-	    : sPtr<pigData>(thNEW(pigDataError,("pipe plugin error"))) );
+	    : sPtr<pigData>(ppa_err("pipe plugin error")) );
 	return rDO|FIN_START;
 }
 

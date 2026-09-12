@@ -34,7 +34,9 @@
  *   (nef が NEF3(SNC) を wire に選んだのと同じ判断。あちらは表現力のため・こちらは効率のため。)
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
+#include	"vd/c++/vdBreak.h"       /* #3498: 中断 (どの op が止まるかは vdBreak.h の表) */
 #include	<openvdb/openvdb.h>
 #include	<stdint.h>
 #include	<vector>
@@ -47,7 +49,6 @@
 /* ★ wire 形式の 4CC = OpenVDB ネイティブ。4CC は **形式**の名前なので、将来 2 つ目の
  * ボリュームバックエンドが同じ .vdb を書くなら共有してよい (型は codec 行の types 申告が担う)。 */
 #define VD_TAG		"VDB "
-#define VD_SALT		"\x01" "VDB"
 /* ★ 2026-08-29 (ひさ判断): 旧 VD_MESH_TYPE ("mf-mesh3d") / VD_MESH_TAG ("MFM3") と
  * クラス vdMesh を **撤去**した。#3434 で voxelize / isosurface が openvdb_mf/cg/gg へ移り、
  * このモジュールにメッシュを扱う op が 1 つも無くなっていたため (OPS 表に無い = 到達不能)。
@@ -69,8 +70,16 @@ public:
 	virtual void encode(vdChunkSink&)   = 0;
 	virtual void decode(vdChunkSource&) = 0;
 	int  decode_failed() const { return decodeErr_; }
+	/* ★ #3479: 立てた **理由** (立てていなければ 0)。reader がこれを拾って errCode と一緒に
+	 *   parent へ渡す。従来は「読めなかった」という事実だけが残り、利用者に届く文は
+	 *   「codec が無い / 表現できない / 形式が違う」の 3 択を並べた推測だった。
+	 *   ★文字列リテラル前提 (寿命は .so と同じ)。 */
+	const char* decode_why() const { return decodeWhy_; }
 protected:
+	/* decodeErr_ と理由は必ず対で立てる (理由の無い拒否を作らない)。 */
+	void set_decode_err(const char* why) { decodeErr_ = 1; decodeWhy_ = why; }
 	int  decodeErr_ = 0;
+	const char* decodeWhy_ = 0;
 public:
 	virtual bool write_to(const char *path, const char *unit) = 0;
 	/* reader 用ファクトリ: D_META タグから具体型を生成 (未知タグは null)。 */
@@ -119,6 +128,10 @@ public:
 	/* ---- ★ 場が「真の符号付き距離場か」の印 (|grad| = 1 が保たれているか) ----
 	 * ブール (min/max の合成) の結果は形は正しいが真の距離場ではなくなり、|grad| = 1 を
 	 * 仮定する tools::levelSetVolume が偏る。
+	 * ⚠ #3489 (2026-09-06) 以降、**volume() / op_area() はこの印を読まない**
+	 *   (符号つきボクセル積分は |grad| = 1 を仮定しない)。印を残してあるのは
+	 *   「この格子が真の距離場か」という事実そのものが .vdb の情報として意味を持ち、
+	 *   renormalize が付け直す対象でもあるため。
 	 * ★ **grid のメタデータに載せる**ので .vdb キャッシュを越える。載せないと cold と warm で
 	 *   volume が変わる = 「答えが正しく見えたまま変わる」型の欠陥になる
 	 *   (型スタンプで一度潰したのと同じ形の罠)。
@@ -128,15 +141,35 @@ public:
 	bool is_normalized() const;
 
 	/* ---- 計測 ---- */
-	/* ★ 正規化されていなければ **測る直前に作り直してから**測る (ひさ判断 2026-08-19)。
-	 *   作り直しのコストを払ってでも、黙って偏った値を返す方が危険だから。
-	 *   ★ブール連鎖の途中では作り直さない — 非正規化は **伝播しない**
-	 *   (min/max は零等値面の位置しか見ない) ので、最後に測るときだけ払えばよい。
-	 *   ★ なお正規化済みでも levelSetVolume 自体は粗い。桁が要るなら isosurface で
-	 *   メッシュにしてから測る。これは別の話。 */
-	double volume() const;          /* tools::levelSetVolume (world 単位) */
+	/* ★★ #3489 (2026-09-06): **符号つきボクセル積分** に置き換えた。
+	 *     volume = Σ H(-φ) dx³ / area = Σ δ(φ)|∇φ| dx³ (平滑化の半幅は 1.5 ボクセル)。
+	 *   - 符号だけで決まるので **内部空洞が自然に差し引かれる**。中空の殻が「詰まった球」に
+	 *     なっていた欠陥はここが原因だった (犯人は測る直前の levelSetRebuild — 詳細は
+	 *     vdGrid.cpp の op_area 直上に切り分けの実測つきで書いてある)。
+	 *   - H は界面について反対称なので **|grad| = 1 が崩れていても偏らない**。よって
+	 *     「正規化されていなければ作り直してから測る」(2026-08-19) は不要になり、
+	 *     is_normalized() は計測からは **読まれない** (印そのものは .vdb に残す)。
+	 *   - メッシュ往復 (rebuild) が消えるので **速くもなった**。
+	 *   ★ 解像度に依存する近似値であることは変わらない。桁が要るなら isosurface で
+	 *     メッシュにしてから測る。これは別の話。 */
+	double volume(const pigBreak *brk = 0) const;   /* 符号つきボクセル積分 (world 単位) */
 	double voxel_size() const;      /* 格子間隔 (等方前提) */
 	int    active_voxels() const;   /* 活性ボクセル数 (= 狭帯域の実サイズ) */
+
+	/* ---- 素性を訊く op (#3487) ----------------------------------------------
+	 * ★ **メッシュを作らずに**格子から出す (体積と同じ方針)。解像度に依存する近似値。
+	 *   bbox … 零等値面をまたぐボクセルの世界座標での範囲。
+	 *          ⚠ 活性ボクセルの箱をそのまま使うと **狭帯域の厚み (既定 3 ボクセル)** ぶん
+	 *            膨らむので、符号が変わるボクセルだけを見る。
+	 *   centroid … 内側 (値 < 0) のボクセル/タイルの重心。タイルは中心 × ボクセル数で重み付け。
+	 *   area … tools::levelSetArea。
+	 * ★ valid の共通定義 (① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い) のうち、
+	 *   **②③ は距離場では構造的に恒真** (境界も自己交差も表現できない) なので ① だけを見る。
+	 *   これは「別のことを答えている」のではなく「その表現では ②③ が恒真」という事実。 */
+	int    op_bbox(double mn[3], double mx[3]) const;
+	int    op_centroid(double c[3]) const;
+	double op_area(const pigBreak *brk = 0) const;
+	int    op_valid() const;
 
 	/* OpenVDB のグローバル初期化 (プロセスに 1 回)。全 op の入口で呼ぶ。
 	 * ★ GEO::initialize() と同じ性質で、これを呼ばずに触ると型レジストリが未登録で落ちる。 */
@@ -152,6 +185,26 @@ public:
 	 *   効いた)。実体を pigModuleRegistry のモジュール専用スロットへ移した際に分離した。 */
 	static void set_thread_budget(int n);   /* ★ 相手は registry の configuring_module_id() */
 
+	/* ★ #3462: プリミティブ。OpenVDB 本体の生成器をそのまま使う。
+	 *   これが入るまで openvdb は leaf を作れず、mesh を manifold に作らせて voxelize していた。 */
+	static sPtr<vdGrid> make_sphere(double r, double dx, const pigBreak *brk = 0);
+	static sPtr<vdGrid> make_box(double w, double h, double d, double dx);
+
+	/* ★ #3463: 一般アフィン変換 (行優先 3x4)。translate / rotate / scale / mirror /
+	 *   transform の **共通の入口** (manifold の apply_affine・occt の op_affine と同じ形)。
+	 *
+	 *   ★★ 格子 (mTransform) は**動かさない**。動かすのは中身のボクセル。
+	 *   mTransform は「そのグリッドが住んでいる格子の定義」= 値ではなく型に近いので、
+	 *   それを動かすと他のグリッドと格子が揃わなくなる。⚠ tools::csgUnion は**ツリーだけを
+	 *   見て transform を参照しない**ので、map が違うグリッドを渡すと止まらずに index 空間で
+	 *   重ね合わせ、幾何的に誤った結果を静かに返す。
+	 *
+	 *   実装は tools::resampleToMatch。入力の transform だけを一時的に「元の map ∘ 目的の
+	 *   world 変換」に差し替え、出力を**元の格子**で用意して呼ぶ。level set の面倒
+	 *   (scale/shear で距離が保存されない件) は resampleToMatch が内部の
+	 *   doLevelSetRebuild で見てくれる。 */
+	sPtr<vdGrid> op_affine(const double e[12], const pigBreak *brk = 0);
+
 	/* ★ #3441 (ABI v10): module("openvdb.so",{threads:N}) の受け口。記述子の .configure に配線。
 	 *   n > 0 = op あたりの上限 / n <= 0 = 指定なし (TBB 既定へ戻す)。
 	 *   ⚠ configure は **module() が実行されるたびに 1 回**呼ばれるだけで、op ごとには呼ばれない。
@@ -165,5 +218,26 @@ private:
 	openvdb::FloatGrid::Ptr g_;
 };
 
+
+/* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
+ *   素の vda_err(...) を使うとモジュール名が付かない。 */
+PIG_DEFINE_MODULE_ERR(vda_err, VD_MODULE_NAME)
+
+/* ★ #3498: 中断で終わったならそのエラーを、そうでなければ thNULL。
+ *
+ * ⚠ **失敗を報告する前に必ずこれを見ること**。中断された算法は「作れなかった」(null) や
+ *   途中までの値を返してくるので、そのまま報告すると *中断したのに格子が悪いと言う* ことになる。
+ * ⚠⚠ 特に **計測 (volume / area) は途中までの総和を返す** — 見た目は普通の数値なので、
+ *   これを通すと **中断が「小さめの答え」として成功扱いで焼き付く**。キャッシュに入れば
+ *   次回以降それが正しい答えとして引かれる (#3489 の cache_version 上げ忘れと同じ形)。
+ *   ⇒ 計測でも必ずここを通す。 */
+static inline sPtr<pigData>
+vd_abort_err(const pigBreak &b, const char *op)
+{
+	if ( ! b.cancelled() ) return sPtr<pigData>();
+	char m[160];
+	::snprintf(m, sizeof m, "%s: aborted (interrupted)", op ? op : "openvdb");
+	return sPtr<pigData>(vda_err(m));
+}
 
 #endif

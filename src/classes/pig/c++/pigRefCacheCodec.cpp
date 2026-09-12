@@ -56,16 +56,29 @@ static const pigModuleType pig_builtin_provides[] = {
 	{ 0, 0, 0 },
 };
 
+/* ★ #3466 (2026-08-31): **位置指定初期化子をやめて指定初期化子にした**。
+ *   旧コードは provides の次に「0 (hash_salt)」「0 (initialize)」と並べていたが、実際の
+ *   フィールド順は provides → hash_salt → arity → initialize なので、2 つめの 0 は
+ *   **arity に入っていた** (どちらも 0 なので実害は出ていなかっただけ)。
+ *   記述子はフィールドが増減すると位置指定が静かにずれるので、名前で書く。 */
 static const srava_module_descriptor pig_builtin_descriptor = {
-	SRAVA_MODULE_ABI, "pig", 0,
-	0 /*make_agent*/, 0u /*exec_caps*/, 0 /*exec_default*/,
-	0 /*ops*/, 0 /*n_ops*/,
-	0 /*import_exts*/, 0 /*export_exts*/,
-	pig_builtin_provides,  /* provides: 階層 × 型名 × 4CC (ABI v16) */
+	.abi_version   = SRAVA_MODULE_ABI,
+	.name          = "pig",
+	.priority      = 0,
+	.make_agent    = 0,
+	.exec_caps     = 0u,
+	.exec_default  = 0,
+	.ops           = 0,
+	.n_ops         = 0,
+	.import_exts   = 0,
+	.export_exts   = 0,
 	/* ★ 2026-08-28 (ABI v11): 旧 types/type_tags ("value,ref" / "TEXT,REF ") は撤去。
 	 *   非幾何型は libpig の pig_nongeometric_types が 1 本で持つ (全モジュール共通のため)。 */
-	0 /*hash_salt*/,
-	0,    /* initialize */
+	.provides      = pig_builtin_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+	.cache_version = 1,   /* ★ v18 (#3466): 結果の版 (手で上げる) */
+	.arity         = 0,
+	.initialize    = 0,
+	.configure     = 0,
 };
 
 const srava_module_descriptor *

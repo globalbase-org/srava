@@ -9,6 +9,11 @@
 #include	"d4/c++/d4Mesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d4aMerge_.h"
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] d4/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(d4a_err, "d4")
+
 
 CLASS_TINYSTATE(d4/c++/d4aMerge,pig/c++/ptsCalcBody)
 
@@ -68,12 +73,12 @@ d4aMerge_::compute()
 	sPtr<d4Mesh> a = ( na > 0 ) ? sPtr<d4Mesh>::d_cast((*args)[0]) : sPtr<d4Mesh>();
 	sPtr<d4Mesh> b = ( na > 1 ) ? sPtr<d4Mesh>::d_cast((*args)[1]) : sPtr<d4Mesh>();
 	if ( ! a.is_notNull() || ! b.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("merge: needs two d4 meshes"))));
+		result = d4a_err(thNEW(stdString,("merge: needs two d4 meshes")));
 		return;
 	}
 	mesh = d4Mesh::merge(a, b);
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("merge: failed"))));
+		result = d4a_err(thNEW(stdString,("merge: failed")));
 }
 
 sPtr<pigData>

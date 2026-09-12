@@ -104,7 +104,7 @@ raise_fd_limit(void)
  *   ★ 出すのは記述子そのもの (推測も要約もしない)。sig は長いものがあるが折り返さない —
  *     grep で拾えることのほうが揃って見えることより大事。 */
 static void
-print_module_detail(const srava_module_descriptor *d)
+print_module_detail(const srava_module_descriptor *d, const char *cache_salt)
 {
 	/* ★ 実行方式。exec_caps は **できること** の bitmask、exec_default は **既定でどちらを使うか**。
 	 *   2 つは別物 — caps に THREAD があっても既定が PROCESS ということはある (cgal がそれ)。
@@ -121,23 +121,72 @@ print_module_detail(const srava_module_descriptor *d)
 		         : ( d->exec_default & EXEC_PROCESS ) ? "process" : "-",
 		         d->make_agent ? "yes" : "no");
 	}
-	::printf("    arity=%d  import=%s  export=%s  hash_salt=%s  initialize=%s  configure=%s\n",
-	         d->arity,
+	/* ★ #3503: 撤収の猶予。**記述子の申告値**を出す (module(so,{grace/panic}) や env での
+	 *   上書きはここに現れない — この表示は「その .so が何と言っているか」であって
+	 *   実行時の実効値ではない。実効値は registry が env > module() > 記述子 で解決する)。
+	 *     grace: 0=即kill / >0=その ms だけ待って kill / -1=graceful のみ (kill しない)
+	 *     panic: 0=無効 / >0=in-proc で居座ったとき planner を abort するまでの ms */
+	{
+		char g[32], pn[32];
+		if ( d->grace_ms < 0 ) ::snprintf(g,  sizeof g,  "graceful-only");
+		else if ( d->grace_ms == 0 ) ::snprintf(g, sizeof g, "0(kill at once)");
+		else ::snprintf(g,  sizeof g,  "%dms", d->grace_ms);
+		if ( d->panic_ms > 0 ) ::snprintf(pn, sizeof pn, "%dms", d->panic_ms);
+		else ::snprintf(pn, sizeof pn, "off");
+		::printf("    grace=%s  panic=%s\n", g, pn);
+	}
+	::printf("    arity=%d  cache_version=%d  import=%s  export=%s  initialize=%s  configure=%s\n",
+	         d->arity, ( d->cache_version > 0 ) ? d->cache_version : 1,
 	         ( d->import_exts && d->import_exts[0] ) ? d->import_exts : "-",
 	         ( d->export_exts && d->export_exts[0] ) ? d->export_exts : "-",
-	         d->hash_salt ? "yes" : "no",
 	         d->initialize ? "yes" : "no",
 	         d->configure  ? "yes" : "no");
+	/* ★ #3466 (ABI v17): 旧 hash_salt=yes/no は撤去。記述子は申告しなくなり、レジストリが
+	 *   「モジュール名 + その .so の指紋 (size/mtime)」から作る。yes/no より **実際の値**の
+	 *   ほうが切り分けに使える (このモジュールだけ .so を差し替えたか、が読める)。
+	 *   先頭と区切りの \x01 は表示できないので "|" に置き換えて出す。 */
+	{
+		char shown[160];
+		size_t o = 0;
+		for ( const char *p = ( cache_salt ? cache_salt : "" ) ; *p && o + 1 < sizeof shown ; ++p )
+			shown[o++] = ( (unsigned char)*p == 0x01 ) ? '|' : *p;
+		shown[o] = '\0';
+		::printf("    cache_salt=%s\n", o ? shown : "-");
+	}
 
 	/* op 表: 名前 / sig / 引数の形。★ routing は sig で決まるので sig を主役にする。 */
 	::printf("    ops (%d):\n", d->n_ops);
 	for ( int i = 0 ; i < d->n_ops ; ++i ) {
 		const pigOpEntry &e = d->ops[i];
-		::printf("      %-18s nin=%d%s%s%s wire=%d\n", e.op ? e.op : "(null)", e.nin,
+		/* ★ #3469: 配線は **スロットごとの候補列** なので、個数ではなく中身を出す。
+		 *   [cgMesh]           スロット 1 個・候補 1
+		 *   [cgMesh][cgMesh]   スロット 2 個 (union など)
+		 *   [cgMesh|vdGrid]    スロット 1 個・候補 2 (export_vox)
+		 *   ⚠ 数えるのは AK_CACHE の引数だけ (AK_INLINE の値引数は位置に入らない)。
+		 *     可変長 op の尾部は **最後のスロットが繰り返す**。 */
+		char wbuf[256];
+		{
+			size_t o = 0;
+			const pigOpWiring *w = e.wiring;
+			if ( w == 0 || w->nwant <= 0 || w->want == 0 ) {
+				::snprintf(wbuf, sizeof wbuf, "-");
+			} else {
+				for ( int sI = 0 ; sI < w->nwant && o + 2 < sizeof wbuf ; ++sI ) {
+					const pigWireClass* const* slot = w->want[sI];
+					o += (size_t)::snprintf(wbuf + o, sizeof wbuf - o, "[");
+					for ( int k = 0 ; slot != 0 && slot[k] != 0 && o + 2 < sizeof wbuf ; ++k )
+						o += (size_t)::snprintf(wbuf + o, sizeof wbuf - o, "%s%s",
+						                        k ? "|" : "",
+						                        slot[k]->name ? slot[k]->name : "?");
+					o += (size_t)::snprintf(wbuf + o, sizeof wbuf - o, "]");
+				}
+			}
+		}
+		::printf("      %-18s nin=%d%s%s%s wire=%s\n", e.op ? e.op : "(null)", e.nin,
 		         e.variadic    ? " variadic"    : "",
 		         e.commutative ? " commutative" : "",
 		         e.vtail_value ? " vtail=value" : "",
-		         ( e.wiring != 0 ) ? e.wiring->nwant : 0);
+		         wbuf);
 		::printf("        sig = %s\n", e.sig ? e.sig : "(none - this op is not routable)");
 	}
 
@@ -300,7 +349,7 @@ main(int argc, char** argv)
 			::printf("%s  (abi=%d prio=%d %s)\n", d->name ? d->name : "(null)",
 			         d->abi_version, d->priority,
 			         ( path != 0 && path[0] != '\0' ) ? path : "(built-in)");
-			print_module_detail(d);
+			print_module_detail(d, reg->cache_salt(id));
 			::printf("\n");
 			++shown;
 		}

@@ -62,11 +62,11 @@ cgaVolume_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("volume: needs a mesh")));
 		return;
 	}
 	if ( in->dim() != 3 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: 2D has no volume (use area)"))));
+		result = cga_err(thNEW(stdString,("volume: 2D has no volume (use area)")));
 		return;
 	}
 	result = thNEW(pigDataFloat,(in->op_volume()));

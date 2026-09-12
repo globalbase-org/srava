@@ -68,7 +68,7 @@ mfaRect_::compute()
 	double w = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	if ( w <= 0.0 || h <= 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("rect: width and height must be positive"))));
+		result = mfa_err(thNEW(stdString,("rect: width and height must be positive")));
 		return;
 	}
 	cross = mfCross::rect(w, h);

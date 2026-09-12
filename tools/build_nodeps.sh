@@ -17,11 +17,22 @@ BLD="${2:?build dir not given}"
 shift 2
 
 rm -rf "$BLD"
+# ⚠ **外部依存を持つ option は 1 つ残らずここに書くこと** (2026-08-31)。
+#   既定値に頼ってはいけない: geogram / openvdb / occt / cherchi は既定 OFF だったので
+#   書かなくても済んでいたが、既定 ON になった瞬間、この「依存なし構成」が
+#   **geogram と OpenVDB を取得してビルドし、OCCT を要求する**状態に静かに変わった
+#   (テストは名前どおりのものを見なくなり、所要も倍以上に伸びた)。
+#   ★ 新しくモジュール option を足したら、既定がどちらであっても必ずここへ追加する。
 cmake -S "$SRC" -B "$BLD" \
   -DSRAVA_MODULE_CGAL=OFF \
   -DSRAVA_MODULE_NEF=OFF \
   -DSRAVA_MODULE_MANIFOLD=OFF \
   -DSRAVA_MODULE_PIPEPROX=OFF \
+  -DSRAVA_MODULE_GEOGRAM=OFF \
+  -DSRAVA_MODULE_OPENVDB=OFF \
+  -DSRAVA_MODULE_OCCT=OFF \
+  -DSRAVA_MODULE_CHERCHI=OFF \
+  -DSRAVA_MANIFOLD_PAR=OFF \
   "$@" > "$BLD.configure.log" 2>&1 || {
 	echo "FAIL: configure failed (依存なし構成)"; tail -30 "$BLD.configure.log"; exit 1; }
 

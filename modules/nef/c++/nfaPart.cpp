@@ -72,7 +72,7 @@ nfaPart_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("part: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("part: needs a Nef mesh")));
 		return;
 	}
 	int idx = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;
@@ -80,12 +80,12 @@ nfaPart_::compute()
 	if ( idx < 0 || idx >= n ) {
 		char b[160];
 		::snprintf(b, sizeof b, "part: index %d is out of range (the mesh has %d part(s))", idx, n);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
 	mesh = in->op_part(idx);
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("part: could not extract the part"))));
+		result = nfa_err(thNEW(stdString,("part: could not extract the part")));
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

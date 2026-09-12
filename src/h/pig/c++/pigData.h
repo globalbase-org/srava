@@ -107,6 +107,8 @@ public:
   /* 致命エラーか (planner が in-flight agent を即撤収するか drain するかの判断)。
    * is_error と対の多態述語 (pigDataError が override)。 */
   virtual int is_fatal() { return 0; }
+  /* ★ #3503: in-proc の実行体が destroy に応じない要求 (PE_PANIC)。基底は偽。 */
+  virtual int is_panic() { return 0; }
   /* エラーの **生メッセージ** (前置なし)。ワイヤ/表示の整形をしない素の本文で、pigDataError が
    * override して msg を返す。既定は get_str()。d_cast を使わず多態で取るための述語対
    * (is_cache と同じ流儀。#3406 / 2026-07-30 メモ L651: Mediator が符号化に使う)。
@@ -267,18 +269,57 @@ public:
 };
 
 /* エラーは吸収元: あらゆる演算で自分を返す。各演算から is_error() 分岐を排除するための要。 */
+/* ★ #3475: エラーの **属性**。旧 `int fatal` (0/1) では [DERIVED] を表現できないので enum にした。
+ *   3 つは **排他** (1 つのエラーはちょうど 1 つ・ひさ確定 2026-09-05) なのでビットではない。
+ * ⚠ PE_FATAL = 1 は意図的。既存の `thNEW(pigDataError,(msg, info, 1))` が数十箇所あり、
+ *   そのまま「fatal」の意味で通る (引数の型を int のままにしてあるのはこのため。enum 型に
+ *   すると int からの暗黙変換が無く、既存の呼び出しが一斉にコンパイルエラーになる)。 */
+enum pigErrClass {
+  PE_NORMAL  = 0,   /* 既定。幾何の失敗等 -> drain (走り出した計算は完走させる)      */
+  PE_FATAL   = 1,   /* 確定的なプログラム/型エラー -> in-flight agent を即撤収  [FATAL]   */
+  PE_DERIVED = 2,   /* 前段のエラーの写し (プレースホルダ)。集約しない          [DERIVED] */
+  /* ★ #3503: in-proc の実行体が destroy に応じない。**planner が abort する要求**で、
+   * 幾何の失敗ではない。撤収そのものは PE_FATAL と同じく即時だが、行き着く先が違う —
+   * 子プロセスを持つ agent が 0 になった時点で planner が abort する (ptsMediatorInternal /
+   * cgptsPlanner の WAITAGENTS)。⚠ 殺せるスレッドが無いので、これ以外に抜ける道が無い。 */
+  PE_PANIC   = 3
+};
+
+/* 属性タグの文字列。★ 属性を **文言に載せる**のは wire を跨げる唯一の手段だから
+ * (agent プロセスが作ったエラーはテキストとしてパイプを渡るので、フィールドを足す方式だと
+ *  属性が落ちる)。⇒ 前置きの付与は **ctor 1 箇所**に寄せる (手で付けると必ず漏れる)。 */
+#define PIG_ERRTAG_FATAL	"[FATAL] "
+#define PIG_ERRTAG_DERIVED	"[DERIVED] "
+
 class pigDataError : public pigData {
 public:
-  /* fatal=1: **確定的なプログラム/型エラー**(mesh+mesh・未定義変数・引数不一致等)。待つ意味がないので
-   *   planner は in-flight agent を即撤収して終了する。fatal=0(既定): 幾何の失敗等は drain(走り出した
-   *   計算は完走させキャッシュ化)。 */
-  pigDataError(const char *msg, sPtr<pigInfo> i = thNULL, int fatal = 0);
-  pigDataError(sPtr<stdString> msg, sPtr<pigInfo> i = thNULL, int fatal = 0);
+  /* ★ #3475: 文言は **[TAG] module/op: message** の 3 段に統一する。
+   *     [TAG]    … 属性 (cls != PE_NORMAL のときだけ付く)。wire を渡るための表現
+   *     module   … どのカーネルが出したか (module != 0 のときだけ付く)
+   *     op: msg  … 既存の規約 (モジュール横断で定着済み)
+   *   組み立てはこの ctor だけが行う。呼び出し側は **自分のモジュール名を明示的に渡す**
+   *   (「いまどのモジュールを実行中か」をレジストリ/スレッドローカルに置く案は採らない —
+   *    in-proc では全モジュールが 1 プロセスに同居するので、隠れ状態は実行方式に依存して
+   *    壊れる。明示なら付け忘れても *名前が出ないだけ* で、*誤った名前が出ることはない*)。
+   * cls: pigErrClass の値。PE_FATAL は「待つ意味がない」ので planner が in-flight agent を
+   *   即撤収して終了する。PE_NORMAL (既定) の幾何の失敗等は drain。 */
+  pigDataError(const char *msg, sPtr<pigInfo> i = thNULL, int cls = PE_NORMAL, const char *module = 0);
+  pigDataError(sPtr<stdString> msg, sPtr<pigInfo> i = thNULL, int cls = PE_NORMAL, const char *module = 0);
   virtual int is_error() { return 1; }
-  virtual int is_fatal() { return fatal_; }
+  /* ★ 「前段の fatal の写し」は PE_DERIVED なので **偽**を返す。撤収は原因側が既に起動して
+   *   いるので、写し側が重ねて起動する必要はない (set_agentError の wake-all を二重に撃たない
+   *   という既存の作法と一致する)。 */
+  /* ★ #3503: PE_PANIC も **待つ意味が無い**点では PE_FATAL と同じなので真を返す
+   *   (in-flight agent の即撤収に乗せる)。行き着く先だけが違う — planner が
+   *   子プロセスを持つ agent の消滅を待って abort する。 */
+  virtual int is_fatal() { return cls_ == PE_FATAL || cls_ == PE_PANIC; }
+  virtual int is_panic() { return cls_ == PE_PANIC; }
+  int err_class() { return cls_; }
   virtual sPtr<stdString> get_str();
   sPtr<stdString> message() { return msg; }
-  virtual sPtr<stdString> error_message() { return msg; }   /* 生メッセージ(前置なし) */
+  /* ★ 位置前置き (ERROR[file,line]) の無いメッセージ。**[TAG] は含む** —
+   *   これが wire を渡る文字列そのもので、受け側はタグを見て属性を復元する。 */
+  virtual sPtr<stdString> error_message() { return msg; }
 
 #define PE1(n)   virtual sPtr<pigData> n(sPtr<pigData>) { return thThis; }
 #define PE0(n)   virtual sPtr<pigData> n() { return thThis; }
@@ -304,7 +345,7 @@ public:
 #undef PEP
 protected:
   sPtr<stdString> msg;
-  int fatal_;
+  int cls_;        /* pigErrClass */
 };
 
 /* 制御フロー信号: return / break / continue。pigDataError を継承し、あらゆる演算を吸収して
@@ -525,6 +566,11 @@ public:
    *   friend の ptsDataCache_ だけが呼ぶ (型名で該当エントリを引く・無ければ無視)。 */
   void          conv_set_body(const char* type, sPtr<pigData> b);   /* 変換 body を該当エントリへ */
   void          conv_finish(const char* type);                      /* 該当エントリの done=1・helper=null */
+  /* ★ #3479: 実体化できなかった理由を該当エントリへ (conv_set_body と対。helper が完了時に書く)。 */
+  void          conv_set_error(const char* type, sPtr<stdString> why);
+  /* ★ #3479: 記録済みの失敗理由を集めて 1 本の文にする (無ければ thNULL)。
+   *   get_body が thNULL を返した後、呼び手 (ptsGenericAgent) が「なぜ」を出すために引く。 */
+  sPtr<stdString> load_error();
 private:
   friend class ptsDataCache_;   /* 専用 helper (実装クラス) だけが body/validState を直接操作する */
   enum { CV_UNKNOWN = 0, CV_VALID = 1, CV_INVALID = 2 };
@@ -543,6 +589,11 @@ private:
     sPtr<tinyState> helper;       /* 走行中の reader/writer helper (待ち手の listen 先)。完了で thNULL */
     int             done = 0;     /* helper 終了印 (型ごと) */
     int             isWriter = 0; /* 1 = set_body の writer helper (is_valid/is_complete が参照) */
+    /* ★ #3479: この型として実体化できなかった **理由**。従来は reader の errCode が
+     *   TSE_RETURN の msg_int に載るだけで、body が null になった時点で捨てられていた
+     *   (「形式は読めたが値が表現できない」と「codec が無い」を利用者が区別できなかった)。
+     *   拒否した本人 (モジュールの decode) が書いた一文をここまで運ぶ。 */
+    sPtr<stdString> why;
   };
   std::vector<ConvEntry> converted;
   int  conv_index(const char* type);    /* converted 中の型名一致エントリ index (無ければ -1) */
@@ -772,6 +823,14 @@ public:
   /* 演算子名(pigfAgent が C_OP で送り、cgatsAgent が dispatch する)。front 由来。 */
   void set_op_name(sPtr<stdString> n) { op_name = n; }
   sPtr<stdString> get_op_name() { return op_name; }
+  /* ★ #3467: `module::op(...)` のモジュール指名。**文字列に評価される式**を持つ
+   *   (リテラル "occt" も 変数 k も同じ形。評価は decide_out_module が compact して行う)。
+   *   ⚠ **args には入れない**。入れると compute_arg_hash の argHashes に混ざり、`""::op` の
+   *     キーが `op` と変わってしまう (#3467 の不変条件「キーは書かれ方でなく実際に何が
+   *     走ったかで決まる」が壊れる)。指名は routing の**絞り込み**であって引数ではない。
+   *   未指定は thNULL = 従来どおり planner が決める。 */
+  void set_module_expr(sPtr<pigData> m) { module_expr = m; }
+  sPtr<pigData> get_module_expr() { return module_expr; }
   /* この演算の出力がキャッシュ(mesh 等のハンドル)か値(インライン)か。pigfAgent が HIT/MISS とも
    * 一貫して結果型を決めるのに使う(HIT は agent 不起動なので planner 単独で判断が要る)。
    * 将来はパーサ/dispatch が op シグネチャから設定。既定 0 = 値(インライン)。 */
@@ -801,11 +860,16 @@ protected:
     for ( int i = 0 ; i < args.length() ; ++i ) n->pushArg(args[i]->clone());
     n->op_name = op_name;
     n->out_cache = out_cache;
+    /* ★ #3467: モジュール指名も clone する。**deep clone** — 変数形 (k::box) はループ本体の
+     *   再評価ごとに別の値へ解決されるので、未評価テンプレートとして複製しないと
+     *   `for k in [...]` の 2 周目以降が 1 周目の解決結果を再利用してしまう。 */
+    n->module_expr = module_expr.is_notNull() ? module_expr->clone() : sPtr<pigData>(thNULL);
     n->info = info;   /* ソース位置(file,line)を clone に引き継ぐ(ループ/lambda 本体の再評価でも保つ) */
     return n;
   }
   sArray<sPtr<pigData> > args;
   sPtr<stdString> op_name;
+  sPtr<pigData> module_expr;   /* ★ #3467: `module::op` の指名 (文字列に評価される式)。thNULL = 未指定 */
   int out_cache = 0;
 };
 
@@ -998,6 +1062,49 @@ class pigDataOperatorModuleLoaded : public pigDataOperator {
 public:
   pigDataOperatorModuleLoaded(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModuleLoaded,())); }
+protected:
+  virtual void _start();
+};
+
+/* ★ #3477: 実行時の **内省** op 3 本。いまどのモジュールが載っていて、ある式がどのカーネルで
+ * 走るのかを **スクリプトから問える**ようにする (カーネルが混ざる式のデバッグで、毎回ソースを
+ * 読む必要があった)。エラー文にモジュール名を入れる #3475 が *事後*、この 3 本が *事前* の手段。
+ * ★ 実装は pigfModuleAgent.cpp — sig の解析 (parse_sigline) と型スタンプの読み方
+ *   (arg_type_set) がそこにあり、**dispatch と同じ判定**を使わないと内省の意味がないため。 */
+
+/* modules() — いま解決されているモジュールと priority を "name:priority" の空白区切りで返す。
+ * 並びは **priority 降順** (= dispatch が候補を見る順)・同点は登録順。module() の指定が
+ * 効いているかの確認に使う。 */
+class pigDataOperatorModules : public pigDataOperator {
+public:
+  pigDataOperatorModules(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModules,())); }
+protected:
+  virtual void _start();
+};
+
+/* type_of(x) — x の **幾何型名**を文字列で返す ("cg-mesh3d" / "mf-mesh3d" / "oc-brep3d" …)。
+ * 値は "value"。★ 型が 1 つに絞れていない上流 (polymorphic) では **候補を CSV で全部**返す
+ * (1 つ選んで見せると嘘になる)。式の途中でカーネルが変わったことを目で確認できる。 */
+class pigDataOperatorTypeOf : public pigDataOperator {
+public:
+  pigDataOperatorTypeOf(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorTypeOf,())); }
+protected:
+  virtual void _start();
+};
+
+/* which(op [, intype...]) — その op を宣言しているモジュールを **priority 順に全部**返す
+ * ("name:priority:sig" の空白区切り)。
+ * ★ op 名だけでは答えが 1 つに決まらない (同じ op 名でも **引数の型でディスパッチ先が変わる**:
+ *   cg-mesh3d が混じると manifold は候補から外れる — cgal は mf を食えるが manifold は cg を
+ *   食えない)。⇒ 「候補を priority 順に全部返す」形にして **なぜそれが選ばれたか**まで読めるようにする。
+ * 入力型を続けて渡すと、その型を **すべて**受理できる候補だけに絞る (type_of と組み合わせて
+ *   「型を見て → その型で誰が受けるかを見る」で追える)。 */
+class pigDataOperatorWhich : public pigDataOperator {
+public:
+  pigDataOperatorWhich(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorWhich,())); }
 protected:
   virtual void _start();
 };

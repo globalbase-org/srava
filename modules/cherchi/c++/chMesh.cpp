@@ -6,7 +6,11 @@
  *   `-frounding-math` (IEEE 754 準拠が述語の前提) が要るので、巻き込む範囲は最小にしてある。
  */
 #include	"ch/c++/chMesh.h"
+#include	"ch/c++/chArena.h"          /* #3481: op 内並列を task_arena で絞る */
+#include	"pig/c++/pigModuleRegistry.h"   /* #3481: モジュール専用スロット (設定の預け先) */
 #include	"ts2/c++/stdString.h"
+#include	"common/affine.h"        /* アフィン変換の共通規約 (#3486) */
+#include	"common/meshprops.h"     /* bbox / centroid / area / valid (#3487) */
 #include	"common/exact_wire.h"   /* cgal 厳密 wire の有理数文字列パーサ (manifold と共通) */
 
 #include	<stdio.h>
@@ -37,6 +41,71 @@ chMesh::add_triangle(int a, int b, int c)
 {
 	tris_.push_back((uint32_t)a); tris_.push_back((uint32_t)b); tris_.push_back((uint32_t)c);
 }
+
+/* ---- アフィン変換 (行優先 double[12] = 3x4) — #3486 ----------------------------
+ * 座標は素の double 配列なので全頂点に掛けるだけ。
+ * ⚠ 反射 (det<0) では面の向きが裏返るので **三角形の頂点順を入れ替える**。IRMB は面の
+ *   向きで label の内外を決めるため、直さないと裏返った立体 (volume() が負) を黙って返す。 */
+sPtr<chMesh>
+chMesh::apply_affine(const double e[12])
+{
+	sPtr<chMesh> out = thNEW(chMesh,());
+	out->tris_   = tris_;
+	out->coords_ = coords_;
+	std::vector<double> &c = out->coords_;
+	for ( size_t i = 0 ; i + 2 < c.size() ; i += 3 ) {
+		double o[3];
+		srava_affine::xform_point(e, c[i], c[i+1], c[i+2], o);
+		c[i] = o[0]; c[i+1] = o[1]; c[i+2] = o[2];
+	}
+	if ( srava_affine::det3(e) < 0.0 ) {
+		std::vector<uint32_t> &t = out->tris_;
+		for ( size_t i = 0 ; i + 2 < t.size() ; i += 3 ) {
+			uint32_t tmp = t[i+1]; t[i+1] = t[i+2]; t[i+2] = tmp;
+		}
+	}
+	return out;
+}
+
+
+/* ---- 素性を訊く op (#3487) — 中身は common/meshprops.h ------------------------
+ * ★ chMesh は素の座標配列と三角形配列を持つので、そのまま TriView で渡せる。 */
+static srava_mesh::TriView ch_view(const std::vector<double>& c, const std::vector<uint32_t>& t)
+{
+	return srava_mesh::TriView(c.empty() ? 0 : &c[0], (int)(c.size()/3),
+	                           t.empty() ? 0 : &t[0], (int)(t.size()/3));
+}
+
+int
+chMesh::op_bbox(double mn[3], double mx[3]) const
+{
+	srava_mesh::TriView v = ch_view(coords_, tris_);
+	srava_mesh::bbox(v, mn, mx);
+	return 3;
+}
+
+int
+chMesh::op_centroid(double c[3]) const
+{
+	srava_mesh::TriView v = ch_view(coords_, tris_);
+	srava_mesh::centroid(v, c);
+	return 3;
+}
+
+double
+chMesh::op_area() const
+{
+	srava_mesh::TriView v = ch_view(coords_, tris_);
+	return srava_mesh::area(v);
+}
+
+int
+chMesh::op_valid() const
+{
+	srava_mesh::TriView v = ch_view(coords_, tris_);
+	return srava_mesh::valid(v);
+}
+
 
 double
 chMesh::volume() const
@@ -156,6 +225,40 @@ chMesh::op_bool_nary(sArray<sPtr<chMesh> >& ops, const char *kind, char *err, in
 	else
 		return sPtr<chMesh>();
 
+	/* ★ #3474 続き (2026-09-05): **空オペランドを集合演算として先に畳む**。
+	 *   空メッシュは三角形を 1 つも足さないので、そのまま booleanPipeline へ流すと
+	 *   「そのオペランドは最初から無かった」ことになり、
+	 *       intersection(box, empty3d()) が **box** になってしまう
+	 *   (= 空集合を fold の中立元 `{}` と取り違える)。empty3d() は **値としての空集合**なので
+	 *   ここで正しく畳む。⚠ empty3d() 以外にも、差で丸ごと消えた中間結果など空は普通に出る。
+	 *   ★ 他カーネル (cgal / manifold / geogram / nef / occt) は素で正しい値を返す
+	 *     — ソウプ + label 方式の cherchi だけがこの取り違えを起こす。 */
+	{
+		sArray<sPtr<chMesh> > kept;
+		int dropped = 0;
+		for ( int i = 0 ; i < n ; ++i ) {
+			const int empty = ops[i]->tris().empty() ? 1 : 0;
+			if ( empty && op == INTERSECTION )            return thNEW(chMesh,());  /* A ∩ ∅ = ∅ */
+			if ( empty && op == SUBTRACTION && i == 0 )   return thNEW(chMesh,());  /* ∅ \ A = ∅ */
+			if ( empty ) { dropped = 1; continue; }   /* A ∪ ∅ = A / A \ ∅ = A */
+			kept.length(kept.length() + 1);
+			kept[kept.length() - 1] = ops[i];
+		}
+		if ( dropped ) {
+			if ( kept.length() == 0 ) return thNEW(chMesh,());   /* 全部空 */
+			if ( kept.length() == 1 ) {                          /* 1 個だけ残った = それが答え */
+				sPtr<chMesh> only = thNEW(chMesh,());
+				only->coords() = kept[0]->coords();
+				only->tris()   = kept[0]->tris();
+				return only;
+			}
+			/* ⚠ sArray は代入不可 (コピー代入が delete) なので中身を詰め直す。 */
+			n = kept.length();
+			ops.length(n);
+			for ( int i = 0 ; i < n ; ++i ) ops[i] = kept[i];
+		}
+	}
+
 	/* 全オペランドを 1 本のソウプへ連結し、三角形ごとに label (= オペランド番号) を振る。 */
 	std::vector<double> in_coords;
 	std::vector<uint>   in_tris, in_labels;
@@ -174,8 +277,14 @@ chMesh::op_bool_nary(sArray<sPtr<chMesh> >& ops, const char *kind, char *err, in
 	std::vector<double>              bool_coords;
 	std::vector<uint>                bool_tris;
 	std::vector<std::bitset<NBIT> >  bool_labels;
+	/* ★ #3481: op 内並列は IRMB が tbb::parallel_for で直に持つ (上流にスイッチが無い) ので、
+	 *   カレント arena を差し替えて絞る。guard が **外側**なのは、TBB がワーカーの例外を
+	 *   execute() の呼び出し元で rethrow するため (そこを受けられる位置に置く)。
+	 *   ⚠ **cherchi で TBB に触れるのはこの 1 箇所だけ** (chArena.h の但し書き参照)。 */
 	if ( ! ch_guard([&]{
-		booleanPipeline(in_coords, in_tris, in_labels, op, bool_coords, bool_tris, bool_labels);
+		ch_in_arena([&]{
+			booleanPipeline(in_coords, in_tris, in_labels, op, bool_coords, bool_tris, bool_labels);
+		});
 	}, err, errsz) )
 		return sPtr<chMesh>();
 
@@ -392,4 +501,70 @@ chGeom::create_for_meta(const uint8_t *meta, int len)
 		return sPtr<chGeom>::d_cast(m);
 	}
 	return sPtr<chGeom>();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * ★ #3481: op 内並列のスレッド予算 — module("cherchi.so",{threads:N})
+ *
+ * ★★ 設定値を **file-scope static に置かない** (ひさ設計 2026-08-26)。モジュールは in-proc で
+ *   走りうるので、可変な static は op どうしで混線する。「そのモジュールにひとつ」で正しい
+ *   状態は pigModuleRegistry の **モジュール専用スロット** に stdObject 派生として預ける。
+ *   ★ 素の幾何クラスは ptsObject 派生ではないが、pig_current_registry() が sCallSection の
+ *     TLS から辿ってくれるので ABI は変えずに済む (geogram の gg_data と同じ形)。
+ * ═══════════════════════════════════════════════════════════════════════ */
+namespace {
+class chModuleData : public stdObject {
+public:
+	chModuleData() { opThreads = 0; }
+	int	opThreads;   /* module(so,{threads:N})。0 以下 = 未指定/解除 (TBB 既定のまま) */
+};
+
+/* このモジュールの預かり物を引く (create=1 なら無ければ作って預ける)。
+ * ⚠ 呼び出し文脈が取れないと registry は thNULL。そのときは thNULL を返し、呼び手は
+ *   「設定が無い」と同じ扱いにする (勝手に既定を変えない)。
+ * ★ cherchi は libsrava_ch を独占する単一モジュールなので、geogram のような
+ *   「共有ライブラリを別モジュールが読む」事情は無い。 */
+sPtr<chModuleData>
+ch_data(int create)
+{
+	sPtr<pigModuleRegistry> reg = pig_current_registry();
+	if ( reg == thNULL )
+		return sPtr<chModuleData>();
+	int id = reg->id_of_name(CH_MODULE_NAME);
+	if ( id < 0 )
+		return sPtr<chModuleData>();
+	sPtr<chModuleData> d = sPtr<chModuleData>::d_cast(reg->module_data(id));
+	if ( d == thNULL && create ) {
+		d = thNEW(chModuleData,());
+		reg->set_module_data(id, d);
+	}
+	return d;
+}
+}  /* namespace */
+
+/* chArena.h の宣言に対する実体。op の計算入口 (booleanPipeline) が読む。 */
+int
+ch_op_thread_budget(void)
+{
+	sPtr<chModuleData> d = ch_data(0);
+	return ( d != thNULL ) ? d->opThreads : 0;
+}
+
+/* ★ module("cherchi.so",{threads:N}) の受け口 (記述子の .configure)。
+ * ⚠ configure は **module() が実行されるたびに 1 回**呼ばれるだけで、op ごとには呼ばれない。
+ *   なので値を預けておき、各 op が計算の入口で ch_in_arena() 経由で読む。
+ * ★ 意味論はモジュール横断で統一: N>0 = **op あたり**の上限 / N<=0 = 指定なし (既定へ戻す)。
+ *   「未指定 (キーが無い)」と「明示的に 0 以下」は区別しない — どちらも「制限を解除する」。
+ * ★ 既定は変えない — threads 未指定なら IRMB は従来どおり TBB の既定 (コア数) で走る。 */
+void
+chMesh::configure(sPtr<pigData> opts)
+{
+	if ( opts == thNULL )
+		return;
+	sPtr<chModuleData> d = ch_data(1);
+	if ( d == thNULL )
+		return;   /* 呼び出し文脈が取れない = 預け先が無い。設定は取り込まない */
+	sPtr<pigData> t = opts->get_ix(thNEW(pigDataString,("threads")));
+	if ( t.is_notNull() && ! t->is_error() )
+		d->opThreads = (int)t->get_int();   /* n<=0 も含めてそのまま保持 (「既定へ戻す」に使う) */
 }

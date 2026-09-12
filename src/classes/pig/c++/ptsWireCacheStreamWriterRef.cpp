@@ -82,3 +82,14 @@ TS_STATE(INI_ptsWireCacheStreamWriter_INIT)   /* D_META"REF " + D_REF を 1 レ�
 	 * 無いことを検知して CV_INVALID にする(黙って空レコードを書くより素直)。 */
 	return rDO|INI_ptsWireCacheStreamWriter_DONE;
 }
+
+/* ★ §9 (2026-09-04): 書き終えたら本体を手放す。
+ * ⚠ ZOM に入ってもこの状態機械は tsThread のワーカーに握られたまま残ることがある
+ *   (__tsThread_body の prev_target が「最後に走らせた仕事」を保持するため)。
+ *   ここで落とさないと **本体がそのぶん常駐する**。基底の FIN_START はこの 1 行が
+ *   無いだけなので、上書きして基底の後片付けへ chain する。 */
+TS_STATE(FIN_START)
+{
+	_body = thNULL;
+	return rDO|FIN_ptsWireCacheStreamWriter_START;
+}

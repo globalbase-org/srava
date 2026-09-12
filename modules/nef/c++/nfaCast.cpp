@@ -65,7 +65,7 @@ nfaCast_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cast: needs a mesh"))));
+		result = nfa_err(thNEW(stdString,("cast: needs a mesh")));
 		return;
 	}
 	mesh = in;

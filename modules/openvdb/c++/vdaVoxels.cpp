@@ -7,6 +7,7 @@
 #include	"vd/c++/vdGrid.h"
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"ts2/c++/stdString.h"
+#include	<string>
 #include	"_ts2/c++/vdaVoxels_.h"
 
 CLASS_TINYSTATE(vd/c++/vdaVoxels,pig/c++/ptsCalcBody)
@@ -62,13 +63,18 @@ vdaVoxels_::compute()
 {
 	/* ★ #3441: op 内並列 (TBB) は **op あたり**の予算で走らせる。予算未指定なら素通し。
 	 *   ⚠ 包み忘れるとその op だけ無制限になるので、compute() 単位で一律に包む。 */
-	vd_in_arena([&]{
+	std::string vdwhy;
+	/* ★ #3474 続き: 例外境界。openvdb が投げると受け手が無く、ワーカースレッド
+	 *   由来なら agent ごと死ぬ (vdArena.h の vd_arena_guard 参照)。 */
+	if ( ! vd_arena_guard("voxels", [&]{
+
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("voxels: needs an openvdb grid"))));
+		result = vda_err(thNEW(stdString,("voxels: needs an openvdb grid")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->active_voxels()));
-	});
+	}, vdwhy) )
+		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

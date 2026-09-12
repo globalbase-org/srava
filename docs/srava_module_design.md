@@ -63,15 +63,28 @@ struct srava_module_descriptor {
     // --- 型と本体クラス (§4・幾何モジュールのみ) ---
     const pigModuleType*       provides; // 階層 × 型名 × 4CC (wire==0 番兵終端)。0 可
 
-    // --- キャッシュキーソルト (#3427) ---
-    const char*       hash_salt;     // 出力キャッシュのキーに混ぜる弁別バイト列 (manifold="\x01MFM")。
-                                     // 基準カーネル cgal は 0 = ソルト無し (既存キーを byte 不変に保つ)
+    // --- 結果の版 (v18・#3466) ---
+    int               cache_version; // **このモジュールが出す結果の版**。出力キャッシュのキーに混ざる。
+                                     // 0 と 1 は同じ意味 (未設定 = 1)。**計算を変えたら手で上げる**。
+                                     // ソルト本体 (モジュール名 + この版) はレジストリが組む
+                                     // (旧 hash_salt は v17 で撤去 — 記述子が弁別バイト列を
+                                     //  申告する形をやめた)。
 
     // --- 項数ポリシー (v9・#3436 P4・§5.2) ---
     int               arity;         // N' = 1 ノードあたり受け取りたい**最大**項数。0 = 未指定 = 2 (二項)。
                                      // 実項数 k = min(N', op の sig が申告する N, 群の執行者が許す最大)。
                                      // module(so,{arity:k}) で上書き可。capability (op ごと・正しさ) と
                                      // policy (モジュールごと・つまみ) の分離がこの設計の核
+
+    // --- 撤収の猶予 (v23 / v24・#3503) ---
+    int               grace_ms;      // **プロセス実行**で中断要求 (EOF) に応じないときの猶予。
+                                     //   0 = 即 kill (既定) / >0 = この ms 待って kill (推奨 500) /
+                                     //  -1 = タイマを張らない (**必ず自分で畳まれる**と宣言した
+                                     //       モジュールだけ)。in-proc には kill 経路が無いので無効
+    int               panic_ms;      // **in-proc** で居座ったとき planner を abort するまでの猶予。
+                                     //  <=0 = 無効 (既定) / >0 = この ms 待って abort。
+                                     //  grace_ms と **対**: 同じモジュールでも process なら grace_ms、
+                                     //  in-proc なら panic_ms を使う
 
     // --- フック (0 可) ---
     void (*initialize)(void);        // §7。**そのモジュールの最初の agent が起きるときに 1 回だけ**。
@@ -86,7 +99,8 @@ struct srava_module_descriptor {
 SRAVA_MODULE_EXPORT const srava_module_descriptor* srava_module(void);   // .so の唯一の export
 ```
 
-- **現行 ABI バージョン = `SRAVA_MODULE_ABI`（= 5）**。`abi_version` フィールドに必ず `SRAVA_MODULE_ABI` を
+- **現行 ABI バージョン = `SRAVA_MODULE_ABI`**（実体は `pig/c++/pigModule.h` が定義。記述子の構造が
+  変わるたびに上がる）。`abi_version` フィールドに必ず `SRAVA_MODULE_ABI` を
   入れる。host は dlopen 時にこれを検査し、不一致の `.so` は拒否する（構造体レイアウトの取り違えを防ぐため
   version は文字列でなく C++ 構造体で固定）。
 - **エントリシンボルは `srava_module`**（`SRAVA_MODULE_SYM`）。ローダは `dlsym(so, "srava_module")` でこの関数を
@@ -133,6 +147,7 @@ struct pigOpEntry {
     const char*       sig;       // 幾何型シグネチャ。値 op は 0 可 (書式は下の §3.1)
     int               commutative;  // 1 = 可換 (union/intersection/combine)。木の形とキー正規化が見る
     int               vtail_value;  // 可変部の種別: 0 = 幾何 (既定) / 1 = 値
+    int               nreq;         // 必須引数の個数。0 = 既定 = 「nin 個すべて必須」
 };
 ```
 
@@ -142,6 +157,20 @@ struct pigOpEntry {
 - **引数種別 `pigArgKind`**: `AK_INLINE`（値リテラル・構造値をそのまま受ける）/ `AK_CACHE`（上流 op の結果を
   指す cache ハンドル = mesh などの重い本体を reader で読む）。`out` も同じ 2 値で、mesh を produce する op は
   `AK_CACHE`、数値・配列など**値**を返す op は `AK_INLINE`。
+- **`nreq`（必須引数の個数）** = 「後ろから何個まで省略してよいか」の申告。`0`（既定）は
+  「`nin` 個すべて必須」なので、省略可能な引数を持たない op は書かなくてよい。
+  引数の検査は `n > nin` → 多すぎ / `n < nreq`（`nreq=0` なら `n < nin`）→ 少なすぎ、で、
+  その間は通る。
+  ★ **省略された引数の既定値は計算本体（`compute()`）が入れる**。記述子が言うのは「省略してよいか」
+  だけで、値は言わない。⇒ **同じ op 名でもモジュールごとに違ってよい**のが要点:
+
+  | | 第 2 引数 | 省略 |
+  |---|---|---|
+  | メッシュ系の `sphere(r, seg)` | 円周分割数 | **できる**（`nreq=1`・既定は op が入れる） |
+  | `openvdb` の `sphere(r, dx)` | ボクセルサイズ | **できない**（`nreq=0` = 全部必須） |
+
+  > ⚠ パーサ側で既定値を埋めてはいけない。パーサは **どのモジュールが実行するか知らない**
+  > （ディスパッチは評価時）ので、どちらの意味の第 2 引数かを判断できない。
 - **`sig`（幾何型シグネチャ）** = planner の型ディスパッチが使う中核。複数シグネチャは `;` 区切り。
   列挙するのは**幾何型（mesh）入力のみ**（スカラ/値の inline 引数は型を持たないので省略）。
   出力が値（体積・面積・bool 等）の op は `->value`。planner は `(op, 入力型[])` を直接この表に照合して
@@ -517,15 +546,66 @@ static sPtr<myModuleData> my_data()
 安全網 それでも漏れた例外は **ホスト側が受け止める** (2026-08-26)。ただしこれは最後の砦であって、
        モジュールが catch しない理由にはならない (どの op で何が起きたかはモジュールしか知らない)。
 理由の置き場 ⚠ **static に溜めない**。呼び手が用意したバッファへ書く (§5.3 と同じ理由)。
-限界   ⚠ **ワーカースレッドから投げられた例外は捕まえられない** (geogram が実際にそう投げる)。
+限界   ⚠ **ワーカースレッドから投げられた例外は、素朴には捕まえられない** (geogram が実際にそう投げる)。
        この場合 agent は terminate → SIGABRT で死ぬが、**理由は読める** — 下記のとおり
        agent の stderr を拾ってエラー文に載せているため。
+       ★ ただし **並列ランタイムが TBB なら捕まえられる**: TBB はワーカーで投げられた例外を
+       捕まえて `task_arena::execute()` の呼び出し元で rethrow するので、**全 op が必ず通る
+       1 箇所**を try で包めば op 内並列からの throw も受けられる (openvdb がこの形)。
 ```
+
+★ **境界は「op ごとに書き足す」のではなく「全 op が必ず通る 1 箇所」に置く**。op ごとだと
+必ず付け忘れが出る。openvdb 系は TBB 予算のスコープヘルパ (`vd_arena_guard`) が全 op の入口に
+あるので、そこに例外境界を兼ねさせている。
 
 ★ **agent の stderr はエラー文に出る**。`ptsErrSink` が溜め、mediator が「子の終了状態 + stderr + wire」を総合して理由を組み立てる。
 ⇒ **モジュールが黙って落ちても、リンクしたライブラリの言い分がそのまま利用者に届く**（モジュール非依存）。
 
 ★ **利用者に出る文字列は英語で書く**（コメントは日本語のままでよい）。→ `CONTRIBUTING.md`
+
+### 5.5 エラー文言の形 — `[TAG] module/op: message`
+
+エラーの文言は 3 段に統一する。組み立ては `pigDataError` の **コンストラクタ 1 箇所**が行う。
+
+```
+[FATAL] cgal/union: boolean failed. Operands must be closed solids ...
+ ^       ^    ^      ^
+ |       |    |      +-- 既存の "op名: ..." 規約
+ |       |    +--------- op 名
+ |       +-------------- **どのモジュールが出したか**
+ +---------------------- 属性タグ (省略可)
+```
+
+- **モジュール名**が要るのは、**式の中でカーネルが混ざるのは正常な動作**だから。名乗らないと
+  「manifold を既定にしていたのに cgal のエラーが出た」を利用者が追えない。
+- モジュール名は **コンストラクタへ明示的に渡す**。「いま実行中のモジュール」をレジストリや
+  スレッドローカルに持つ案は採らない — in-proc では全モジュールが 1 プロセスに同居するので、
+  隠れ状態は実行方式に依存して壊れる。明示なら付け忘れても **名前が出ないだけ**で、
+  **誤ったモジュール名が出ることはない**。
+- 書き方はモジュールごとに生成子を 1 つ定義する（`pigModuleError.h` の `PIG_DEFINE_MODULE_ERR`）:
+
+```cpp
+PIG_DEFINE_MODULE_ERR(cga_err, CG_MODULE_NAME)   // ヘッダで 1 度だけ
+...
+result = cga_err(thNEW(stdString,("union: boolean failed")));
+result = cga_err(msg, info, PE_FATAL);           // 属性を付けるとき
+```
+
+  > ⚠ 生成子は **`static`** であること。nef は同一ソースから `nef_snc.so` / `nef_hybrid.so` の
+  > 2 つをビルドし名前だけが違うので、外部リンケージだとローダが両方を開いたときに
+  > 名前が入れ替わる。
+
+- **属性タグ**（`pigErrClass`）は 3 つで**排他**:
+
+  | 値 | 意味 | `is_fatal()` |
+  |---|---|---|
+  | `PE_NORMAL` | 既定。幾何の失敗など。走り出した計算は完走させる | 偽 |
+  | `PE_FATAL` | 確定的なプログラム/型エラー。in-flight agent を即撤収 | **真** |
+  | `PE_DERIVED` | 前段のエラーの写し（プレースホルダ） | 偽 |
+
+  タグを **文言に載せる**のは、agent のエラーがテキストとしてパイプを渡るため
+  （フィールドを足す方式だと wire で属性が落ちる）。★ **利用者向けの表示ではタグは落とす**
+  （`[FATAL]` は伝送のための表現で、読み手に見せる情報ではない）。モジュール名の前置は残す。
 
 ## 6. モジュール間の型変換（cross-module conversion）
 
@@ -693,27 +773,52 @@ sPtr<pigData> hello_compute(const char *op, sArray<sPtr<pigData> >& args) {
 //     STARTCALC で hello_compute(op, argv) を呼んで結果を outCache へ set する ...
 
 static const pigOpEntry HELLO_OPS[] = {
-    { "hello_add",   0, 0, AK_INLINE, 0, 1 },   // 値 op: in/sig 省略・variadic
-    { "hello_greet", 0, 0, AK_INLINE, 0, 1 },
+    // op, in, nin, out, wiring, variadic, sig, commutative, vtail_value, nreq
+    { "hello_add",   0, 0, AK_INLINE, 0, 1, "->value", 0, 1 },   // 値 op・可変部は **値**
+    { "hello_greet", 0, 0, AK_INLINE, 0, 1, "->value", 0, 1 },
 };
+// ⚠ 値を可変個取る op は **vtail_value=1 が要る**。既定 0 は「可変部は幾何 (AK_CACHE)」の意味で、
+//    値 op がそれを名乗ると planner の引数種別検査が正しい呼び出しを弾く (記述子の嘘)。
+// ⚠ pigOpEntry は **位置指定の初期化子**なので、新しいフィールドは常に末尾に足される。
+//    途中に挿げると int/0 互換で静かにずれる。
 static const int HELLO_N_OPS = (int)(sizeof(HELLO_OPS)/sizeof(HELLO_OPS[0]));
 
 static sPtr<ptsAgent> mk_helatsAgent(sPtr<ptsObject> med) { return thNEW(helatsAgent,(med)); }
-static const int helatsAgent_registered =
-    (pigAgentRegistry::register_agent("hello", &mk_helatsAgent), 0);
 
+// ★ 記述子は **指名初期化子**で書く。位置指定でも通るが、ABI が上がってフィールドが増えたときに
+//    静かにずれる (同型が並ぶので警告も出ない)。同梱モジュールは全部この書き方。
 extern const srava_module_descriptor helatsAgent_descriptor;
 extern const srava_module_descriptor helatsAgent_descriptor = {
-    SRAVA_MODULE_ABI, "hello", 0,                       // ABI / name / priority
-    &mk_helatsAgent, (unsigned)(EXEC_THREAD|EXEC_PROCESS), EXEC_THREAD,
-    HELLO_OPS, HELLO_N_OPS, 0, 0,                        // ops / import_exts / export_exts
-    0,                                                  // provides (値のみ)
-    0,                                                  // hash_salt (値だけなので不要)
-    0,                                                  // arity (0 = 未指定 = 二項)
-    0, 0,                                               // initialize / configure (使わない)
+    .abi_version   = SRAVA_MODULE_ABI,
+    .name          = "hello",
+    .priority      = 0,       // plugin は 0 (幾何カーネルの既定選択には出ない)
+    .make_agent    = &mk_helatsAgent,
+    .exec_caps     = (unsigned)(EXEC_THREAD|EXEC_PROCESS),
+    .exec_default  = EXEC_THREAD,
+    .ops           = HELLO_OPS,
+    .n_ops         = HELLO_N_OPS,
+    .import_exts   = 0,
+    .export_exts   = 0,
+    .provides      = 0,       // 値のみ (幾何型を持たない)
+    .cache_version = 1,       // ★ 計算を変えたら手で上げる
+    .arity         = 0,       // 0 = 未指定 = 二項
+    .grace_ms      = 0,       // 中断に応じない場合は即 kill (既定)
+    .panic_ms      = 0,       // in-proc の abort は無効 (既定)
+    .initialize    = 0,
+    .configure     = 0,
 };
-static const int helatsAgent_desc_registered =
-    (pigModuleRegistry::register_descriptor(&helatsAgent_descriptor), 0);
+// ★ grace_ms / panic_ms の選び方 (#3503)。**未指定 = 0 = 安全側**なので書き忘れは事故にならないが、
+//    重い op を持つモジュールは中断要求を配線したうえで値を決めること。
+//    - `-1` を名乗れるのは **全 op の全経路**が中断要求を見るモジュールだけ。止まらない経路が
+//      1 つでもあると Ctrl+C で永久ハングする。「op を配線した」ではなく「その op の全経路を
+//      配線した」で判断する (#3502 は主経路だけ配線して後段が残っていた)
+//    - `>0` なら申告が間違っていても代償は遅延だけで、正しさは失われない。迷ったらこちら
+//    - ⚠ 2 つを **同じ値にしない**。猶予切れで失うものが違う — process は agent 1 つだが、
+//      in-proc は **planner ごと落ちてセッション全体**を失う
+// ⚠ **自己登録は書かない**。かつて .so 側の静的初期化が register_agent / register_type /
+//    register_hash_salt でグローバルへ書き込んでいたが (#3427 で撤去)、.so は「誰のレジストリか」を
+//    知らないためプロセス全体の可変 static に書く形にしかならなかった。いまは登録経路が
+//    **dlopen → pigModuleRegistry::register_descriptor の 1 本**で、.so は記述子を返すだけの受け身。
 ```
 
 ```c++

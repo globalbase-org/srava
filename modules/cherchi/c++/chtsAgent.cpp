@@ -27,15 +27,34 @@
 #include	"ch/c++/chMesh.h"
 #include	"ch/c++/chaBox.h"
 #include	"ch/c++/chaSphere.h"
+/* ★ #3474: 基本立体をカーネル間で統一 */
+#include	"ch/c++/chaPyramid.h"
+#include	"ch/c++/chaCylinder.h"
+#include	"ch/c++/chaCone.h"
+#include	"ch/c++/chaTorus.h"
+#include	"ch/c++/chaTetrahedron.h"
+#include	"ch/c++/chaPrism.h"
+#include	"ch/c++/chaIcosphere.h"
+#include	"ch/c++/chaImport.h"
+#include	"ch/c++/chaEmpty3D.h"
+#include	"ch/c++/chaTube.h"
 #include	"ch/c++/chaUnion.h"
 #include	"ch/c++/chaIntersection.h"
 #include	"ch/c++/chaDifference.h"
 #include	"ch/c++/chaVolume.h"
+#include	"ch/c++/chaBbox.h"
+#include	"ch/c++/chaCentroid.h"
+#include	"ch/c++/chaArea.h"
+#include	"ch/c++/chaValid.h"
 #include	"ch/c++/chaNverts.h"
 #include	"ch/c++/chaNfaces.h"
 #include	"ch/c++/chaExport.h"
 #include	"ch/c++/chaCast.h"
 #include	"ch/c++/chaTranslate.h"
+#include	"ch/c++/chaRotate.h"
+#include	"ch/c++/chaScale.h"
+#include	"ch/c++/chaMirror.h"
+#include	"ch/c++/chaTransform.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/chtsAgent_.h"
 
@@ -53,11 +72,25 @@ static const pigArgKind BINMESH_IN[] = { AK_CACHE, AK_CACHE };               /* 
 static const pigArgKind CAST_IN[]    = { AK_INLINE, AK_CACHE };              /* cast(type, mesh) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };                         /* mesh 1 個入力 */
 static const pigArgKind MESH1ARG_IN[]= { AK_CACHE, AK_INLINE };              /* translate(m,[x,y,z]) */
+static const pigArgKind ROTATE_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };  /* rotate(m,axis,deg) */
 
 static const pigOpEntry OPS[] = {
 	{ "box",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaBox),          0, "->" CH_TYPE },
 	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(chaBox),          0, "->" CH_TYPE },
-	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaSphere),       0, "->" CH_TYPE },
+	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaSphere),       0, "->" CH_TYPE, 0, 0, 1 },  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
+	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaPyramid), 0, "->" CH_TYPE },  /* pyramid(n,h,r) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaCylinder), 0, "->" CH_TYPE },  /* cylinder(r,h,seg) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaCone), 0, "->" CH_TYPE },  /* cone(r,h,seg) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaTorus), 0, "->" CH_TYPE },  /* torus(R,r,seg) */
+	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(chaTetrahedron), 0, "->" CH_TYPE },  /* tetrahedron(r) */
+	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
+	{ "prism",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaPrism), 0, "->" CH_TYPE },  /* prism(n,h,r) */
+	{ "icosphere",     SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaIcosphere), 0, "->" CH_TYPE, 0, 0, 1 },  /* icosphere(r,subdiv) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(chaImport), 0, "->" CH_TYPE },  /* import(path): STL/OFF */
+	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(chaEmpty3D), 0, "->" CH_TYPE },  /* 空集合(3D)。{} は中立元なので別物 */
+	/* ★ nreq=1: segs は省略可 (既定 32 は op が入れる)。掃引は common/tube.h。 */
+	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaTube), 0, "->" CH_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
 	/* ブール: 自型どうし + 混成 (片側が mf の raw double mesh)。混成は cache reader が
 	 * MFM3 (= 同じ wire 形式) をそのまま読んで成立する。
 	 * ★all-foreign ((mf,mf)) は書かない — manifold 自身が同じ op を持つので曖昧になる (disjoint 原則)。
@@ -65,15 +98,30 @@ static const pigOpEntry OPS[] = {
 	 *   「どちらのカーネルで解くか」が priority 次第になってしまう (同じ理由で geogram 側も
 	 *   ch を書かない)。混ぜたい利用者は cast を書く = **どちらで解くかが式に残る**。
 	 * ★(32) は IRMB の label が bitset<32> であることそのもの (chMesh::CH_MAX_OPERANDS)。 */
-	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(chaUnion, chGeom, chGeom),        1, "[" CH_TYPE ",mf-mesh3d](32)->" CH_TYPE, 1 /* ★可換 */ },
-	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(chaIntersection, chGeom, chGeom), 1, "[" CH_TYPE ",mf-mesh3d](32)->" CH_TYPE, 1 /* ★可換 */ },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(chaDifference, chGeom, chGeom),   1, "[" CH_TYPE ",mf-mesh3d](32)->" CH_TYPE },
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(chaUnion, chGeom, chGeom),        1, "[" CH_TYPE ",mf-mesh3d,gg-mesh3d](32)->" CH_TYPE, 1 /* ★可換 */ },
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(chaIntersection, chGeom, chGeom), 1, "[" CH_TYPE ",mf-mesh3d,gg-mesh3d](32)->" CH_TYPE, 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(chaDifference, chGeom, chGeom),   1, "[" CH_TYPE ",mf-mesh3d,gg-mesh3d](32)->" CH_TYPE },
 	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(chaVolume, chGeom),       0, "(" CH_TYPE ")->value" },
+	/* ★ #3487: 値の素性を訊く op。どれも →value で 2D 型を要さない。無いと確認のためだけに
+	 * 別カーネルへ cast させることになり、**cast が通らない値では確認手段そのものが消える**
+	 * (#3478 の非有界・非多様体)。中身は common/meshprops.h (valid の共通定義もそこ)。 */
+	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(chaBbox, chGeom),     0, "(" CH_TYPE ")->value" },
+	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(chaCentroid, chGeom), 0, "(" CH_TYPE ")->value" },
+	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(chaArea, chGeom),     0, "(" CH_TYPE ")->value" },
+	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(chaValid, chGeom),    0, "(" CH_TYPE ")->value" },
 	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(chaNverts, chGeom),       0, "(" CH_TYPE ")->value" },
 	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(chaNfaces, chGeom),       0, "(" CH_TYPE ")->value" },
 	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(chaExport, chGeom),       0, "(" CH_TYPE ")->ref" },
-	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(chaCast, chGeom),         0, "(" CH_TYPE ")->" CH_TYPE ";(mf-mesh3d)->" CH_TYPE ";(cg-mesh3d)->" CH_TYPE },
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(chaCast, chGeom),         0, "(" CH_TYPE ")->" CH_TYPE ";(mf-mesh3d)->" CH_TYPE ";(cg-mesh3d)->" CH_TYPE ";(gg-mesh3d)->" CH_TYPE   /* ★ #3464: 同じ精度クラス (MFM3) */ },
 	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(chaTranslate, chGeom),    0, "(" CH_TYPE ")->" CH_TYPE },
+	/* ★ #3486: アフィン変換 4 op。translate だけあって残り 3 本が無いと、式の途中で
+	 * **カーネルが裏返る** (rotate を書いた瞬間に cgal/manifold へ落ちる)。4 本とも
+	 * 3D→3D で 2D 型を要さないので、2D 型を持たないこのカーネルでも置ける。
+	 * 引数の解釈と行列作りは common/affine.h・適用は chMesh::apply_affine。 */
+	{ "rotate",       ROTATE_IN,  3,AK_CACHE, OPWIRE(chaRotate, chGeom),       0, "(" CH_TYPE ")->" CH_TYPE },
+	{ "scale",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(chaScale, chGeom),        0, "(" CH_TYPE ")->" CH_TYPE },
+	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(chaMirror, chGeom),       0, "(" CH_TYPE ")->" CH_TYPE },
+	{ "transform",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(chaTransform, chGeom),    0, "(" CH_TYPE ")->" CH_TYPE },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -145,10 +193,15 @@ extern const srava_module_descriptor chtsAgent_descriptor = {
 	.exec_default  = EXEC_PROCESS,
 	.ops           = OPS,
 	.n_ops         = N_OPS,
-	.import_exts   = "",   /* なし (import は他カーネルで入れて cast する) */
+	/* ★ #3474 続き: import を持つので **拡張子を申告する** (未申告だとロード時に拒否)。
+	 *   読み手は common/meshio.h。対応形式は STL / OFF だけ。 */
+	.import_exts   = "stl:" CH_TYPE ",off:" CH_TYPE,   /* なし (import は他カーネルで入れて cast する) */
 	.export_exts   = "off,stl,obj",   /* chMesh::write_to の拡張子ディスパッチと一致させること */
 	.provides      = cherchi_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	.hash_salt     = CH_SALT,   /* キャッシュキー弁別 */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 1,
 	.initialize    = 0,   /* 無し (initFPU は booleanPipeline が自分で呼ぶ) */
-	.configure     = 0,   /* threads の口はまだ持たない (IRMB は TBB 任せ) */
+	/* ★ #3481: op 内並列 (IRMB の tbb::parallel_for) を task_arena で絞る口。
+	 *   IRMB 側にスイッチが無いので、呼び出しをカレント arena で囲んで絞る (chArena.h)。 */
+	.configure     = &chMesh::configure,
 };

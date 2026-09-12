@@ -67,7 +67,7 @@ mfaBbox_::compute()
 	if ( m3.is_notNull() )      n = m3->op_bbox(mn, mx);
 	else if ( c2.is_notNull() ) n = c2->op_bbox(mn, mx);
 	else {
-		result = thNEW(pigDataError,(thNEW(stdString,("bbox: needs a mesh"))));
+		result = mfa_err(thNEW(stdString,("bbox: needs a mesh")));
 		return;
 	}
 	sPtr<pigDataArray> lo = thNEW(pigDataArray,());

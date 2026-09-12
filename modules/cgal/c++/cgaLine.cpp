@@ -73,16 +73,16 @@ cgaLine_::compute()
 	mesh = thNEW(cgMesh2D,());
 	int np = pts.is_notNull() ? pts->length() : 0;
 	if ( np < 2 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "line: needs >= 2 points [[x,y],...]"))));
+		result = cga_err(thNEW(stdString,(
+		    "line: needs >= 2 points [[x,y],...]")));
 		return;
 	}
 	cgMesh2D::Guide g;
 	for ( int i = 0 ; i < np ; ++i ) {
 		sPtr<pigDataArray> xy = pts->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! xy.is_notNull() || xy->length() < 2 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
-			    "line: each point must be [x,y]"))));
+			result = cga_err(thNEW(stdString,(
+			    "line: each point must be [x,y]")));
 			return;
 		}
 		double x = xy->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();

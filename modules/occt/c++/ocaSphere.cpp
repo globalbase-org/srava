@@ -73,14 +73,14 @@ ocaSphere_::compute()
 	 *   渡ってくるが、使わないのが正しい。★このため volume は 4/3·π·r³ ちょうどになり、
 	 *   内接多面体を作る他カーネルとは**一致しない** (kernel_agree に素で入れてはいけない)。 */
 	if ( !(r > 0) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("sphere: radius must be > 0"))));
+		result = oca_err(thNEW(stdString,("sphere: radius must be > 0")));
 		return;
 	}
 	BRepPrimAPI_MakeSphere mk(r);
 	/* ★ プリミティブは遅延構築 (Shape() で Build())。IsDone() は立たないので IsNull() で見る。 */
 	TopoDS_Shape sh = mk.Shape();
 	if ( sh.IsNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("sphere: OCCT produced a null shape"))));
+		result = oca_err(thNEW(stdString,("sphere: OCCT produced a null shape")));
 		return;
 	}
 	out = thNEW(ocShape,());

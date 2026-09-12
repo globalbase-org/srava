@@ -1,6 +1,7 @@
 /*
  * nfaVolume — volume(mesh) の計算本体 (nef 版)。値返し。★非有界/非 2-多様体はエラー (黙って 0 を返さない)。
  */
+#include	<cstdio>
 #include	"pig/c++/ptsCalcBody.h"
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
@@ -64,13 +65,14 @@ nfaVolume_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("volume: needs a Nef mesh")));
 		return;
 	}
 	nfMesh::Mesh m;
 	if ( ! in->to_mesh(m) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("volume: an unbounded or non-2-manifold Nef has no volume (e.g. the result of complement)"))));
+		char b[256];
+		::snprintf(b, sizeof b, "volume: this Nef has no volume (%s)", nf_why(in));
+		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
 	result = thNEW(pigDataFloat,(CGAL::to_double(CGAL::Polygon_mesh_processing::volume(m))));

@@ -9,6 +9,11 @@
 #include	"d3/c++/d3Mesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d3aMerge_.h"
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] d3/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(d3a_err, "d3")
+
 
 CLASS_TINYSTATE(d3/c++/d3aMerge,pig/c++/ptsCalcBody)
 
@@ -68,12 +73,12 @@ d3aMerge_::compute()
 	sPtr<d3Mesh> a = ( na > 0 ) ? sPtr<d3Mesh>::d_cast((*args)[0]) : sPtr<d3Mesh>();
 	sPtr<d3Mesh> b = ( na > 1 ) ? sPtr<d3Mesh>::d_cast((*args)[1]) : sPtr<d3Mesh>();
 	if ( ! a.is_notNull() || ! b.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("merge: needs two d3 meshes"))));
+		result = d3a_err(thNEW(stdString,("merge: needs two d3 meshes")));
 		return;
 	}
 	mesh = d3Mesh::merge(a, b);
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("merge: failed"))));
+		result = d3a_err(thNEW(stdString,("merge: failed")));
 }
 
 sPtr<pigData>

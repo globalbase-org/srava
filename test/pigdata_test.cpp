@@ -229,6 +229,52 @@ int main(void)
     CHECK(c->type_name() == 0);
   }
 
+  /* --- ★ #3475: エラーの属性タグとモジュール名前置き ---
+   * 文言は "[TAG] module/op: message" の 3 段。組み立ては pigDataError の ctor 1 箇所。
+   *   error_message() … **タグ込み** (これが wire を渡る文字列そのもの)
+   *   get_str()       … 表示用。タグは落としモジュール名は残す */
+  {
+    /* 既定 (PE_NORMAL・モジュール名なし) = 素通し。既存の呼び出しの挙動が変わらないこと。 */
+    sPtr<pigDataError> e = thNEW(pigDataError, ("union: boolean failed"));
+    CHECK(e->is_fatal() == 0);
+    CHECK(e->err_class() == PE_NORMAL);
+    CHECK(::strcmp(e->error_message()->get_str(), "union: boolean failed") == 0);
+  }
+  {
+    /* モジュール名だけ (幾何の失敗)。表示にも残る = どのカーネルが失敗したか追える。 */
+    sPtr<pigDataError> e = thNEW(pigDataError, ("union: boolean failed", thNULL, PE_NORMAL, "cgal"));
+    CHECK(::strcmp(e->error_message()->get_str(), "cgal/union: boolean failed") == 0);
+    CHECK(::strcmp(e->get_str()->get_str(), "ERROR: cgal/union: boolean failed") == 0);
+  }
+  {
+    /* PE_FATAL: タグは **文言に載る** (wire を跨ぐ手段が文字列しかないため) が、
+     * **表示では落ちる** ([FATAL] は利用者に見せる情報ではない)。 */
+    sPtr<pigDataError> e = thNEW(pigDataError, ("cast: no such type", thNULL, PE_FATAL, "cgal"));
+    CHECK(e->is_fatal() == 1);
+    CHECK(::strcmp(e->error_message()->get_str(), "[FATAL] cgal/cast: no such type") == 0);
+    CHECK(::strcmp(e->get_str()->get_str(), "ERROR: cgal/cast: no such type") == 0);
+  }
+  {
+    /* PE_DERIVED は **fatal ではない** — 撤収は原因側が既に起動しているので、
+     * 写し側が重ねて起動する必要はない。 */
+    sPtr<pigDataError> e = thNEW(pigDataError, ("upstream failed", thNULL, PE_DERIVED));
+    CHECK(e->is_fatal() == 0);
+    CHECK(e->err_class() == PE_DERIVED);
+    CHECK(::strcmp(e->error_message()->get_str(), "[DERIVED] upstream failed") == 0);
+    CHECK(::strcmp(e->get_str()->get_str(), "ERROR: upstream failed") == 0);
+  }
+  {
+    /* ★ 二重付与を避ける: agent から返ってきた **既にタグ付きの文字列**でエラーを作り直す
+     * 経路があり、素直に前置きすると "[FATAL] [FATAL] ..." になる。 */
+    sPtr<pigDataError> e = thNEW(pigDataError, ("[FATAL] cgal/cast: no such type", thNULL, PE_FATAL));
+    CHECK(::strcmp(e->error_message()->get_str(), "[FATAL] cgal/cast: no such type") == 0);
+  }
+  {
+    /* 旧来の `fatal=1` 呼び出しがそのまま通る (PE_FATAL = 1 なので互換)。 */
+    sPtr<pigDataError> e = thNEW(pigDataError, ("mesh + mesh", thNULL, 1));
+    CHECK(e->is_fatal() == 1);
+  }
+
   /* --- ハッシュキー: 同値同ハッシュ / 型違いは別ハッシュ(typeid 分離) --- */
   CHECK(I(5)->get_hashkey() == I(5)->get_hashkey());
   CHECK(I(5)->get_hashkey() != Str("5")->get_hashkey());

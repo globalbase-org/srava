@@ -68,7 +68,7 @@ ocaOffset_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("offset: needs an OCCT shape"))));
+		result = oca_err(thNEW(stdString,("offset: needs an OCCT shape")));
 		return;
 	}
 	double d = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
@@ -76,9 +76,11 @@ ocaOffset_::compute()
 	 *   実装されているためのパラメータで、OCCT は近似球を使わない (稜に円筒パッチ・頂点に
 	 *   球パッチを解析的に生成する = Steiner の公式を構成的にやる)。パーサが offset を常に
 	 *   3 引数へ正規化するので受け取りはするが、使わないのが正しい。 */
-	out = in->op_offset(d);
-	if ( ! out.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("offset: OCCT MakeOffsetShape failed"))));
+	out = in->op_offset(d, 0, 0, &brk_);
+	if ( ! out.is_notNull() ) {
+		if ( (result = oc_abort_err(brk_, "offset")) != thNULL ) return;   /* ★ #3498 */
+		result = oca_err(thNEW(stdString,("offset: OCCT MakeOffsetShape failed")));
+	}
 }
 
 sPtr<pigData>

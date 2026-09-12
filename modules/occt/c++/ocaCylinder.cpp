@@ -74,7 +74,7 @@ ocaCylinder_::compute()
 	double r = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	if ( !(r > 0) || !(h > 0) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cylinder: r and h must be > 0"))));
+		result = oca_err(thNEW(stdString,("cylinder: r and h must be > 0")));
 		return;
 	}
 	/* 他カーネルの box / sphere と同じく **原点中心**・軸は +Z。
@@ -84,7 +84,7 @@ ocaCylinder_::compute()
 	/* ★ プリミティブは遅延構築。IsDone() は立たないので IsNull() で見る (ocaBox と同じ罠)。 */
 	TopoDS_Shape sh = mk.Shape();
 	if ( sh.IsNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cylinder: OCCT produced a null shape"))));
+		result = oca_err(thNEW(stdString,("cylinder: OCCT produced a null shape")));
 		return;
 	}
 	out = thNEW(ocShape,());

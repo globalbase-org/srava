@@ -64,7 +64,7 @@ cgaCentroid_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("centroid: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("centroid: needs a mesh")));
 		return;
 	}
 	double c[3] = { 0, 0, 0 };

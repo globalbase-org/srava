@@ -123,8 +123,8 @@ mfaTube_::compute()
 
 	int nraw = path.is_notNull() ? path->length() : 0;
 	if ( nraw < 2 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "tube: needs >= 2 path vertices ([[[x,y,z],r],...] for 3D / [[[x,y],r],...] for 2D)"))));
+		result = mfa_err(thNEW(stdString,(
+		    "tube: needs >= 2 path vertices ([[[x,y,z],r],...] for 3D / [[[x,y],r],...] for 2D)")));
 		return;
 	}
 
@@ -137,17 +137,17 @@ mfaTube_::compute()
 		 * 配列は要素を eager 解決しないので、素の d_cast だと in-proc で null になる。 */
 		sPtr<pigDataArray> pr = path->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! pr.is_notNull() || pr->length() < 2 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
-			    "tube: each vertex must be [pos, r] (pos=[x,y,z] or [x,y])"))));
+			result = mfa_err(thNEW(stdString,(
+			    "tube: each vertex must be [pos, r] (pos=[x,y,z] or [x,y])")));
 			return;
 		}
 		sPtr<pigDataArray> pos = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
 		int pl = pos.is_notNull() ? pos->length() : 0;
 		if ( i == 0 ) dim = ( pl >= 3 ) ? 3 : 2;   /* 先頭頂点で次元を確定 */
 		if ( pl < dim ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
+			result = mfa_err(thNEW(stdString,(
 			    dim == 3 ? "tube: vertex position must be [x,y,z] (3D path)"
-			             : "tube: vertex position must be [x,y] (2D path)"))));
+			             : "tube: vertex position must be [x,y] (2D path)")));
 			return;
 		}
 		Praw[(size_t)i] = TubeV3(pos->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt(),
@@ -155,7 +155,7 @@ mfaTube_::compute()
 		                         dim == 3 ? pos->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt() : 0.0);
 		Rraw[(size_t)i] = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
 		if ( Rraw[(size_t)i] < 0.0 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,("tube: radius must be >= 0"))));
+			result = mfa_err(thNEW(stdString,("tube: radius must be >= 0")));
 			return;
 		}
 	}
@@ -165,8 +165,8 @@ mfaTube_::compute()
 	std::vector<double> R;
 	srava_geo::tube_dedup(Praw, Rraw, P, R);
 	if ( P.size() < 2 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "tube: needs >= 2 distinct path vertices (all given vertices coincide)"))));
+		result = mfa_err(thNEW(stdString,(
+		    "tube: needs >= 2 distinct path vertices (all given vertices coincide)")));
 		return;
 	}
 
@@ -184,12 +184,12 @@ mfaTube_::compute()
 	MfTubeSink sink;
 	int st = srava_geo::make_tube_3d(P, R, segs, sink);
 	if ( st == srava_geo::TUBE_ERR_ZERO_SEGMENT ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "tube: two consecutive zero-radius vertices (degenerate segment)"))));
+		result = mfa_err(thNEW(stdString,(
+		    "tube: two consecutive zero-radius vertices (degenerate segment)")));
 		return;
 	}
 	if ( st != srava_geo::TUBE_OK ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("tube: duplicate consecutive path vertices"))));
+		result = mfa_err(thNEW(stdString,("tube: duplicate consecutive path vertices")));
 		return;
 	}
 	/* 共通生成器は外向き右手系で三角形を出すので、cg 側のような向き反転の保険は要らない

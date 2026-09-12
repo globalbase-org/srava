@@ -65,7 +65,7 @@ nfaComplement_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("complement: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("complement: needs a Nef mesh")));
 		return;
 	}
 	/* 結果は非有界になりうるが、cache は **SNC** で書くので非有界のまま往復する

@@ -52,7 +52,7 @@ PIG_WIRE_DEF(mfGeom, mf_mk_reader, mf_mk_writer);
 extern const pigModuleType manifold_provides[];
 const pigModuleType manifold_provides[] = {
 	{ &mfGeom::WIRE, "mf-mesh3d,mf-cross2d",
-	  "MFM3,MFC2,MESH,PLY2,NEFB" },
+	  "MFM3,MFC2,MESH,PLY2,NEFB" },   /* ★ #3499: NEF3 (nef_snc = 常に SNC) は読まない → 橋 nef_mf.so */
 	{ 0, 0, 0 },
 };
 

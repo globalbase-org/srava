@@ -62,11 +62,11 @@ cgaPerimeter_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("perimeter: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("perimeter: needs a mesh")));
 		return;
 	}
 	if ( in->dim() != 2 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("perimeter: 3D surface has no perimeter (use area)"))));
+		result = cga_err(thNEW(stdString,("perimeter: 3D surface has no perimeter (use area)")));
 		return;
 	}
 	result = thNEW(pigDataFloat,(in->op_perimeter()));

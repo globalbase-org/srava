@@ -144,8 +144,12 @@ void processPairX(const Chain& chA, const RadiusFn& RA, int segA,
 } // namespace
 
 // ---- 単一チェーンの自己接近（従来 API） ----------------------------------
+// ★ #3502 続き: 中断の問い合わせ。述語が無ければ常に false。
+static inline bool prxCancelled(const Params& pr){ return pr.cancelled && pr.cancelled(); }
+
 std::vector<Contact> findSelfProximities(const Chain& ch, const RadiusFn& R,
-                                         const Params& pr, Stats* stats){
+                                         const Params& pr, Stats* stats,
+                                         bool* cancelledOut){
     std::vector<Contact> out;
     const int n=(int)ch.segs.size();
 
@@ -158,8 +162,15 @@ std::vector<Contact> findSelfProximities(const Chain& ch, const RadiusFn& R,
     }
     if(stats){ stats->crossPairsTested=(int)pairs.size(); stats->crossPairsTotal=n*(n-1)/2; }
 
-    for(auto& pr2 : pairs) processPairX(ch,R,pr2.first, ch,R,pr2.second, pr, true, 0,0, out);
-    for(int i=0;i<n;i++)   processPairX(ch,R,i, ch,R,i, pr, true, 0,0, out);
+    // ★ #3502 続き: ペアの境界で中断を見る。1 ペアの narrow-phase は newtonIter=40 で有界。
+    for(auto& pr2 : pairs){
+        if(prxCancelled(pr)){ if(cancelledOut) *cancelledOut = true; return out; }
+        processPairX(ch,R,pr2.first, ch,R,pr2.second, pr, true, 0,0, out);
+    }
+    for(int i=0;i<n;i++){
+        if(prxCancelled(pr)){ if(cancelledOut) *cancelledOut = true; return out; }
+        processPairX(ch,R,i, ch,R,i, pr, true, 0,0, out);
+    }
 
     std::sort(out.begin(),out.end(),
               [](const Contact&a,const Contact&b){return a.gap<b.gap;});
@@ -177,7 +188,7 @@ GapEval evalGapAt(const Chain& ch, const RadiusFn& R,
 
 // ---- シーン（複数 Body）の近接 -------------------------------------------
 std::vector<Contact> findSceneProximities(const Scene& sc, const Params& pr,
-                                          Stats* stats){
+                                          Stats* stats, bool* cancelledOut){
     std::vector<Contact> out;
     const int nb = (int)sc.bodies.size();
     int tested = 0;
@@ -202,6 +213,7 @@ std::vector<Contact> findSceneProximities(const Scene& sc, const Params& pr,
         std::vector<std::pair<int,int>> pairs;
         bvh.selfPairs(pr.reportGap, pairs);
         for(auto& pp : pairs){
+            if(prxCancelled(pr)){ if(cancelledOut) *cancelledOut = true; return out; }   // ★ #3502 続き
             int ba=meta[pp.first].first,  sa=meta[pp.first].second;
             int bb=meta[pp.second].first, sb=meta[pp.second].second;
             const Body& BA=sc.bodies[ba]; const Body& BB=sc.bodies[bb];
@@ -213,8 +225,10 @@ std::vector<Contact> findSceneProximities(const Scene& sc, const Params& pr,
         // 同一 Body・同一セグメント内（movable のみ）
         for(int b=0;b<nb;b++) if(sc.bodies[b].movable){
             const Body& B=sc.bodies[b];
-            for(int s=0;s<(int)B.chain.segs.size();s++)
+            for(int s=0;s<(int)B.chain.segs.size();s++){
+                if(prxCancelled(pr)){ if(cancelledOut) *cancelledOut = true; return out; }   // ★ #3502 続き
                 processPairX(B.chain,B.radius,s, B.chain,B.radius,s, pr, true, b,b, out);
+            }
         }
     } else {
         for(int a=0;a<nb;a++) for(int b=a;b<nb;b++){
@@ -224,6 +238,7 @@ std::vector<Contact> findSceneProximities(const Scene& sc, const Params& pr,
             bool same = (a==b);
             const int na=(int)BA.chain.segs.size(), nbs=(int)BB.chain.segs.size();
             for(int i=0;i<na;i++){
+                if(prxCancelled(pr)){ if(cancelledOut) *cancelledOut = true; return out; }   // ★ #3502 続き
                 int j0 = same ? i : 0;
                 for(int j=j0;j<nbs;j++){
                     processPairX(BA.chain,BA.radius,i, BB.chain,BB.radius,j,

@@ -56,13 +56,52 @@ related models (the common case for simulation datasets) stays close to the cost
 
 ## Building
 
-Requirements:
+### Requirements
+
+**Toolchain**
 
 - A C++20 compiler (`-std=gnu++2a`), CMake ≥ 3.16
-- [CGAL](https://www.cgal.org/) (pulls in GMP / MPFR / Boost) — geometry kernel
-- [tinyState](https://github.com/globalbase-org/tinyState) — thread + coroutine runtime (GLOBALBASE Project)
 - POSIX threads
-- *(optional)* HDF5 — enables `export_vox` (voxelization → k-Wave acoustic simulation)
+
+**Build first — not available from a package manager**
+
+- [tinyState](https://github.com/globalbase-org/tinyState) — thread + coroutine runtime
+  (GLOBALBASE Project). Located with `find_package(tinyState REQUIRED)`; build and install
+  it before configuring srava. For a non-standard prefix, pass `-DCMAKE_PREFIX_PATH=`.
+
+**System libraries** — install these yourself; each one gates the modules listed beside it.
+A module whose dependency is missing is simply left out of the build.
+
+| Library | Enables | Notes |
+| --- | --- | --- |
+| [CGAL](https://www.cgal.org/) | `cgal`, `nef_hybrid`, `nef_snc` | pulls in GMP / MPFR / Boost |
+| [Open CASCADE](https://dev.opencascade.org/) | `occt` (B-rep) | |
+| [oneTBB](https://github.com/uxlfoundation/oneTBB) | intra-op parallelism | see note below |
+| zlib | OpenVDB `.vdb` compression | usually already present |
+| fontconfig | OCCT font ops (`text`) | |
+| HDF5 *(optional)* | `export_vox` (voxelization → k-Wave acoustic simulation) | |
+
+> **TBB must come from the system.** `SRAVA_MANIFOLD_PAR` defaults to `ON`, and OpenVDB and
+> OCCT also require TBB. Do not let a subproject fetch its own copy — two TBB runtimes in one
+> process is not a supported configuration.
+
+**Fetched automatically** (`FetchContent`; nothing to install)
+
+- [Manifold](https://github.com/elalish/manifold), [geogram](https://github.com/BrunoLevy/geogram),
+  [OpenVDB](https://www.openvdb.org/), [Cherchi](https://github.com/gcherchi/InteractiveAndRobustMeshBooleans)
+  — pipeProximity is vendored in-tree.
+
+These are configured to keep their own dependency footprint minimal: OpenVDB is built without
+Boost or Blosc, Manifold uses the system TBB rather than a bundled copy, and geogram is built
+library-only (no OpenGL / Lua). TBB and zlib above are the only system libraries they add.
+
+Example (macOS / Homebrew):
+
+```sh
+brew install cmake cgal opencascade tbb hdf5 fontconfig zlib
+```
+
+### Build
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -70,6 +109,17 @@ cmake --build build -j
 ctest --test-dir build
 sudo cmake --install build          # installs srava, srava_agent, stdlib, modules
 ```
+
+Every geometry module is built by default except `nef_snc`, which offers the same operations
+as `nef_hybrid` using a different internal representation. To build the full set:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSRAVA_MODULE_NEF_SNC=ON
+```
+
+Individual modules can be turned off with `-DSRAVA_MODULE_<NAME>=OFF` (`CGAL`, `MANIFOLD`,
+`GEOGRAM`, `OPENVDB`, `OCCT`, `CHERCHI`, `NEF`, `PIPEPROX`); with `SRAVA_MODULE_CGAL=OFF`
+srava builds without CGAL, GMP or MPFR at all.
 
 The standard library is installed under `share/srava/` and modules (`.so`) under
 `lib/srava/modules/`, so `include "std/…"` and bundled ops resolve with no environment variables.

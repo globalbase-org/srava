@@ -58,14 +58,25 @@ srava_register_cgal_test_fixture(sPtr<pigModuleRegistry> reg)
 		{ &cgal_test_wire, "cg-mesh3d,cg-cross2d", 0 /* tags: create が無いので列挙しない */ },
 		{ 0, 0, 0 },
 	};
+	/* ★ #3466: 位置指定初期化子をやめた (フィールドが増減すると静かにずれるため)。
+	 *   hash_salt は ABI v17 で撤去。ソルトはレジストリが名前 + .so 指紋から作る
+	 *   (この fixture は組込登録なので指紋は "builtin")。 */
 	static const srava_module_descriptor cgal_test_descriptor = {
-		SRAVA_MODULE_ABI, "cgal", 20,
-		0 /*make_agent: External*/, (unsigned)EXEC_PROCESS, EXEC_PROCESS,
-		cgal_test_ops, (int)(sizeof cgal_test_ops / sizeof cgal_test_ops[0]),
-		"off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-cross2d",
-		"off,stl,obj,ply,3mf,amf,svg,dxf",
-		cgal_test_provides,         /* provides: 階層 × 型名 × 4CC (ABI v16) */
-		0,                          /* hash_salt: 基準カーネル */
+		.abi_version   = SRAVA_MODULE_ABI,
+		.name          = "cgal",
+		.priority      = 20,
+		.make_agent    = 0,          /* External 専用 */
+		.exec_caps     = (unsigned)EXEC_PROCESS,
+		.exec_default  = EXEC_PROCESS,
+		.ops           = cgal_test_ops,
+		.n_ops         = (int)(sizeof cgal_test_ops / sizeof cgal_test_ops[0]),
+		.import_exts   = "off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-cross2d",
+		.export_exts   = "off,stl,obj,ply,3mf,amf,svg,dxf",
+		.provides      = cgal_test_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+		.cache_version = 1,   /* ★ v18 (#3466): 結果の版 (手で上げる) */
+		.arity         = 0,
+		.initialize    = 0,
+		.configure     = 0,
 	};
 	reg->register_descriptor(&cgal_test_descriptor);
 }

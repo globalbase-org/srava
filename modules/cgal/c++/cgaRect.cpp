@@ -76,7 +76,7 @@ cgaRect_::compute()
 	if ( w <= 0.0 || h <= 0.0 ) {
 		char buf[96];
 		::snprintf(buf, sizeof buf, "rect: width and height must be positive (got %g, %g)", w, h);
-		result = thNEW(pigDataError,(thNEW(stdString,(buf))));
+		result = cga_err(thNEW(stdString,(buf)));
 		return;
 	}
 

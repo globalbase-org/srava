@@ -65,7 +65,7 @@ ggaSolidify_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ggMesh> in = ( na > 0 ) ? sPtr<ggMesh>::d_cast((*args)[0]) : sPtr<ggMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("solidify: needs a geogram mesh"))));
+		result = gga_err(thNEW(stdString,("solidify: needs a geogram mesh")));
 		return;
 	}
 	char why[512];
@@ -76,7 +76,7 @@ ggaSolidify_::compute()
 		char b[600];
 		const char *m = "solidify: failed";
 		if ( why[0] != '\0' ) { ::snprintf(b, sizeof b, "solidify: %s", why); m = b; }
-		result = thNEW(pigDataError,(thNEW(stdString,(m))));
+		result = gga_err(thNEW(stdString,(m)));
 	}
 }
 

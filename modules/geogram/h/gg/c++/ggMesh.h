@@ -22,9 +22,10 @@
  *   実装があった」でしかなかったため (routing が型スタンプ一本になり、その必要が消えた)。
  *   4CC は **形式** の名前であって型の名前ではないので、同じ形式は同じ 4CC を名乗る。
  *   型の区別 (gg-mesh3d / mf-mesh3d) は codec 行の types 申告と型スタンプが担い、
- *   キャッシュの弁別は hash_salt (GG_SALT) が担うので、共有しても衝突しない。
+ *   キャッシュの弁別はレジストリのソルト (モジュール名 + .so 指紋・#3466) が担うので、共有しても衝突しない。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<geogram/mesh/mesh.h>
 #include	<stdint.h>
@@ -34,7 +35,6 @@
 /* ★ wire 形式の 4CC。manifold と **同一レイアウトなので同じ 4CC を共有する** (上のコメント参照)。
  * 型 (GG_TYPE) と 4CC は 1:1 ではない — 型は codec 行の types 申告が唯一の根拠。 */
 #define GG_TAG		"MFM3"
-#define GG_SALT		"\x01" "GGM"
 
 /* codec の Sink/Source 抽象 (mfChunkSink/nfChunkSink と同シグネチャ)。 */
 struct ggChunkSink   { virtual void chunk(const uint8_t *data, int n) = 0; virtual ~ggChunkSink()   {} };
@@ -52,8 +52,16 @@ public:
 	virtual void encode(ggChunkSink&)   = 0;
 	virtual void decode(ggChunkSource&) = 0;
 	int  decode_failed() const { return decodeErr_; }
+	/* ★ #3479: 立てた **理由** (立てていなければ 0)。reader がこれを拾って errCode と一緒に
+	 *   parent へ渡す。従来は「読めなかった」という事実だけが残り、利用者に届く文は
+	 *   「codec が無い / 表現できない / 形式が違う」の 3 択を並べた推測だった。
+	 *   ★文字列リテラル前提 (寿命は .so と同じ)。 */
+	const char* decode_why() const { return decodeWhy_; }
 protected:
+	/* decodeErr_ と理由は必ず対で立てる (理由の無い拒否を作らない)。 */
+	void set_decode_err(const char* why) { decodeErr_ = 1; decodeWhy_ = why; }
 	int  decodeErr_ = 0;
+	const char* decodeWhy_ = 0;
 public:
 	virtual bool write_to(const char *path, const char *unit) = 0;
 	/* reader 用ファクトリ: D_META タグから具体型を生成 (未知タグは null)。 */
@@ -102,6 +110,14 @@ public:
 	sPtr<ggMesh> op_intersection(sPtr<ggMesh> b, char *err = 0, int errsz = 0);
 	sPtr<ggMesh> op_difference(sPtr<ggMesh> b, char *err = 0, int errsz = 0);
 
+	/* ---- アフィン変換 (行優先 double[12] = 3x4。cgMesh3D::apply_affine と同じ規約) ----
+	 * 引数の解釈と行列の組み立ては common/affine.h (カーネル非依存)。ここは適用だけ。
+	 * 座標は double なので全頂点を掛けるだけ。
+	 * ⚠ 反射 (det<0) では面の向きが裏返るので **三角形の頂点順を入れ替える**。
+	 *   geogram のブールは面の向きで内外を決めるので、直さないと裏返った立体
+	 *   (体積が負・後段のブールが破綻) を黙って返す。 */
+	sPtr<ggMesh> apply_affine(const double e[12]);
+
 	/* ★ #3436 P4: **n 項ブール**。全オペランドを 1 つの mesh に集めて facet 属性 "operand_bit" で
 	 *   区別し、arrangement を **1 回**だけ走らせて classify(式) で内外を決める。
 	 *   二項を木に積むのと違い中間メッシュを作らない (= 中間キャッシュも無い)。
@@ -124,6 +140,17 @@ public:
 	sPtr<ggMesh> op_solidify(char *err = 0, int errsz = 0);
 
 	double volume() const;
+
+	/* ---- 素性を訊く op (#3487) ----------------------------------------------
+	 * 中身は common/meshprops.h (カーネル非依存)。GEO::Mesh から素の配列へ写して渡す。
+	 * valid の定義は 7 カーネル共通で ① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い
+	 * (meshprops.h 冒頭に根拠つきで書いてある)。
+	 * ⚠ **volume() と違って area() は絶対値ではない** — geogram の mesh_enclosed_volume は
+	 *   fabs するが、面積は向きに依らないので素直に三角形の面積を足す。 */
+	int    op_bbox(double mn[3], double mx[3]) const;
+	int    op_centroid(double c[3]) const;
+	double op_area() const;
+	int    op_valid() const;
 	int    nverts() const { return (int)m_.vertices.nb(); }
 	int    nfaces() const { return (int)m_.facets.nb(); }
 
@@ -142,5 +169,9 @@ private:
 	GEO::Mesh m_;
 	int       meshExactInput_ = 0;   /* 1 = 入力が cgal の "MESH" (厳密境界) */
 };
+
+/* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
+ *   素の gga_err(...) を使うとモジュール名が付かない。 */
+PIG_DEFINE_MODULE_ERR(gga_err, GG_MODULE_NAME)
 
 #endif

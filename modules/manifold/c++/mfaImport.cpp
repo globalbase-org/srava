@@ -69,7 +69,7 @@ mfaImport_::compute()
 	mesh = mfMesh::import_file(path->get_str());
 	if ( ! mesh.is_notNull() ) {
 		sPtr<stdString> msg = thNEW(stdString,("import: failed to read (STL/OFF only) "));
-		result = thNEW(pigDataError,(msg->add(path)));
+		result = mfa_err(msg->add(path));
 	}
 }
 

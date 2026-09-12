@@ -6,6 +6,7 @@
 #include	"cg/c++/cgMesh.h"
 #include	"cg/c++/cgaMeshCodec.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/blockframe.h"   /* ★ #3507: SNC のブロック列を終端まで読み捨てる */
 #include	"common/geodesic.h"   /* sphere/icosphere の測地球生成 (manifold と共通) */
 
 #include	<CGAL/Polygon_mesh_processing/corefinement.h>
@@ -63,7 +64,14 @@ cgMesh3D::decode(cgChunkSource& src)
 {
 	if ( mfm3Input_ ) { decode_mfm3(src); return; }   /* ★ Manifold cache → 無損失昇格(#3404) */
 	if ( nef3Input_ ) {                              /* ★ Nef cache → 表現できるなら降格(#3433) */
-		if ( ! decode_nef3(src) ) { m_.clear(); decodeErr_ = 1; }   /* 表現不能 = reader がエラーにする */
+		if ( ! decode_nef3(src) ) {
+			m_.clear();
+			/* ★ 2026-09-06: 「非 2-多様体だから」は **もう理由ではない** (nef が境界を併記する)。
+			 *   ここまで来るのは境界表現がそもそも取れない値 = 非有界だけ。 */
+			set_decode_err("the Nef value is stored as a bare SNC with no boundary section "
+			               "(it has no boundary representation at all — e.g. it is unbounded, "
+			               "like the result of complement), which cg-mesh3d cannot represent");
+		}
 		return;
 	}
 	cgaMeshCodec::decode(src, m_);    /* Source=cgChunkSource。pull() は virtual 呼び */
@@ -254,7 +262,19 @@ cgMesh3D::decode_nef3(cgChunkSource& src)
 {
 	uint8_t form = 0;
 	src.pull(&form, 1);
-	if ( form != 1 )        /* NF_FORM_BOUNDARY 以外 (= SNC) は cgal では読めない */
+	/* ★ #3478: NF_FORM_SNC_BND (=2) は [SNC のブロック列][厳密境界]。SNC は読めない
+	 *   (cgal.so は CGAL Nef に依存しない = #3440) が、終端まで読み捨てれば後半は
+	 *   form 1 と同一フレーミング。 */
+	if ( form == 2 ) {
+		/* ★ #3507: SNC は [u32 blocklen][block]…[u32 0] のブロック列になった。
+		 *   前置された全長で読み飛ばすのではなく、**終端まで読み捨てる**。 */
+		blockframe::ibuf<cgChunkSource> ib(src);
+		if ( ! ib.drain() )
+			return false;
+		cgaMeshCodec::decode(src, m_);
+		return true;
+	}
+	if ( form != 1 )        /* NF_FORM_BOUNDARY 以外 (= 境界の付かない SNC) は読めない */
 		return false;
 	cgaMeshCodec::decode(src, m_);
 	return true;
@@ -600,6 +620,13 @@ int
 cgMesh3D::op_valid()
 {
 	namespace PMP = CGAL::Polygon_mesh_processing;
+	/* ★ #3487: 共通定義は ① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い。
+	 *   ① は 2026-09-05 まで抜けており、**空メッシュに 1 を返していた** (manifold は 0 で、
+	 *   同じ op が 2 本で違う答えを出していた)。① を入れる根拠は valid の使い道
+	 *   (「空集合はエラー → valid でガード」= bbox / centroid の前段) — 空では
+	 *   その 2 つが定義できないので、ガードとして 1 を返しては役に立たない。
+	 *   定義の全文と経緯は src/h/common/meshprops.h の冒頭。 */
+	if ( m_.number_of_faces() == 0 ) return 0;
 	bool ok = CGAL::is_closed(m_) && ! PMP::does_self_intersect(m_);
 	return ok ? 1 : 0;
 }
@@ -907,10 +934,14 @@ cgMesh::create_for_meta(const uint8_t *meta, int len)
 		m->set_mfc2_input();
 		return m;
 	}
-	/* ★ #3433: Nef カーネルの出力 "NEF3"(SNC) も 3D として受理。decode で SNC を読み、
-	 *   **有界かつ 2-多様体のときだけ** Surface_mesh へ落とす (cg の表現力の範囲)。 */
-	if ( len == 4 && meta[0]=='N' && meta[1]=='E' && meta[2]=='F' &&
-	     ( meta[3]=='3' || meta[3]=='B' ) ) {   /* nef_snc="NEF3" / nef_hybrid="NEFB" */
+	/* ★ #3433: Nef カーネルの出力 "NEFB" (nef_hybrid) を 3D として受理。payload 先頭 1 バイトが
+	 *   形式で、厳密境界 (=1) または SNC+境界 (=2) なら **CGAL Nef 無しで**後半を読める。
+	 *   ★★ #3499: **"NEF3" (nef_snc) は受理しない**。nef_snc は「常に SNC だけ」を書くように
+	 *     戻したので、ここで受けても中身を読めない (SNC のパースには CGAL Nef が要り、cgal.so は
+	 *     CGAL Nef 非依存 = #3440)。nf-mesh3d → cg-mesh3d の変換は **橋モジュール nef_cg.so** が
+	 *     持つ。ここで名乗ったままにすると、橋があるのに cgal 側の reader が先に掴んで
+	 *     「読めない」で落ちる (実際に踏んだ)。 */
+	if ( len == 4 && ::memcmp(meta, "NEFB", 4) == 0 ) {
 		sPtr<cgMesh3D> m = thNEW(cgMesh3D,());
 		m->set_nef3_input();
 		return m;

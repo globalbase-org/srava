@@ -8,6 +8,11 @@
 #include	"d5/c++/d5Mesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d5aNfaces_.h"
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] d5/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(d5a_err, "d5")
+
 
 CLASS_TINYSTATE(d5/c++/d5aNfaces,pig/c++/ptsCalcBody)
 
@@ -61,7 +66,7 @@ d5aNfaces_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<d5Mesh> in = ( na > 0 ) ? sPtr<d5Mesh>::d_cast((*args)[0]) : sPtr<d5Mesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nfaces: needs a d5 mesh"))));
+		result = d5a_err(thNEW(stdString,("nfaces: needs a d5 mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->nf()));

@@ -23,6 +23,28 @@ export SRAVA_PATH
 T=/tmp
 if command -v cygpath >/dev/null 2>&1; then T=$(cygpath -m /tmp); D=$(cygpath -m "$D"); fi
 rm -rf "$D"
+
+# ★ 2026-09-06: **部分ビルドで赤にならないための絞り込み**。
+#   カーネル名をべた書きで回すモード (errmodule / empty3dset) と pipe_proximity を使う節は、
+#   -DSRAVA_MODULE_<NAME>=OFF (README が公式にサポートする構成) で建っていないモジュールを
+#   要求して落ちていた。CMake が SRAVA_TEST_MODULES に「実際に建ったモジュール」を入れて
+#   渡すので、各モードは **自分が見たい一覧と突き合わせて**絞る。
+#   ⚠ 未設定なら絞らない (手で叩いたときは従来どおり全部を試す)。
+#   ★ 「そのモードごと登録しない」ではなく絞る形にしたのは、建っている *他の* カーネルの
+#     検査を残すため。フルビルドでの網羅は 1 つも変わらない。
+kernels() {   # $@ = このモードが見たいモジュール → そのうち建っているものだけを出す
+	if [ -z "${SRAVA_TEST_MODULES}" ]; then echo "$@"; return; fi
+	_out=""
+	for _k in "$@"; do
+		case " $SRAVA_TEST_MODULES " in *" $_k "*) _out="$_out $_k" ;; esac
+	done
+	echo $_out
+}
+have() {   # $1 = モジュール名。建っていれば真
+	[ -z "${SRAVA_TEST_MODULES}" ] && return 0
+	case " $SRAVA_TEST_MODULES " in *" $1 "*) return 0 ;; esac
+	return 1
+}
 case "$MODE" in
 callform)
 	SRAVA_SOURCE='var mNVF0 = export(union(box(2,2,2), box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
@@ -210,9 +232,17 @@ mf_inproc_nested_array)
 		SRAVA_SOURCE="module(\"pipe_proximity.so\",{exec_default:\"$1\"}); $MKB print(\"R\", length(pipe_scene_proximity(b, 8.0)));" \
 		  "$SRAVA" 2>/dev/null | sed -n 's/^R //p'
 	}
-	BT=$(gb thread); BP=$(gb process)
-	echo "bodies  in-proc=$BT process=$BP"
-	if [ -n "$TT" ] && [ "$TT" = "$TP" ] && [ -n "$PT" ] && [ "$PT" = "$PP" ] && [ -n "$BT" ] && [ "$BT" = "$BP" ]
+	# ★ bodies の節は pipe_proximity.so を要る (-DSRAVA_MODULE_PIPEPROX=OFF なら飛ばす)。
+	#   tube / polygon の 2 本は manifold だけで済むので、飛ばしても検査は残る。
+	if have pipe_proximity; then
+		BT=$(gb thread); BP=$(gb process)
+		echo "bodies  in-proc=$BT process=$BP"
+		BOK=$([ -n "$BT" ] && [ "$BT" = "$BP" ] && echo 1)
+	else
+		echo "bodies  (pipe_proximity.so が建っていないので飛ばす)"
+		BOK=1
+	fi
+	if [ -n "$TT" ] && [ "$TT" = "$TP" ] && [ -n "$PT" ] && [ "$PT" = "$PP" ] && [ "$BOK" = "1" ]
 	then echo "NESTED-INPROC-OK"; else echo "FAIL: in-proc/process mismatch"; fi ;;
 mf_tube_inproc)
 	# ★#3415 の眼目: tube が manifold にも在ることで、tube 主体の連鎖が丸ごと in-proc に乗る。
@@ -643,7 +673,12 @@ module_off_invisible)
 	#   ② 拡張子層: cgal だけが書ける .svg は書けない (ファイルもできない)
 	#   ③ off の意味は保たれる: 既定カーネルが次点 (manifold) へ落ちて計算は通る
 	#   ④ module(so,{}) で再ロードできる (アンロードは不可逆でない)
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
+	# ★ #3499: cg-mesh3d を産出できるモジュールは cgal だけではない — 橋 nef_cg.so も名乗る
+	#   (nf-mesh3d → cg-mesh3d の変換専用)。「産出者が 1 つも無い」状態を作るには両方 off に
+	#   する必要がある。nef_cg.so は SRAVA_MODULE_NEF_SNC=ON のビルドにしか無いので
+	#   module_loaded で守る (未ロードへの off は明示エラー)。
+	out=$(SRAVA_SOURCE='module("cgal.so","off"); if (module_loaded("nef_cg.so")) { module("nef_cg.so","off"); }
+	      print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "産出できるモジュールが無い" || { echo "FAIL(1): off 中の型へ cast できてしまう: $out"; exit 1; }
 	rm -f /tmp/srava-off-invisible.svg
 	out=$(SRAVA_SOURCE='module("cgal.so","off"); export("/tmp/srava-off-invisible.svg", rect(2,2));' "$SRAVA" 2>&1)
@@ -678,7 +713,9 @@ cast_no_producer)
 	out=$(SRAVA_SOURCE='print("V", volume(cast("zz-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "産出できるモジュールが無い" || { echo "FAIL(1): 存在しない型への cast が素通り: $out"; exit 1; }
 	echo "$out" | grep -q "^V " && { echo "FAIL(1): 値が返っている: $out"; exit 1; }
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
+	# ★ #3499: 橋 nef_cg.so も cg-mesh3d を産出すると名乗るので、こちらも落としてから見る。
+	out=$(SRAVA_SOURCE='module("cgal.so","off"); if (module_loaded("nef_cg.so")) { module("nef_cg.so","off"); }
+	      print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "産出できるモジュールが無い" || { echo "FAIL(2): off 中のモジュールの型へ cast できてしまう: $out"; exit 1; }
 	out=$(SRAVA_SOURCE='print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "^V 8" || { echo "FAIL(3): 正常な cast が通らない: $out"; exit 1; }
@@ -731,7 +768,9 @@ module_info)
 	MD=$(dirname "$SRAVA")
 	out=$(SRAVA_MODULE_PATH="$MD" "$SRAVA" --module-info manifold 2>&1)
 	echo "$out" | grep -q "^manifold  (abi=" || { echo "FAIL(1): 見出しが出ない: $out"; exit 1; }
-	echo "$out" | grep -q "sig = \[mf-mesh3d\](\*)->mf-mesh3d" ||
+	# ★ #3464: fold 集合に同じ精度クラス (gg / ch) が入ったので、型を列挙せず
+	#   「fold 形で自型を先頭に出す」ことだけを見る (集合の中身は増減しうる)。
+	echo "$out" | grep -qE "sig = \[mf-mesh3d[a-z0-9,-]*\]\(\*\)->mf-mesh3d" ||
 		{ echo "FAIL(2): op の sig が出ない: $out"; exit 1; }
 	# ★ 実行方式は caps (できること) と default (既定) の 2 つを出す — 別物なので両方要る
 	#   (openvdb は caps=thread|process だが default=process)。
@@ -998,6 +1037,160 @@ errloc)
 	EF="$D.sra"
 	printf '// comment line 1\nvar a = box(1,1,1);\nexport(volume(rect(2,2)));\n' > "$EF"
 	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,4\]|exit cleanup: skipped' | head -2 ;;
+assignerr)
+	# 通常代入の右辺がエラーのとき、その変数を一度も使わなくても **代入地点で** 報告される (#3476)。
+	# 修正前はエラー値が黙って束縛され、未使用のまま最後まで走り抜けていた(= REACHED_END が出た)。
+	# ★ #3452: SRAVA_MODULE_ALL=1 の include 合成で +1 行ずれる(errloc と同じ理由)。
+	EF="$D.sra"
+	printf '// comment line 1\nvar bad = volume(rect(2,2));\nprint("REACHED_END");\n' > "$EF"
+	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,3\].*volume|REACHED_END' | head -2 ;;
+solids_one_kernel)
+	# ★ #3474: 基本立体の欠落で **式全体のカーネル選択が裏返る**のを止めた回帰。
+	#   manifold **だけ**を載せて 5 立体すべてが引けることを見る。修正前は pyramid が cgal に
+	#   しか無いので "no module can execute op 'pyramid'" で落ちた (= cgal を載せない限り
+	#   pyramid を含む式は書けず、載せると式全体が cg-mesh3d に落ちていた)。
+	EF="$D.sra"
+	printf 'module("manifold.so");\nprint("S",\n  volume(pyramid(4,2,1)), volume(cylinder(1,2,32)),\n  volume(cone(1,2,32)), volume(torus(2,0.5,32)), volume(tetrahedron(1)));\n' > "$EF"
+	SRAVA_MODULE_ALL= "$SRAVA" "$EF" 2>&1 | grep -E '^S |ERROR' | head -2 ;;
+errmodule)
+	# ★ #3475: 幾何エラーが **どのカーネルが出したか**を名乗ること ("cgal/cone: ...")。
+	#   利用者は「manifold を既定にしていたのに cgal のエラーが出た」を追えなかった
+	#   (式の中でカーネルが混ざるのは正常な動作なので、エラー側が名乗らないと追跡できない)。
+	#   ★ **process 実行 (cgal) と in-proc 実行 (manifold) の両方**を見る — 属性/モジュール名は
+	#     wire (テキスト) を跨ぐ必要があるので、経路ごとに落ちうる。
+	OK=1
+	KLIST=$(kernels cgal manifold geogram occt)
+	[ -n "$KLIST" ] || { echo "ERRMODULE-OK (検査対象のカーネルが 1 つも建っていない)"; exit 0; }
+	for K in $KLIST; do
+		rm -rf "$D-$K"
+		OUT=$(SRAVA_CACHE_DIR="$D-$K" SRAVA_SOURCE="module(\"$K.so\",{priority:99});
+		      print(volume(\"$K\"::cone(-1,2,32)));" "$SRAVA" 2>&1)
+		echo "$OUT" | grep -qE "ERROR\[[^]]*\] $K/cone: radius must be > 0" || {
+			echo "FAIL: $K のエラーが '$K/cone:' で始まっていない"; echo "$OUT"; OK=0; }
+	done
+	# ★ 属性タグ [FATAL] は **表示に漏れない** (wire を跨ぐための表現で利用者向けではない)
+	rm -rf "$D-tag"
+	OUT=$(SRAVA_CACHE_DIR="$D-tag" SRAVA_SOURCE='var a = box(2,2,2); var b = box(2,2,2); print(a + b);' "$SRAVA" 2>&1)
+	echo "$OUT" | grep -q 'ERROR' || { echo "FAIL: mesh + mesh がエラーになっていない"; echo "$OUT"; OK=0; }
+	echo "$OUT" | grep -q '\[FATAL\]' && { echo "FAIL: [FATAL] タグが利用者向け表示に漏れている"; echo "$OUT"; OK=0; }
+	[ "$OK" = "1" ] && echo "ERRMODULE-OK" ;;
+introspect)
+	# ★ #3477: 実行時の内省 3 本。狙いは「今日 union がどのカーネルで走ったのか分からなかった」の
+	#   直接の対策なので、**カーネルが混ざる状況で正しい答えを返すこと**を見る。
+	OK=1
+	EF="$D.sra"
+	printf 'module("manifold.so",{priority:99});\nmodule("cgal.so",{priority:20});\n' > "$EF"
+	printf 'print("M", modules());\n' >> "$EF"
+	printf 'print("T", type_of(box(2,2,2)), type_of(3));\n' >> "$EF"
+	printf 'print("W", which("union","cg-mesh3d"));\n' >> "$EF"
+	OUT=$("$SRAVA" "$EF" 2>&1)
+	# ① modules(): priority 降順・module() の指定が効いている
+	echo "$OUT" | grep -qE '^M manifold:99 cgal:20' || {
+		echo "FAIL: modules() が priority 降順で manifold:99 cgal:20 を返していない"; echo "$OUT"; OK=0; }
+	# ② type_of(): manifold が最優先なので box は mf-mesh3d・スカラは value
+	echo "$OUT" | grep -qE '^T mf-mesh3d value$' || {
+		echo "FAIL: type_of() が 'mf-mesh3d value' を返していない"; echo "$OUT"; OK=0; }
+	# ③ which(): ★ cg-mesh3d を渡すと **manifold は候補から外れる** (cgal は mf を食えるが
+	#    manifold は cg を食えない)。これが「op 名だけでは決まらない」の実例そのもの。
+	echo "$OUT" | grep -qE '^W cgal:20:' || {
+		echo "FAIL: which(union,cg-mesh3d) の先頭が cgal でない"; echo "$OUT"; OK=0; }
+	echo "$OUT" | sed -n 's/^W //p' | grep -q 'manifold:' && {
+		echo "FAIL: which(union,cg-mesh3d) に manifold が残っている (cg を食えないはず)"; echo "$OUT"; OK=0; }
+	[ "$OK" = "1" ] && echo "INTROSPECT-OK" ;;
+argarity)
+	# ★ #3474 続き (nreq): 「省略できる引数」は **記述子が言い、既定値は op が入れる**。
+	#   ⚠ 以前はパーサが固定 arity のノードへ組み直して既定値を埋めていたため、
+	#     宣言した個数より後ろの引数が **黙って捨てられて**いた (sphere(1,32,5) が通った)。
+	#   ★ nreq はモジュールごとに違う: メッシュ系の sphere(r,seg) は seg 省略可だが、
+	#     openvdb の sphere(r,dx) は dx がボクセルサイズなので **省略できない**。
+	#     パーサはどのモジュールが実行するか知らない (routing は eval 時) ので、
+	#     この違いはパーサ側では表現できない = 記述子に持たせるのが正しい。
+	OK=1
+	run() { rm -rf "$D-aa"; SRAVA_CACHE_DIR="$D-aa" SRAVA_SOURCE="$1" "$SRAVA" 2>&1; }
+	# ① 省略形は通る (既定値は op の compute() が入れる)
+	echo "$(run 'print("V", volume(sphere(1)));')" | grep -qE '^V 4\.09' || {
+		echo "FAIL: sphere(1) が通らない (nreq=1 が効いていない)"; OK=0; }
+	echo "$(run 'print("V", volume(tube([[[0,0,0],1],[[2,0,0],1]])));')" | grep -q '^V ' || {
+		echo "FAIL: tube(path) が通らない"; OK=0; }
+	# ② ★ 余分な引数は **黙って捨てず**弾く (この回帰が本題)
+	echo "$(run 'print("V", volume(sphere(1,32,5)));')" | grep -q 'too many arguments' || {
+		echo "FAIL: sphere(1,32,5) の余分な引数が弾かれていない"; OK=0; }
+	echo "$(run 'print("V", volume(tube([[[0,0,0],1],[[2,0,0],1]],16,99)));')" \
+		| grep -q 'too many arguments' || { echo "FAIL: tube の余分な引数が弾かれていない"; OK=0; }
+	# ③ 必須より少なければ弾く (範囲つきの文言)
+	echo "$(run 'print("V", volume(sphere()));')" | grep -q 'expected 1 to 2 argument' || {
+		echo "FAIL: sphere() が必須不足として弾かれていない"; OK=0; }
+	# ④ ★ 同じ op でも **モジュールで必須個数が違う**: openvdb の sphere は dx 必須
+	echo "$(run 'module("openvdb.so",{priority:99}); print("V", volume(sphere(1)));')" \
+		| grep -q 'expected 2 argument' || {
+		echo "FAIL: openvdb の sphere(1) が dx 必須として弾かれていない"; OK=0; }
+	echo "$(run 'module("openvdb.so",{priority:99}); print("V", volume(sphere(1,0.05)));')" \
+		| grep -q '^V ' || { echo "FAIL: openvdb の sphere(1,0.05) が通らない"; OK=0; }
+	[ "$OK" = "1" ] && echo "ARGARITY-OK" ;;
+empty3dset)
+	# ★ #3474 続き (2026-09-05): empty3d() は **値としての空集合**であって fold の中立元 `{}` では
+	#   ない。全カーネルで集合演算として正しく振る舞うこと:
+	#       volume(empty3d())              = 0
+	#       intersection(a, empty3d())     = 空   (中立元なら a になってしまう)
+	#       union(a, empty3d())            = a
+	#   ⚠ cherchi は **実際にここで間違えていた** — ソウプ + label 方式なので、三角形を 1 つも
+	#     持たないオペランドは「最初から無かった」ことになり intersection(box, empty3d()) が
+	#     box を返していた (chMesh.cpp で空を先に畳むように修正)。
+	#   ⚠ openvdb は空格子の体積で OpenVDB が throw していた
+	#     ("LevelSetMeasure does not support empty grids") → vdGrid::volume に空ガード。
+	OK=1
+	KLIST=$(kernels cgal manifold geogram cherchi nef_hybrid occt)
+	[ -n "$KLIST" ] || { echo "EMPTY3D-OK (検査対象のカーネルが 1 つも建っていない)"; exit 0; }
+	for K in $KLIST; do
+		rm -rf "$D-$K"
+		OUT=$(SRAVA_CACHE_DIR="$D-$K" SRAVA_SOURCE="module(\"$K.so\",{priority:99});
+		      print(\"E\", volume(empty3d()),
+		            volume(intersection(box(2,2,2), empty3d())),
+		            volume(union(box(2,2,2), empty3d())));" "$SRAVA" 2>&1)
+		echo "$OUT" | grep -qE '^E 0 0 (8|7\.99999999999)' || {
+			echo "FAIL: $K の empty3d が集合演算になっていない (期待 'E 0 0 8')"; echo "$OUT"; OK=0; }
+	done
+	# openvdb は dx を取る (空でも「どの格子の上の空か」が要る)
+	rm -rf "$D-vd"
+	OUT=$(SRAVA_CACHE_DIR="$D-vd" SRAVA_SOURCE='module("openvdb.so",{priority:99});
+	      print("E", volume(empty3d(0.05)),
+	            volume(intersection(box(2,2,2,0.05), empty3d(0.05))));' "$SRAVA" 2>&1)
+	echo "$OUT" | grep -qE '^E 0 0' || {
+		echo "FAIL: openvdb の empty3d(dx) が集合演算になっていない"; echo "$OUT"; OK=0; }
+	# dx を省略したら明示エラー (モジュールごとに必須個数が違うことの確認)
+	rm -rf "$D-vd2"
+	OUT=$(SRAVA_CACHE_DIR="$D-vd2" SRAVA_SOURCE='module("openvdb.so",{priority:99});
+	      print("E", volume(empty3d()));' "$SRAVA" 2>&1)
+	echo "$OUT" | grep -q 'expected 1 argument' || {
+		echo "FAIL: openvdb の empty3d() が dx 必須として弾かれていない"; echo "$OUT"; OK=0; }
+	[ "$OK" = "1" ] && echo "EMPTY3D-OK" ;;
+vdguard)
+	# ★ #3474 続き (2026-09-05): openvdb 系モジュールの **例外境界**。
+	#   openvdb / openvdb_mf / openvdb_cg / openvdb_gg には catch が **1 つも無く**、
+	#   ライブラリが投げると受け手が居ないまま伝播していた
+	#   ("module threw an uncaught exception")。ワーカースレッド由来なら agent ごと死ぬ
+	#   (geogram で実際に踏んだ形。occt は Standard_Failure 専用 catch を、
+	#    cherchi は ch_guard を持って対処済みだった)。
+	#   ⇒ 全 op が通る vd_in_arena に境界を張った (vdArena.h の vd_arena_guard)。
+	#   ★ TBB はワーカースレッドで投げられた例外を execute() の呼び出し元で rethrow するので、
+	#     この層に置けば op 内並列からの throw も受けられる。
+	OK=1
+	# dx が小さすぎると openvdb 自身が ArithmeticError を投げる = 自然に throw する経路
+	rm -rf "$D-g"
+	OUT=$(SRAVA_CACHE_DIR="$D-g" SRAVA_SOURCE='module("openvdb.so",{priority:99});
+	      print("V", volume(box(2,2,2,1e-7)));' "$SRAVA" 2>&1)
+	echo "$OUT" | grep -q 'uncaught exception' && {
+		echo "FAIL: openvdb の例外が受け止められていない (境界が無い)"; echo "$OUT"; OK=0; }
+	# ★ 握り潰さず、**モジュール名と op 名つきのエラー**になること
+	echo "$OUT" | grep -qE 'ERROR\[[^]]*\] openvdb/box: openvdb failed' || {
+		echo "FAIL: 例外が 'openvdb/box: openvdb failed (...)' になっていない"; echo "$OUT"; OK=0; }
+	# 空格子は throw させず 0 を返す (境界より手前で正しい答えを返す方が良い)
+	rm -rf "$D-g2"
+	OUT2=$(SRAVA_CACHE_DIR="$D-g2" SRAVA_SOURCE='module("openvdb.so",{priority:99});
+	       print("V", volume(empty3d(0.05)));' "$SRAVA" 2>&1)
+	echo "$OUT2" | grep -qE '^V 0$' || {
+		echo "FAIL: 空格子の体積が 0 になっていない"; echo "$OUT2"; OK=0; }
+	[ "$OK" = "1" ] && echo "VDGUARD-OK" ;;
 logic)
 	# 論理演算子 && || ! と優先順位。&&>||(prec1)、比較>&&(prec0)、!>==(notp)。
 	# 値返し op(valid/volume)を論理オペランドにも使える。出力 "L 1 0 1 0 1 0 1 0 1 1"。
@@ -1424,6 +1617,16 @@ pipeprox_wspace)
 	if ( ra > 50 ) { if ( rb < 1.1 ) { if ( b.feasible == 1 ) { ok = 1; } } }
 	print("WS", ok);' "$SRAVA" 2>&1 | grep "^WS")
 	if [ "$OUT" = "WS 1" ]; then echo "PIPEWSPACE_OK"; else echo "PIPEWSPACE_FAIL: $OUT"; fi ;;
+decode_refusal_reason)
+	# ★ #3479: 「読めなかった」だけでなく **なぜ読めなかったか** が利用者に届くこと。
+	#   nef_hybrid が SNC 形式 (境界の付かない形) で書いた値は manifold が
+	#   (CGAL 非依存なので) 復号できない。従来はこの理由が reader の errCode に潰れて捨てられ、
+	#   利用者には「codec が無い / 表現できない / 形式が違う」の 3 択を並べた推測が出ていた。
+	#   ⚠ 2026-09-06: 以前ここは **稜だけで接する 2 つの箱** (非 2-多様体) を使っていたが、
+	#     nef が非 2-多様体でも境界を併記するようになったので **読めるようになった** =
+	#     拒否の題材にならない。境界表現がそもそも取れない値 = **非有界** (complement) に替えた。
+	SRAVA_SOURCE='module("nef_hybrid.so",{priority:100});
+	print("vol", volume(cast("mf-mesh3d", complement(box(1,1,1)))));' exec "$SRAVA" ;;
 *)
 	echo "unknown mode: $MODE"; exit 2 ;;
 esac

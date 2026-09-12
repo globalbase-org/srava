@@ -70,7 +70,7 @@ cgaClosest_::compute()
 	sPtr<cgMesh3D> a = ( na > 0 ) ? sPtr<cgMesh3D>::d_cast((*args)[0]) : sPtr<cgMesh3D>();
 	sPtr<cgMesh3D> b = ( na > 1 ) ? sPtr<cgMesh3D>::d_cast((*args)[1]) : sPtr<cgMesh3D>();
 	if ( ! a.is_notNull() || ! b.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("closest: needs two 3D meshes"))));
+		result = cga_err(thNEW(stdString,("closest: needs two 3D meshes")));
 		return;
 	}
 	double pa[3], pb[3];

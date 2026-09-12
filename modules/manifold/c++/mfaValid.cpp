@@ -67,7 +67,7 @@ mfaValid_::compute()
 	if ( m3.is_notNull() )      v = m3->op_valid();
 	else if ( c2.is_notNull() ) v = ( c2->op_area() > 0.0 ) ? 1 : 0;   /* 2D: 非空なら valid */
 	else {
-		result = thNEW(pigDataError,(thNEW(stdString,("valid: needs a mesh"))));
+		result = mfa_err(thNEW(stdString,("valid: needs a mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)v));

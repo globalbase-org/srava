@@ -41,8 +41,10 @@ PIG_WIRE_DEF(ocGeom, oc_mk_reader, oc_mk_writer);
  *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
 extern const pigModuleType occt_provides[];
 const pigModuleType occt_provides[] = {
-	{ &ocGeom::WIRE, OC_TYPE,
-	  OC_TAG },
+	/* ★ #3471: 2D 領域 (oc-cross2d / BRP2) を追加。1 行で 2 型 — wire は階層の根 1 つで、
+	 *   どのタグがどの型になるかは create_for_meta が答える (cgal の cg-mesh3d,cg-cross2d と同じ形)。 */
+	{ &ocGeom::WIRE, OC_TYPE "," OC2_TYPE,
+	  OC_TAG "," OC2_TAG },
 	{ 0, 0, 0 },
 };
 

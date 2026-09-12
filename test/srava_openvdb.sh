@@ -19,8 +19,9 @@
 #              **偏る**。★**測り方の問題であって、形の問題ではない**。当初「切断面が 1 ボクセル
 #                太る表現の性質」と書いたが誤りで、等値面を取り出して測ると正しく、
 #                renormalize すれば levelSetVolume も単体の箱と同じ水準に戻る。
-#              ★2026-08-19 以降、volume() は印を見て**自動で**作り直すので、上の表の
-#                「そのまま」列の値はもう出ない (renorm モードがそれを固定する)。
+#              ★2026-09-06 (#3489) 以降、volume() / area() は **符号つきボクセル積分**なので
+#                |grad| = 1 を仮定せず、印 (正規化済みか) も見ない。作り直し (levelSetRebuild) は
+#                測る経路から消えた — それが **内部空洞を埋めていた**のが #3489 の欠陥。
 #              ★非対称の理由: intersection = max(a,b) は場を崩さない (同じ形を直接 voxelize
 #                したものと **相対 1e-14 で一致**する) が、difference = max(a,-b) の**反転**が崩す。
 #                (bit 一致ではない — 先頭 15 桁が合うだけ。最初 bit 一致と書いてテストに捕まった。)
@@ -31,9 +32,12 @@
 #              ★メッシュ系の 3D offset (nef の球との Minkowski 和) との比較は
 #              docs/srava_module_reference.md の測定表を参照 — 入力メッシュの複雑さに対して
 #              nef は超線形・vd は**平坦**という「形の違い」が要点。
-#   renorm   … ★volume() が「場が真の距離場か」の印を見て、必要なときだけ作り直してから
-#              測ること。印は grid メタデータなので .vdb キャッシュを越える = cold と warm で
-#              同じ値になる。ここが壊れると warm だけ 4.2 に化ける。
+#   renorm   … ★ブールの結果 (非正規化) の volume が **cold と warm で同じ値**になり、かつ
+#              厳密値の 1% 以内であること。⚠ 名前は「印 (正規化済みか) を見る」時代の名残で、
+#              #3489 以降 volume() は印を見ない (符号つきボクセル積分は |grad| に依らない)。
+#              見張る不変条件は変わらない: 測り方が実行経路 (cold/warm) で変わらないこと。
+#   cavity   … ★ #3489。**測り方**が内部空洞を落とさないこと。中空の殻が「詰まった球」に化けない。
+#   cavity_vox… ★ #3491。**格子を作る側** (voxelize / renormalize) が内部空洞を埋めないこと。
 SRAVA="$1"
 MODE="${2:-inputs}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
@@ -46,7 +50,10 @@ vox() {   # $1=先に載せるモジュール指定 $2=dx $3=cachedir  → "体�
 }
 
 case "$MODE" in
-inputs)
+inputs)# ★ #3485: ここは **意図的な routing 依存** — manifold / cgal / geogram を上げても voxelize / voxels は持ち主へ落ちる、
+#   ことを見ている。名指し ("mod"::op) に直すと **検査の意味が消える**。
+#   承認済みリスト = test/routing_dependency.txt (ctest srava_routing_dependency が見張る)
+
 	MF=$(vox 'module("manifold.so",{priority:99}); module("openvdb.so",{}); module("openvdb_mf.so",{});' 0.05 "$D-mf")
 	CG=$(vox 'module("cgal.so",{priority:99}); module("openvdb.so",{}); module("openvdb_cg.so",{});'     0.05 "$D-cg")
 	GG=$(vox 'module("geogram.so",{priority:99}); module("openvdb.so",{}); module("openvdb_gg.so",{});'  0.05 "$D-gg")
@@ -90,8 +97,11 @@ bools)
 	SP=$(echo "$OUT" | sed -n 's/^SP //p')
 	if [ -z "$U" ] || [ -z "$I" ] || [ -z "$F" ] || [ -z "$SI" ] || [ -z "$SP" ]; then
 		echo "FAIL: 値が出ない U=$U I=$I F=$F SI=$SI SP=$SP"; echo "$OUT"; exit 1; fi
-	# 厳密値は union=12 / intersection=4 / difference=4。★difference も **volume() が自動で
-	# 作り直す**ので 1% 以内に入る (印を付け忘れると大きく外れて落ちる)。
+	# 厳密値は union=12 / intersection=4 / difference=4。
+	# ★ difference が要点。max(a,-b) は a と b が **面を共有している**ところに
+	#   「φ = 0 だが負にならない膜」を残し、素朴に測るとそれが材料に化けて 4.24 になる
+	#   (levelSetVolume でも 4.20)。ゼロ交差ゲートが効いていれば 4.03 に収まる。
+	#   詳細は modules/openvdb/c++/vdGrid.cpp の op_area 直上。
 	ok=$(awk -v u="$U" -v i="$I" -v f="$F" 'BEGIN{
 		du=u-12; if(du<0)du=-du; di=i-4; if(di<0)di=-di; df=f-4; if(df<0)df=-df;
 		print (du<0.12 && di<0.04 && df<0.04) ? 1 : 0 }')
@@ -124,17 +134,20 @@ dxmix)
 	  print(\"V\", volume(union(a,b)));" "$SRAVA" 2>&1)
 	if echo "$OUT" | grep -q "^V "; then
 		echo "FAIL: 格子が違うのに値を返した: $(echo "$OUT" | sed -n 's/^V //p')"; exit 1; fi
-	echo "$OUT" | grep -q "voxel sizes differ" || {
-		echo "FAIL: 期待したエラー (voxel sizes differ) が出ない"; echo "$OUT" | head -5; exit 1; }
+	# ★ #3462 (2026-08-31): 検査を voxel_size の比較から **transform 全体の比較**へ広げたので
+	#   文言が変わった。dx が違うときは voxel size を、dx が同じで map が違うときは transform を
+	#   名指しする。どちらも "different voxel size" / "different transform" を含む。
+	echo "$OUT" | grep -qE "different (voxel size|transform)" || {
+		echo "FAIL: 期待したエラー (格子の食い違い) が出ない"; echo "$OUT" | head -5; exit 1; }
 	echo "OPENVDB-DXMIX-OK (格子違いは明示エラー)" ;;
 renorm)
-	# ★ ブールの結果は真の距離場ではないので levelSetVolume が偏る。
-	#   volume() は **印を見て必要なときだけ作り直してから**測る (ひさ判断 2026-08-19: 黙って
-	#   5% 間違う方が危険)。ここで固定するのは 2 つ:
-	#     (1) ブール結果の volume が厳密値の 1% 以内 (= 自動の作り直しが効いている)
-	#     (2) ★**cold と warm で同じ値**。印は grid のメタデータに載せて .vdb を越えさせて
-	#         いるので、これが壊れると warm だけ 4.2 に化ける = 「答えが正しく見えたまま
-	#         変わる」型の欠陥 (型スタンプで一度潰したのと同じ形の罠)。
+	# ★ ブールの結果は真の距離場ではない (|grad| = 1 が崩れる)。ここで固定するのは 2 つ:
+	#     (1) ブール結果の volume が厳密値の 1% 以内
+	#     (2) ★**cold と warm で同じ値**。測り方が実行経路で変わると「答えが正しく見えたまま
+	#         変わる」型の欠陥になる (型スタンプで一度潰したのと同じ形の罠)。
+	#   ⚠ #3489 以降 volume() は符号つきボクセル積分で **|grad| にも印にも依存しない**ので、
+	#     (2) は構造的に成り立つ。それでも残してあるのは、将来また経路で分岐する実装に
+	#     戻したときに **ここが最初に落ちる**ようにしておくため。
 	rm -rf "$D-n"
 	PROG='module("manifold.so",{priority:99}); module("openvdb.so",{}); module("openvdb_mf.so",{});
 	  var a = voxelize(box(2,2,2), 0.05);
@@ -184,11 +197,21 @@ steiner)
 	#       V(P (+) B_d) = V + A*d + M*d^2 + (4/3)*pi*d^3
 	#   box(2,2,2) は V=8 / A=24 / M=6pi なので d=0.1 の真値は 10.592684349420175。
 	#
-	#   ★ ここで固定したいのは値そのものより **dx を細かくすると誤差が減ること (収束)**。
-	#     offset の結果に「距離場として正規化済み」の印を誤って立てると、volume() が
-	#     測る前の作り直しを省き、**dx を細かくしても誤差が張り付いて減らなくなる**
-	#     (2026-08-20 に実際にそうなっていた)。値の絶対誤差だけを見る従来のテスト
-	#     (offset モードの 5% 許容) では、この「収束しない誤差」を検出できない。
+	#   ★ ここで固定したいのは **offset のように場が大きく非正規化された (|grad| != 1) 入力でも
+	#     volume が偏らないこと**。offset は距離場を崩す代表例で、|grad| = 1 を仮定する
+	#     levelSetVolume はここで **+0.2% 前後に偏り、dx を細かくしても減らない**。
+	#
+	#   ⚠ 2026-09-06 (#3489) までは「誤差が dx とともに 2 倍以上改善する (収束)」を要求していた。
+	#     volume() が符号つきボクセル積分になり **|grad| に依存しなくなった**ので、
+	#     dx=0.05 の時点で既に offset フィルタ自身の形状誤差の底 (相対 2-3e-4) に達しており、
+	#     「誤差が半分になる」はもう成立しない。実測 (createLevelSetBox + LevelSetFilter):
+	#         dx=0.05 -2.7e-4 / 0.025 -3.3e-4 / 0.0125 -3.3e-4 / 0.00625 -1.3e-4
+	#     ★ 収束比を要求し続けると **欠陥 (偏り) が残っていることを前提にした主張**になるので、
+	#       主張を「両方の解像度で相対 1e-3 以内」へ置き換える。これは粗い側では従来より
+	#       **強い** 要求で、旧実装は両方の解像度で落ちる:
+	#         作り直し無しの levelSetVolume  dx=0.05 +2.0e-3 / dx=0.0125 +1.6e-3
+	#         測る前に levelSetRebuild       dx=0.05 -2.5e-3 / dx=0.0125 -5.4e-4
+	#       = 「印を誤って立てる」も「作り直しへ戻す」もここで捕まる。
 	rm -rf "$D-st"
 	OUT=$(SRAVA_CACHE_DIR="$D-st" SRAVA_SOURCE="module(\"manifold.so\",{priority:99}); module(\"openvdb.so\",{}); module(\"openvdb_mf.so\",{});
 	  print(\"C\", volume(offset(voxelize(box(2,2,2), 0.05),   0.1)));
@@ -200,11 +223,77 @@ steiner)
 		t = 10.592684349420175;
 		ec = (c-t)/t; if(ec<0) ec=-ec;
 		ef = (f-t)/t; if(ef<0) ef=-ef;
-		# (1) 粗い側でも 1% 以内 (2) 細かい側は 0.1% 以内
-		# (3) ★誤差が 2 倍以上改善する = 収束している (張り付いていない)
-		print (ec<0.01 && ef<0.001 && ef*2 < ec) ? 1 : 0 }')
-	[ "$ok" = "1" ] || { echo "FAIL: Steiner の真値 10.5926843494 に収束していない dx=0.05 -> $C / dx=0.0125 -> $F"; exit 1; }
+		# ★ 両方の解像度で相対 1e-3 以内 (= |grad| への依存が残っていれば落ちる)
+		print (ec<0.001 && ef<0.001) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: Steiner の真値 10.5926843494 から相対 1e-3 を超えた dx=0.05 -> $C / dx=0.0125 -> $F"; exit 1; }
 	echo "OPENVDB-STEINER-OK dx0.05=$C dx0.0125=$F (真値 10.5926843494)" ;;
+cavity)
+	# ★ #3489 (2026-09-06): **内部空洞を落とさないこと**。
+	#   中空の殻 sphere(1.5) --- sphere(1.0) は解析解を持つ:
+	#       V = 4/3*pi*(1.5^3 - 1.0^3) =  9.9483767363676776
+	#       A = 4*pi*(1.5^2 + 1.0^2)   = 40.8407044966673140
+	#   ⚠ 壊れたときに出る値は **「詰まった球」** (V=14.1371669412 / A=28.2743338823)。
+	#     40% ずれるので許容 1e-3 で余裕をもって切り分けられる。
+	#   ★ 同時に **空洞の無い形 (単体の球) が動いていないこと**も見る。空洞側だけを見て
+	#     いると「常に中身を引く」向きの壊し方を通してしまう。
+	#   ★ 犯人は測る直前の levelSetRebuild だった (メッシュ往復で空洞が埋まる)。
+	#     詳細と切り分けの実測は modules/openvdb/c++/vdGrid.cpp の op_area 直上。
+	rm -rf "$D-cv"
+	OUT=$(SRAVA_CACHE_DIR="$D-cv" SRAVA_SOURCE="module(\"openvdb.so\",{priority:99});
+	  var a = sphere(1.5, 0.02);
+	  var s = a --- sphere(1.0, 0.02);
+	  print(\"SV\", volume(a));  print(\"SA\", area(a));
+	  print(\"HV\", volume(s));  print(\"HA\", area(s));" "$SRAVA" 2>&1)
+	SV=$(echo "$OUT" | sed -n 's/^SV //p'); SA=$(echo "$OUT" | sed -n 's/^SA //p')
+	HV=$(echo "$OUT" | sed -n 's/^HV //p'); HA=$(echo "$OUT" | sed -n 's/^HA //p')
+	if [ -z "$SV" ] || [ -z "$SA" ] || [ -z "$HV" ] || [ -z "$HA" ]; then
+		echo "FAIL: 値が出ない SV=$SV SA=$SA HV=$HV HA=$HA"; echo "$OUT"; exit 1; fi
+	ok=$(awk -v sv="$SV" -v sa="$SA" -v hv="$HV" -v ha="$HA" 'BEGIN{
+		dsv=(sv-14.1371669411541)/14.1371669411541; if(dsv<0)dsv=-dsv;
+		dsa=(sa-28.2743338823081)/28.2743338823081; if(dsa<0)dsa=-dsa;
+		dhv=(hv- 9.9483767363677)/ 9.9483767363677; if(dhv<0)dhv=-dhv;
+		dha=(ha-40.8407044966673)/40.8407044966673; if(dha<0)dha=-dha;
+		print (dsv<1e-3 && dsa<1e-3 && dhv<1e-3 && dha<1e-3) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: 殻 V=$HV (期待 9.94838) A=$HA (期待 40.84070) / 球 V=$SV A=$SA
+	  ★ 殻が 14.1372 / 28.2743 なら **空洞が落ちている** (詰まった球になっている)"; exit 1; }
+	echo "OPENVDB-CAVITY-OK 殻 V=$HV A=$HA / 球 V=$SV A=$SA" ;;
+cavity_vox)
+	# ★ #3491 (2026-09-06): **格子を作る側**が内部空洞を埋めないこと。
+	#   #3489 (cavity モード) は「測り方」の回帰で、こちらは「作り方」の回帰。別の欠陥。
+	#   OpenVDB の meshToVolume は符号を「グリッド外周から到達できるか」で決めるので、
+	#   閉じた空洞は外部から到達できず **材料として埋まる** (中空の殻が詰まった球になる)。
+	#   直しは巻き数の interiorTest (modules/openvdb/h/vd/c++/vdMeshVoxelize.h)。
+	#
+	#   ★ 体積だけでなく **空洞に置いた小球との交差が空**であることも見る。体積は
+	#     「測り方」でも動くが、交差が空かどうかは **格子そのもの**の性質なので、
+	#     測り方の変更では絶対に誤魔化せない。
+	#   ★ renormalize も同じ往復 (volumeToMesh -> meshToVolume) なので一緒に見る。
+	#   ⚠ 壊れたときの値は「詰まった球」14.1372。真値 9.9484 との差が桁で大きいので
+	#     許容 5e-3 でも余裕をもって切り分けられる (voxelize の値は入力メッシュの
+	#     多面体近似 9.9336 に寄るので、真値に対しては 1e-3 程度ずれるのが正常)。
+	rm -rf "$D-cx"
+	OUT=$(SRAVA_CACHE_DIR="$D-cx" SRAVA_SOURCE="module(\"manifold.so\",{priority:99}); module(\"openvdb.so\",{}); module(\"openvdb_mf.so\",{});
+	  var v = voxelize(sphere(1.5,128) --- sphere(1.0,128), 0.02);
+	  var r = \"openvdb\"::renormalize(v);   // ★ 名指し (srava はブロックコメントを持たない)
+	  var probe = \"openvdb\"::sphere(0.5, 0.02);
+	  print(\"VV\", volume(v));  print(\"VP\", volume(v &&& probe));
+	  print(\"RV\", volume(r));  print(\"RP\", volume(r &&& probe));
+	  print(\"SV\", volume(voxelize(sphere(1.5,128), 0.02)));" "$SRAVA" 2>&1)
+	VV=$(echo "$OUT" | sed -n 's/^VV //p'); VP=$(echo "$OUT" | sed -n 's/^VP //p')
+	RV=$(echo "$OUT" | sed -n 's/^RV //p'); RP=$(echo "$OUT" | sed -n 's/^RP //p')
+	SV=$(echo "$OUT" | sed -n 's/^SV //p')
+	if [ -z "$VV" ] || [ -z "$VP" ] || [ -z "$RV" ] || [ -z "$RP" ] || [ -z "$SV" ]; then
+		echo "FAIL: 値が出ない VV=$VV VP=$VP RV=$RV RP=$RP SV=$SV"; echo "$OUT"; exit 1; fi
+	ok=$(awk -v vv="$VV" -v vp="$VP" -v rv="$RV" -v rp="$RP" -v sv="$SV" 'BEGIN{
+		dv=(vv-9.9483767363677)/9.9483767363677; if(dv<0)dv=-dv;
+		dr=(rv-9.9483767363677)/9.9483767363677; if(dr<0)dr=-dr;
+		# ★ 空洞なしの球は **動いていない**こと (常に中身を引く向きの壊し方を通さない)
+		ds=(sv-14.1371669411541)/14.1371669411541; if(ds<0)ds=-ds;
+		print (dv<5e-3 && dr<5e-3 && ds<5e-3 && vp==0 && rp==0) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: voxelize=$VV (期待 9.94838) renormalize=$RV (期待 9.94838) 中身なし球=$SV (期待 14.13717)
+	  空洞に置いた小球との交差 voxelize=$VP renormalize=$RP (どちらも 0 であるべき)
+	  ★ 14.1372 なら **格子が詰まっている** / 交差が 0 でないなら空洞が無い"; exit 1; }
+	echo "OPENVDB-CAVITYVOX-OK voxelize=$VV renormalize=$RV (小球との交差 $VP / $RP) 中身なし球=$SV" ;;
 *)
 	echo "unknown mode: $MODE"; exit 1 ;;
 esac

@@ -71,7 +71,7 @@ ocaNfaces_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nfaces: needs an OCCT shape"))));
+		result = oca_err(thNEW(stdString,("nfaces: needs an OCCT shape")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->nfaces()));

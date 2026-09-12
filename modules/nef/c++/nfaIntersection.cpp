@@ -69,7 +69,7 @@ nfaIntersection_::compute()
 	if ( ! mesh.is_notNull() ) {
 		char b[128];
 		::snprintf(b, sizeof b, "intersection: %s", msg ? msg : "boolean failed");
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = nfa_err(thNEW(stdString,(b)));
 	}
 }
 

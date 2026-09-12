@@ -76,8 +76,8 @@ cgaColor_::compute()
 	sPtr<pigData> spec = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
 	int r = 150, g = 150, b = 150;
 	if ( ! srava_color::parse_spec(spec, r, g, b) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "color: 2nd arg must be a name (\"red\"...), \"#RRGGBB\", or [r,g,b] (0-255)"))));
+		result = cga_err(thNEW(stdString,(
+		    "color: 2nd arg must be a name (\"red\"...), \"#RRGGBB\", or [r,g,b] (0-255)")));
 		mesh = thNEW(cgMesh3D,());
 		return;
 	}

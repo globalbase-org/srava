@@ -347,6 +347,8 @@ cgptsLemonParser_::get_token(int *ptid)
 	if ( p[0]=='<' && p[1]=='=' ) { input_p = p+2; *ptid = LE; return thNULL; }
 	if ( p[0]=='>' && p[1]=='=' ) { input_p = p+2; *ptid = GE; return thNULL; }
 	if ( p[0]=='<' && p[1]=='>' ) { input_p = p+2; *ptid = MIRROROP; return thNULL; }  /* <> = mirror */
+	/* ★ #3467: `モジュール::op(...)` の指名。単文字 ':' (hash リテラルのキー区切り) より先に判定する。 */
+	if ( p[0]==':' && p[1]==':' ) { input_p = p+2; *ptid = COLON2; return thNULL; }
 
 	switch ( *p ) {
 	case '(': input_p = p+1; *ptid = LPAREN; return thNULL;

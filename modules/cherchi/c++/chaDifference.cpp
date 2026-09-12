@@ -74,7 +74,7 @@ chaDifference_::compute()
 	if ( ! mesh.is_notNull() ) {
 		char b[600];   /* IRMB の例外文は長いことがある */
 		::snprintf(b, sizeof b, "difference: %s", msg ? msg : "boolean failed");
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = cha_err(thNEW(stdString,(b)));
 	}
 }
 

@@ -65,7 +65,7 @@ cgaBbox_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("bbox: needs a mesh"))));
+		result = cga_err(thNEW(stdString,("bbox: needs a mesh")));
 		return;
 	}
 	double mn[3] = { 0, 0, 0 }, mx[3] = { 0, 0, 0 };

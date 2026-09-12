@@ -202,7 +202,7 @@ union([a, b, c, d, e, f, g, h])
 ★ **本当に並列に走ったかは `SRAVA_GATE_TRACE=1` の `live=` で直接数えられる**:
 
 ```
-[gate] enter seq=3 op=box live=8 order=fifo
+[gate] enter seq=3 delta=1 op=box live=8 order=delta
                               ^^^^^^ 同時に走っている agent 数
 ```
 
@@ -515,8 +515,10 @@ transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])  // 3x4 行列で +x 平行�
 > 負数リテラル `-1` / 負ベクトル `[-1,0,0]` も使える (単項マイナス)。反射 (負スケール) や負方向移動に。
 
 - agent は**常に二項**。`union(a,b,c)` のような n-ary 呼び出しはプランナーが実行木へ分解する:
-  - 可換 (`union`/`intersection`): 引数を `recipe_hash` 昇順に正準化 → 均衡二分木。
-    `union(a,b,c)` と `union(c,b,a)` が同一木 = キャッシュ共有。
+  - 可換 (`union`/`intersection`): 引数は**書かれた順のまま**均衡二分木に組む (並べ替えない)。
+    どの順で畳むかで中間結果の大きさ = 実行時間が変わるため、ソースに書いた順がそのまま
+    実行されることを保証する。`union(a,b,c)` と `union(c,b,a)` は別の木になる。
+    ただし二項ノードのキャッシュキーは可換に正規化するので、`a ||| b` と `b ||| a` は共有する。
   - 非可換 (`difference`): 左 fold `(((a-b)-c)…)` (中置左結合と一致)。
 - 中置 `a|||b|||c` は文法で既に二項なので分解せずそのまま (結合の正準化はしない: CGAL の
   三角形分割が変わるため見送り確定)。
@@ -723,7 +725,7 @@ transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])  // 3x4 行列で +x 平行�
 > **例をそのまま動かすには、冒頭に次の 1 行を置く**:
 >
 > ```c
-> include "module/all.sra";     // 実カーネル一式をロード (cgal / geogram / manifold / occt / openvdb / nef_hybrid)
+> include "module/all.sra";     // 同梱 12 本をロード (nef_snc とデモ／テスト用を除く全部)
 > ```
 >
 > 必要なものだけで十分なら `module("cgal.so", {});` のように名指しする方が軽い。
@@ -808,6 +810,9 @@ chmod +x model.sra
 
 - **終了コード**: **正常終了は常に `0`**(POSIX)。明示したいときは予約変数 **`EXIT_CODE`**(→ [§9](#組み込み変数-exit_code))
   または **`exit` 文**(→ §2)で上書きする。**エラー終了は `1`・シグナル終了は `128+signum`** が優先(こちらが `EXIT_CODE` を上書く)。
+  ★ **Ctrl+C(SIGINT・`130`)では、計算中の agent へ中断要求が送られてから終了する**(#3417)。
+  応じない agent の扱い(待つ ms / kill / in-proc の abort)は `SRAVA_AGENT_GRACE_MS` /
+  `SRAVA_INPROC_PANIC_MS`(→ [§9.1](#その他の環境変数))と `module(so,{grace,panic})` で決まる。
 - エラーは `ERROR[ファイル名,行番号] メッセージ` 形式で **stderr** に出る。例:
   `ERROR[model.sra,3] volume: 2D has no volume (use area)` / `ERROR[model.sra,2] parse error`。
   行番号はパース時に各ノードへ刻む(`pigInfo`)。agent が計算したエラー(次元不一致など)も、
@@ -920,21 +925,32 @@ srava は幾何 op を agent(別プロセス or in-proc スレッド)で計算�
 | `LOAD_RAMP` | `SRAVA_LOAD_RAMP` | `1` | **緩やかな立ち上がり**。`0` で無効(いきなり目標値) |
 | `LOAD_RAMP_MS` | `SRAVA_LOAD_RAMP_MS` | `250` | ランプが +1 する周期 (ms) |
 | `LOAD_RAMP_START` | `SRAVA_LOAD_RAMP_START` | `2` | ⚠ **起動時のみ**。ランプの初期上限 |
+| `LOAD_FOLLOW_SLACK` | `SRAVA_LOAD_FOLLOW_SLACK` | `2` | 実効上限を **「いま実際に走っている数 + この値」以下**に抑える(上げ過ぎの歯止め)。大きくするとこの抑制が実質無効になる。⚠ **上げは慎重に** — メモリを使い切った場合は回復できないが、絞り過ぎは遅くなるだけで回復できる、という非対称に従う |
 | `LOAD_AGENT` | `SRAVA_LOAD_AGENT` | `0` | 同時 agent 数の上限を**個数で直接**指定する(`0`=指定なし)。⚠ **`LOAD_CPU=0` のときだけ読まれる** (% ではなく個数で言いたいときの口)。`LOAD_CPU` が非 0 のまま指定すると無視され、stderr に警告が出る |
 | `LOAD_LOG` | `SRAVA_LOAD_LOG` | `0` | `1` で決定値(目標/実効/`C_MEM`/`C_CPU` 等)を stderr へ |
-| `GATE_ORDER` | `SRAVA_GATE_ORDER` | `fifo` | 待ち行列の入場順。`lifo` = 後着優先(深さ優先寄り) |
+| `GATE_ORDER` | `SRAVA_GATE_ORDER` | `delta` | 待ち行列の入場順。下記 |
 | `GATE_WHEN` | `SRAVA_GATE_WHEN` | `auto` | ゲートを取る位置。`first`(1 引数解決で)/ `all`(全引数解決後)/ `auto` |
 | `GATE_TRACE` | `SRAVA_GATE_TRACE` | `0` | `1` で入場を 1 行ずつ stderr へ。**同時実行数 `live=` が直接読める** |
 
 ★ **`SRAVA_GATE_TRACE=1` は「並列に書いたつもり」を検算する道具**(→ §2「並列に走るもの・走らないもの」):
 
 ```
-[gate] enter seq=3 op=box live=4 order=fifo
-                              ^^^^^^^ 同時に走っている agent 数
+[gate] enter seq=3 delta=-1 op=union live=4 order=delta
+                                     ^^^^^^^ 同時に走っている agent 数
 ```
 
-⚠ **`GATE_ORDER=lifo` は既定にしていない**。深さ優先寄りに入場するので均等な木では実使用メモリが
-減るが、**木の形によっては逆に不利になる**(偏った木では増える)。効くと分かっている場合だけ使う。
+##### `GATE_ORDER` の値
+
+| 値 | 並べ方 |
+|---|---|
+| `delta` (既定) | **その op が「生きている中間結果」をいくつ増減させるか**で並べる。**小さいほど先**。中間結果を作るだけの op(立体の生成など)は `+1` で後回し、引数を食って 1 つにまとめる op は `-(引数の数 - 1)` で先。値を返す op(`volume` など)は中間結果を増やさないので `-引数の数`。同じ値の op どうしは**後から現れたほうが先**に入る |
+| `lifo` | 生成順の逆(後から作られた op が先)。深さ優先寄りに入場する**近似**で、`delta` を入れる前の対照として残してある |
+| `fifo` | 到着順(先着順) |
+
+中間結果は cache(ディスク)にあるので、**同時に走る agent 数**がそのまま実使用メモリを決める。
+`delta` は「いま走らせると生存数が増える op」を後回しにするので、幅優先に広がるのを抑える。
+
+⚠ `delta` / `lifo` は**結果を変えない**。変わるのは計算する順番だけで、値も、どの op を計算するかも同じ。
 
 #### ⚠ 真偽値フラグの規約 — **正論理・値で判定**
 
@@ -992,6 +1008,8 @@ MALLOC_ARENA_MAX=1 srava model.sra
 | `SRAVA_DIRECT_EXEC` | agent 起動方式。既定(未設定/`0` 以外)は `'#'` 直接 `execvp`(sh 孫を挟まずプロセス半減・teardown が実 agent に直達)、`=0` で従来の `sh -c` に戻す(race 切り分け用)。⚠ **Windows では `=0` は使えない** — `ts2System` の MinGW 実装は `'#'` 始まり(CreateProcess 直起動)**のみ**対応で、それ以外は `-6` を返す。srava も `_WIN32` では無条件に `'#'` を付ける。**切り分け用の逃げ道が Windows では塞がっている**ことに注意 |
 | `SRAVA_MODULE_PATH` | モジュール(`.so`)の**追加**探索パス(`:` 区切り)。既定探索路(実行体同居 dir → install SYSDIR → `~/.config/srava/modules`)に足す。→ [モジュールリファレンス](srava_module_reference.html) |
 | `SRAVA_PATH` | `include` の探索パス(`:` 区切り)。取り込み元 dir の次に探す(§5 の include を参照) |
+| `SRAVA_AGENT_GRACE_MS` | **プロセス実行**の agent が中断要求(EOF)に応じないときの猶予 ms。`0`=即 kill / `>0`=待って kill / `-1`=タイマを張らない。優先順は **env > `module(so,{grace:N})` > 記述子**。⚠ env を最優先にしてあるのは**救済**のため — `grace:-1` を名乗るモジュールが止まらない op に入ってハングしたとき、再ビルドせずに抜ける手が要る |
+| `SRAVA_INPROC_PANIC_MS` | **in-proc** で居座ったとき planner を abort するまでの猶予 ms。`0`(既定)=無効 / `>0`=待って abort。優先順は同上。⚠ **既定を無効にしてある**のは代償が違うため — in-proc のハングは planner を kill すれば終わる(居残る agent が無い)が、abort は**セッション全体を確実に失う** |
 | `PIG_MAX_WORKERS` | **撤去** (2026-08-30)。ワーカーゲートの上限は §9.0.1 の `LOAD_CPU` / `LOAD_AGENT` 一本に集約した。設定しても**無視される**。以前は「静的な天井」として `LOAD_AGENT` (目標値の固定) とは別物・小さい方が効く、と書いていたが、★実装では小さい方が効いておらず (ロード制御が天井を上書きしていた)、さらに旧名が起動 250ms 後に握り潰されていた。**2 つあった上限の口を 1 つにして両方の欠陥を解消した**。移行: `PIG_MAX_WORKERS=N` → **`SRAVA_LOAD_CPU=0 SRAVA_LOAD_AGENT=N`** |
 | `PIG_MEM_MARGIN_MB` | (**現状無効・インタフェースのみ残置**) 空きメモリがこの MB を切ったら新規 agent 起動を保留する OOM 保険の設定値。既定 1024・`0` で無効・空きは `/proc/meminfo`(Linux のみ)。**ただし現在この入場制限は呼び出しを外してあり効かない**(メモリ容量チェックもデッドロック要因になり得るため当面無効化。env のパースと判定関数 `gate_mem_wait()` は将来の整理用に残置)。実効の入場制御は §9.0.1 のワーカーゲート(`LOAD_CPU` / `LOAD_AGENT`)のみ |
 | `PIG_MAX_FILES` | srava が起動時に自前で上げる open-files(RLIMIT_NOFILE)ソフト上限の目標。既定 16384。シェルの低い既定(macOS は 256)に縛られず多数 agent を並列に回すため。ハード上限/カーネル上限(`kern.maxfilesperproc`)を超える分は段階的に下げて設定 |
@@ -1079,7 +1097,7 @@ export("part.off", part);
 - 用途: 同じスクリプトをパラメータ違いで回す（出力名・寸法・段数などを引数で受ける）。
 - 例: `var n = length(ARGV); if (n < 1) exit("使い方: srava gen.sra <出力名>"); export(ARGV[0], part);`
 
-## 10. 幾何カーネル (CGAL / Manifold) — 型ディスパッチと型変換 {#kernel}
+## 10. 幾何カーネル — 型ディスパッチと型変換 {#kernel}
 
 srava は幾何演算を**外部 agent プロセス**(または in-proc スレッド)に委ねる。**言語/プランナは幾何ライブラリ
 非依存**で、幾何を計算するコアを知っているのは**モジュール(.so)の側**だ。3 つの語を厳密に使い分ける:
@@ -1091,16 +1109,22 @@ srava は幾何演算を**外部 agent プロセス**(または in-proc スレ�
   (`srava_agent`)がこれらを dlopen する。
 
 **モジュール↔幾何カーネルは 1:1 ではない**: 複数の幾何カーネルに関心を持つモジュールもあり、幾何カーネルに
-まったく対応しないモジュール(`pipe_proximity`)もある。現在 2 つの幾何カーネルを持ち、**同じプログラムを
-どちらでも走らせられる**:
+まったく対応しないモジュール(`pipe_proximity`)もある。**同じプログラムをどの幾何カーネルでも走らせられる**
+のが設計の眼目で、主なものは:
 
-| 幾何カーネル | モジュール(.so) | 性質 | 型(cache タグ) |
+| 幾何カーネル | モジュール(.so) | 性質 | 型 |
 |---|---|---|---|
-| **CGAL**(既定) | `cgal.so` | **厳密**(EPECK 有理数)。corefinement ブール。堅牢だが重い。全 op 対応 | 3D=`MESH` / 2D=`PLY2` |
-| **Manifold** | `manifold.so` | **高速**(double)。watertight 前提。2D は CrossSection。ライセンス寛容(Apache-2.0) | 3D=`MFM3` / 2D=`MFC2` |
+| **CGAL**(既定) | `cgal.so` | **厳密**(EPECK 有理数)。corefinement ブール。堅牢だが重い。全 op 対応 | `cg-mesh3d` / `cg-cross2d` |
+| **Manifold** | `manifold.so` | **高速**(double)。watertight 前提。2D は CrossSection。ライセンス寛容(Apache-2.0) | `mf-mesh3d` / `mf-cross2d` |
+| **CGAL Nef** | `nef_hybrid.so` / `nef_snc.so` | 非多様体・非有界も表せる Nef 多面体 | `nfb-mesh3d` / `nf-mesh3d` |
+| **geogram** | `geogram.so` | 厳密 mesh arrangement。座標は double | `gg-mesh3d` |
+| **Cherchi** | `cherchi.so` | indirect predicates による厳密ブール | `ch-mesh3d` |
+| **OpenVDB** | `openvdb.so` | ボリューム(疎な符号付き距離場)。voxel 化・等値面・オフセット | `vd-grid3d` |
+| **Open CASCADE** | `occt.so` | B-rep(NURBS / 解析曲面)。厳密なオフセット・fillet・STEP | `oc-brep3d` / `oc-cross2d` |
 
-いずれのモジュールも単一 host 実行体 `srava_agent`(env `SRAVA_AGENT`)が dlopen する。Manifold は opt-in ビルド（`cmake -DSRAVA_MODULE_MANIFOLD=ON`）で `manifold.so` が
-入るときのみ使える。
+いずれのモジュールも単一 host 実行体 `srava_agent`(env `SRAVA_AGENT`)が dlopen する。**同梱モジュールは
+既定でほぼ全部ビルドされる**(`nef_snc.so` を除く)。全 18 モジュールの一覧・依存・op 仕様は
+[モジュールリファレンス](srava_module_reference.html)を参照。
 
 ⚠ 同じ `.sra` を両カーネルで走らせたとき、**`combine`(`+++`) だけは結果が違う**: cgal は重なりを
 そのまま残すが、manifold は解消する(実質 `union`)。Manifold の値は常に妥当な 2-manifold 立体である
@@ -1132,6 +1156,7 @@ srava は幾何演算を**外部 agent プロセス**(または in-proc スレ�
 |------|------|
 | `module("manifold.so", {priority:99})` | **priority を上書き** → **既定の幾何カーネルを切替**(priority 最大が既定・★**同値の勝敗は不定**)。ベンチで同一 `.sra` を無改変で両カーネルへ振るのはこれ |
 | `module("so", {exec_default:"process"})` | 実行方式を上書き。**重い op をプロセス実行**(`"thread"`=in-proc スレッド)。CGAL は常に process、Manifold は既定 in-proc |
+| `module("so", {grace:N})` / `{panic:N}` | 中断要求に応じないときの猶予を上書き(ms)。`grace` は**プロセス実行**の kill まで、`panic` は **in-proc** の abort まで。★ **実行方式で使う口が変わる**ので、両方で走りうるモジュールは両方を持たせる。記述子の申告値は `srava --module-info` の `grace=` / `panic=` 行に出る |
 | `module("so")` / `module("so", {})` | **ロードする**(既にロード済みなら記述子の上書きだけ)。★`module` は**ロード順を変えない**(記述子の上書き op であって、ロードとは別物) |
 | `module("so", "off")` | **アンロードする**(`dlclose`)。以後 `module("so", {})` で読み直せる |
 
@@ -1152,6 +1177,41 @@ module("cgal.so", "on")     → ERROR: module: the only string option is "off" (
 
 前者が黙認されないのは、名前を打ち間違えたときに気づけなくなるため。落とせるかを先に確かめたいときは
 `module_loaded(so)` を使う。
+
+### `モジュール::op(引数…)` — op ごとのモジュール指名 {#module-qualified}
+
+`module(so,{priority})` はプロセス全体の既定を動かす。それに対し `::` は**その呼び出し 1 個だけ**を
+名指しする。**値しか取らない leaf**(`box` / `sphere` / `rect` …)は型ディスパッチの手がかりが無く
+priority でしか選べないので、カーネル混在を式として書くにはこれが要る。
+
+```
+"occt"::box([1,1,1])      // リテラルで指名
+k::box([1,1,1])           // 変数 (k は文字列に評価される式)
+""::box([1,1,1])          // 空文字は「planner に任せる」= box([1,1,1]) と同一
+```
+
+- 左辺に書けるのは **文字列リテラルか識別子**で、**モジュール名**(`.so` を除いた `name` 申告値)を指す。
+- `::` は呼び出しより強く結合する。部分適用(`k::box` を値として取り回す)は**できない** —
+  指名は呼び出し 1 個ぶんの構文。
+- ★ **指名は sig の代わりではなく候補の絞り込み**。候補を 1 つに絞ったうえで **sig 照合はそのまま走る**
+  ので、暗黙の `cast` は入らない。「op sig がディスパッチの唯一の真実」は壊れない。
+- ★ 指名は **キャッシュキーに現れない**。現れるのは**解決結果**だけなので、`""::box` と `box` は
+  常に同じキーになり、`"cgal"::box` と `box` は**既定が cgal のときだけ**同じキーになる。
+- n 項 op を木へ分解するときは**節点にも指名が継がれる**。継がれないと `"occt"::union(a,b,c)` が
+  指名なしの二項 union に落ちて、n 項と 2 項で行き先が変わる。
+
+エラーは**直す場所が違う**ので 4 種を分けて言う:
+
+| 状況 | 言うこと |
+|---|---|
+| 未ロード / 名前違い | `no such module is loaded` |
+| ロード済みだがその op が無い | `does not implement op '…'` |
+| op はあるが sig が入力型を受けない | `does not accept input type(s) …`(指名は候補を絞るだけで cast は入れない、まで言う) |
+| planner 側 builtin(`print` / `length` / `module` …)を指名 | `is not a module op`(parse 時) |
+
+> 1 つのプロセスの中で複数のカーネルを比べられるのは `::` だけ(priority による切替はプロセス全体に
+> 効く)。使い分けの実例は[モジュールリファレンス](srava_module_reference.html)と
+> [関数リファレンス](srava_function_reference.html)の `tube` / `text` の項にある。
 
 ### `module_loaded(so)` — いまロードされているか
 
@@ -1183,7 +1243,7 @@ module_reload("/tmp/experimental/cgal.so", {});   // 開発中の .so に差し�
 ⚠ **差し替えはそのモジュールで op を実行する前に行うこと**。一度でも使われた `.so` は落とせない
 (そのモジュール由来のメッシュ本体や agent が生きている可能性があるため)。
 
-⚠ `reload.sra` は `module/all.sra` には入っていない。ヘルパを使うためだけに 6 本ロードされるのを
+⚠ `reload.sra` は `module/all.sra` には入っていない。ヘルパを使うためだけに 12 本ロードされるのを
 避けるため、必要なときだけ個別に `include` する。
 
 - `module(so, opts)` の第 2 引数ハッシュは `priority`(整数) / `exec_default`(`"thread"` / `"process"`) /
@@ -1198,7 +1258,7 @@ module_reload("/tmp/experimental/cgal.so", {});   // 開発中の .so に差し�
 「no module can execute op」または「undefined variable」で明示エラーになる。個々の実験・測定は
 必要なものだけ `module("manifold.so",{});` のように明示するのが最も軽い(他モジュールのロード
 コストが乗らない)。旧来の「起動時に全カーネルが使える」挙動に近い状態が欲しい場合は、便宜スクリプト
-`include "module/all.sra";` を使う(cgal/geogram/manifold/occt/openvdb/nef_hybrid を一括ロード。
+`include "module/all.sra";` を使う(同梱 12 本を一括ロード。nef_snc とデモ／テスト用は入らない。
 nef は hybrid のみ・d2-d5 やデモ/サードパーティプラグインは対象外なので個別に module() が要る)。
 コマンドライン一発で全スクリプトに効かせたい場合は環境変数 `SRAVA_MODULE_ALL=1` も使える
 (script 本文の先頭に `include "module/all.sra";` を差し込んだのと等価)。

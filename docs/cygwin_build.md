@@ -47,10 +47,11 @@ Cygwin は **TBB と OpenCASCADE をパッケージしていない**(`cygcheck -
 
 | モジュール | Cygwin | 理由 |
 |---|---|---|
-| `cgal` / `nef_snc` / `nef_hybrid` / `manifold` / `pipe_proximity` | **可** | 既定 ON のまま使える |
-| `geogram` / `openvdb`(+ 橋渡し 3 本) | **不可** | TBB が要る(下記) |
-| `occt` / `occt_mf` | **不可** | OpenCASCADE が無い |
-| `cherchi` | **不可** | 依存の abseil が Cygwin を明示的に拒否する |
+| `cgal` / `nef_hybrid` / `manifold` / `pipe_proximity` | **可** | 既定 ON のまま使える |
+| `nef_snc` | **可** | ただし**全プラットフォームで既定 OFF**。要るなら `-DSRAVA_MODULE_NEF_SNC=ON` |
+| `geogram` / `openvdb`(+ 橋渡し 3 本) | **不可** | TBB が要る(下記)。他では既定 ON・Cygwin では自動 OFF |
+| `occt` / `occt_mf` | **不可** | OpenCASCADE が無い。他では既定 ON・Cygwin では自動 OFF |
+| `cherchi` | **不可** | 依存の abseil が Cygwin を明示的に拒否する。他では既定 ON・Cygwin では自動 OFF |
 | `manifold` の **op 内並列** (`SRAVA_MANIFOLD_PAR`) | **不可** | TBB が要る(他プラットフォームでは既定 ON・Cygwin では自動 OFF でシリアルに建つ) |
 
 `CMakeLists.txt` がこれらを **`if(CYGWIN)` で自動的に OFF にする**(理由つきの `message` を出す)ので、

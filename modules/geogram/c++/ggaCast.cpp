@@ -65,7 +65,7 @@ ggaCast_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ggMesh> in = ( na > 1 ) ? sPtr<ggMesh>::d_cast((*args)[1]) : sPtr<ggMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("cast: needs a mesh"))));
+		result = gga_err(thNEW(stdString,("cast: needs a mesh")));
 		return;
 	}
 	mesh = in;

@@ -15,6 +15,7 @@
  * CGAL を要するので srava_agent 側でのみ compile。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include	<CGAL/Surface_mesh.h>
@@ -54,8 +55,16 @@ public:
 	/* ★ #3433: decode が「この形式は cg の表現力では受け取れない」と判断したときに立てる。
 	 *   reader はこれを見て errCode を立てる (空 mesh を黙って返さない)。 */
 	int  decode_failed() const { return decodeErr_; }
+	/* ★ #3479: 立てた **理由** (立てていなければ 0)。reader がこれを拾って errCode と一緒に
+	 *   parent へ渡す。従来は「読めなかった」という事実だけが残り、利用者に届く文は
+	 *   「codec が無い / 表現できない / 形式が違う」の 3 択を並べた推測だった。
+	 *   ★文字列リテラル前提 (寿命は .so と同じ)。 */
+	const char* decode_why() const { return decodeWhy_; }
 protected:
+	/* decodeErr_ と理由は必ず対で立てる (理由の無い拒否を作らない)。 */
+	void set_decode_err(const char* why) { decodeErr_ = 1; decodeWhy_ = why; }
 	int  decodeErr_ = 0;
+	const char* decodeWhy_ = 0;
 public:
 	/* ---- ブーリアン(同次元の新 mesh を返す。異次元/失敗は null=呼び元が A_ERROR)---- */
 	virtual sPtr<cgMesh> op_union       (sPtr<cgMesh> b) = 0;
@@ -228,5 +237,12 @@ protected:
 	std::vector<Guide>	guides_;    /* ガイド層(開ポリライン群)。ブール演算は触れず、SVG/DXF で線として描く */
 	int	mfc2Input_ = 0;   /* 1 = decode() が MFC2 framing を読む(create_for_meta が MFC2 タグで立てる) */
 };
+
+/* ★ #3475: エラー文言に名乗るモジュール名 (記述子の .name と同じ)。 */
+#define CG_MODULE_NAME	"cgal"
+
+/* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
+ *   素の cga_err(...) を使うとモジュール名が付かない。 */
+PIG_DEFINE_MODULE_ERR(cga_err, CG_MODULE_NAME)
 
 #endif /* CG_MESH_H */

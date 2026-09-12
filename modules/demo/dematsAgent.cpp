@@ -29,6 +29,13 @@
 #include	"_ts2/c++/dematsAgent_.h"
 
 #include	<string.h>
+#include	"pig/c++/pigModuleError.h"
+#include	"pig/c++/ptsCalcBody.h"      /* ★ #3417: calc を別オブジェクトで持つ */
+#include	"demo/c++/demaCompute.h"     /* 計算本体 */
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] demo/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(dema_err, "demo")
+
 
 CLASS_TINYSTATE(demo/c++/dematsAgent,pig/c++/ptsAgent)
 
@@ -36,6 +43,8 @@ CLASS_TINYSTATE(demo/c++/dematsAgent,pig/c++/ptsAgent)
 static const pigOpEntry DEMO_OPS[] = {
 	{ "demo_add",   0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
 	{ "demo_range", 0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
+	/* ★ #3417: 中断できる「重い op」。graceful teardown の検証用 (demo_compute.cpp 参照)。 */
+	{ "demo_spin",  0, 0, AK_INLINE, 0, 1, "->value", 0, 1 /* ★可変部は値 */ },
 };
 static const int DEMO_N_OPS = (int)(sizeof(DEMO_OPS) / sizeof(DEMO_OPS[0]));
 
@@ -54,6 +63,7 @@ protected:
 	sPtr<pigDataCache>	outCache;
 	sPtr<pigData>		err;
 	sPtr<stdString>		op;
+	sPtr<ptsCalcBody>	calc;   /* ★ #3417: 計算本体 (専用 thread)。ppatsAgent と同じ形 */
 private:
 	TS_DEFARGS
 };
@@ -69,6 +79,7 @@ class ptsObject;
 class pigData;
 class pigDataCache;
 class stdString;
+class ptsCalcBody;
 TS_END_INTERFACE
 
 #endif
@@ -103,7 +114,8 @@ extern const srava_module_descriptor dematsAgent_descriptor = {
 	.import_exts   = 0,
 	.export_exts   = 0,
 	.provides      = 0,   /* 無し */
-	.hash_salt     = 0,   /* 基準カーネル/解析モジュールはソルト無し */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 1,
 	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
 	 *   テスト専用 */
 	.initialize    = 0,   /* 無し */
@@ -134,7 +146,7 @@ TS_STATE(ACT_dematsAgent_WAIT)
 		case C_OP: {
 			op = mpkt->str;
 			if ( op == thNULL ) {
-				err = thNEW(pigDataError,("demo: missing op name"));
+				err = dema_err("demo: missing op name");
 				return rDO|ACT_dematsAgent_ERROR;
 			}
 			argv.length(0);
@@ -143,17 +155,17 @@ TS_STATE(ACT_dematsAgent_WAIT)
 		}
 		case C_ARG_DATA: {
 			if ( op == thNULL ) {
-				err = thNEW(pigDataError,("arg before C_OP"));
+				err = dema_err("arg before C_OP");
 				return rDO|ACT_dematsAgent_ERROR;
 			}
 			int idx = (int)mpkt->idx;
 			sPtr<pigData> d = mpkt->data;
 			if ( d == thNULL || d->is_error() ) {
-				err = ( d != thNULL ) ? d : sPtr<pigData>(thNEW(pigDataError,("inline arg decode error")));
+				err = ( d != thNULL ) ? d : sPtr<pigData>(dema_err("inline arg decode error"));
 				return rDO|ACT_dematsAgent_ERROR;
 			}
 			if ( d->is_cache() ) {
-				err = thNEW(pigDataError,("demo: value arguments only (got a mesh handle)"));
+				err = dema_err("demo: value arguments only (got a mesh handle)");
 				return rDO|ACT_dematsAgent_ERROR;
 			}
 			if ( idx >= argv.length() ) argv.length(idx + 1);
@@ -163,8 +175,8 @@ TS_STATE(ACT_dematsAgent_WAIT)
 		case C_ARG_END: {
 			outCache = sPtr<pigDataCache>::d_cast(mpkt->data);
 			if ( outCache == thNULL ) {
-				err = thNEW(pigDataError,(
-				    "dematsAgent: C_ARG_END without a target cache path"));
+				err = dema_err(
+				    "dematsAgent: C_ARG_END without a target cache path");
 				return rDO|ACT_dematsAgent_ERROR;
 			}
 			return rDO|ACT_dematsAgent_STARTCALC;
@@ -175,29 +187,61 @@ TS_STATE(ACT_dematsAgent_WAIT)
 		return 0;
 	}
 	if ( is_destroyed() ) {
-		err = thNEW(pigDataError,("aborted: agent was destroyed"));
+		err = dema_err("aborted: agent was destroyed");
 		return rDO|ACT_dematsAgent_ERROR;
 	}
 	return 0;
 }
 
-TS_STATE(ACT_dematsAgent_STARTCALC)   /* EXEC_PROCESS 専用: 同期 compute でよい (ptsCalcBody 不要) */
+/* ★ #3417 (2026-09-06): **計算は別オブジェクト (calc) の専用 thread で回す**。
+ *
+ * 旧実装は「EXEC_PROCESS 専用: 同期 compute でよい (ptsCalcBody 不要)」として、この状態関数の
+ * 中で demo_compute() を最後まで走らせていた。速い value op しか無いうちは正しかったが、
+ * 中断できる op (demo_spin) を足すと破綻する:
+ *   ・同期のままだとイベントループが止まり、destroy も wire の EOF も受け取れない
+ *   ・この状態関数を TS_THREAD にするだけでも足りない。中断要求を撃つ相手が
+ *     **計算しているオブジェクト自身**になり、要求を受けて動く者が居なくなる
+ * ⇒ ptsGenericAgent / ptsCalcBody が実カーネル 11 本に提供している形 (実行体 + calc) に揃える。
+ *   pipe_proximity (ppatsAgent + ppaCompute) がそのまま手本。 */
+TS_STATE(ACT_dematsAgent_STARTCALC)
 {
-	sPtr<pigData> cr = demo_compute(op->get_str(), argv);
-	if ( cr != thNULL && cr->is_error() ) {
-		err = cr;
+	calc = thNEW(demaCompute,(ifThis, &argv, outCache->get_path(), op));
+	return ACT_dematsAgent_CALC;   /* calc の TSE_RETURN 待ち */
+}
+
+TS_STATE(ACT_dematsAgent_CALC)
+{
+	if ( ev->type == TSE_RETURN && ev->source == calc ) {
+		sPtr<pigData> cr = calc->get_result();
+		/* destroy 済みなら結果を捨てる (中断は「答えが出なかった」であって「答えは空」ではない)。
+		 * calc 側のエラー (demo_spin の中断) があればそれを優先してリレーする。 */
+		if ( is_destroyed() ) {
+			err = ( cr != thNULL && cr->is_error() ) ? cr
+			    : sPtr<pigData>(dema_err("aborted: agent was destroyed"));
+			return rDO|ACT_dematsAgent_ERROR;
+		}
+		if ( cr != thNULL && cr->is_error() ) {
+			err = cr;
+			return rDO|ACT_dematsAgent_ERROR;
+		}
+		/* value 出力: 出力 cache へ set_body → 親 (ptsAgentApplication) が A_SAVE_BEGIN に相乗りで返す。 */
+		outCache->set_body(cr);
+		set_result(sPtr<pigData>::d_cast(outCache));
+		return rDO|FIN_START;
+	}
+	/* destroy の作法: 子へ destroy を送り TSE_RETURN を待つ。即 FIN しない。 */
+	if ( is_destroyed() ) {
+		if ( calc.is_notNull() ) { calc->destroy(); return 0; }
+		err = dema_err("aborted: agent was destroyed");
 		return rDO|ACT_dematsAgent_ERROR;
 	}
-	/* value 出力: 出力 cache へ set_body → 親 (ptsAgentApplication) が A_SAVE_BEGIN に相乗りで返す。 */
-	outCache->set_body(cr);
-	set_result(sPtr<pigData>::d_cast(outCache));
-	return rDO|FIN_START;
+	return 0;
 }
 
 TS_STATE(ACT_dematsAgent_ERROR)
 {
 	set_result( ( err != thNULL ) ? err
-	    : sPtr<pigData>(thNEW(pigDataError,("demo error"))) );
+	    : sPtr<pigData>(dema_err("demo error")) );
 	return rDO|FIN_START;
 }
 

@@ -157,6 +157,14 @@ ptsWireCacheStreamWriter_::write_d_text(sPtr<stdString> str)
 void
 ptsWireCacheStreamWriter_::d_chunk(const uint8_t *data, int size)
 {
+	/* ★★ #3506: 負の size は *呼び手の誤り* であって正当な入力ではない。
+	 *   以前はここが @while (pos < size)@ で **1 バイトも書かずに黙って返って**いたため、
+	 *   2 GiB を越える payload を @(int)@ で渡した経路が長さ欄だけの空データを cache に
+	 *   残し、読み戻すと空の値になっていた (#3504 の nef が実際にこれを踏んだ)。
+	 *   ⇒ 黙らない。errCode は INI/FIN で親へ TSE_ASSERT / TSE_RETURN として上がる。
+	 *   ★ throw はしない (この経路に catch が無く、ワーカースレッドからの throw は
+	 *     agent プロセスごと殺す)。 */
+	if ( size < 0 ) { errCode = -3; return; }
 	int pos = 0;
 	while ( pos < size ) {
 		int room = CHUNK_BUF_SIZE - chunkBufLen;

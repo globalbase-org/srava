@@ -17,6 +17,8 @@
 #include	"cg/c++/cgaMeshCodec.h"
 #include	"_ts2/c++/ptscgWireCacheStreamReaderMesh_.h"
 
+#include	<stdio.h>   /* #3479: snprintf (理由文の組み立て) */
+
 CLASS_TINYSTATE(cg/c++/ptscgWireCacheStreamReaderMesh,pig/c++/ptsWireCacheStreamReader)
 
 
@@ -74,6 +76,8 @@ ptscgWireCacheStreamReaderMesh_::ptscgWireCacheStreamReaderMesh_(TS_ARGS0)
 void
 ptscgWireCacheStreamReaderMesh_::pull(uint8_t *dst, int n)
 {
+	/* ★ #3506: 負の n は呼び手の誤り。黙って 0 バイト返すと空の値として通ってしまう。 */
+	if ( n < 0 ) { pullErr = 1; return; }
 	int got = 0;
 	while ( got < n ) {
 		while ( chunkPos >= rec_payload.length() ) {   /* 現チャンク尽き → 次の D_CHUNK */
@@ -119,8 +123,14 @@ ptscgWireCacheStreamReaderMesh_::more()
 TS_STATE(INI_ptsWireCacheStreamReader_METADATA)   /* D_META タグから具体型を作れるか検証 */
 {
 	const uint8_t *m = ( meta.length() > 0 ) ? &meta[0] : (const uint8_t*)0;
-	if ( cgMesh::create_for_meta(m, meta.length()) == thNULL )
-		errCode = -2;      /* 自分の対応形式ではない(未知タグ) */
+	if ( cgMesh::create_for_meta(m, meta.length()) == thNULL ) {
+		/* ★ #3479: どの形式を誰が読めなかったのかを言う。従来は errCode だけで、
+		 *   利用者には「materialize できない」としか届かなかった。 */
+		char b[128];
+		::snprintf(b, sizeof b, "module '%s' has no reader for format '%.4s'",
+		           CG_MODULE_NAME, ( meta.length() >= 4 ) ? (const char*)m : "????");
+		set_err(-2, b);
+	}      /* 自分の対応形式ではない(未知タグ) */
 	return rDO|INI_ptsWireCacheStreamReader_METADATA_FINISH;
 }
 TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを mesh へ多態 decode */
@@ -129,7 +139,13 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	pullErr  = 0;
 	const uint8_t *mp = ( meta.length() > 0 ) ? &meta[0] : (const uint8_t*)0;
 	sPtr<cgMesh> mesh = cgMesh::create_for_meta(mp, meta.length());   /* タグで具体型を生成 */
-	if ( mesh == thNULL ) { errCode = -2; return rDO|FIN_START; }
+	if ( mesh == thNULL ) {                     /* META gate と同じ理由 (再掲) */
+		char b[128];
+		::snprintf(b, sizeof b, "module '%s' has no reader for format '%.4s'",
+		           CG_MODULE_NAME, ( meta.length() >= 4 ) ? (const char*)mp : "????");
+		set_err(-2, b);
+		return rDO|FIN_START;
+	}
 	/* pull() を cgChunkSource にアダプトして mesh->decode() に渡す(次元非依存)。 */
 	struct Src : cgChunkSource {
 		ptscgWireCacheStreamReaderMesh_ *r;
@@ -138,10 +154,10 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	} src;
 	src.r = this;
 	mesh->decode(src);
-	if ( pullErr ) { errCode = -1; return rDO|FIN_START; }
+	if ( pullErr ) { set_err(-1, "the cache stream ended or could not be read while decoding"); return rDO|FIN_START; }
 	/* ★ #3433: 形式は読めたが cg の表現力で受け取れない (非有界/非多様体の Nef 等)。
 	 *   空 mesh を黙って返すと volume が 0 になるので、ここでエラーにする。 */
-	if ( mesh->decode_failed() ) { errCode = -2; return rDO|FIN_START; }
+	if ( mesh->decode_failed() ) { set_err(-2, mesh->decode_why()); return rDO|FIN_START; }
 	result = mesh;                     /* cgMesh は pigData=stdObject → そのまま渡す(d_cast 不要) */
 	return rDO|FIN_START;
 }

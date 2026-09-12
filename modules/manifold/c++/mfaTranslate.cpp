@@ -7,6 +7,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"mf/c++/mfMesh.h"
+#include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/mfaTranslate_.h"
@@ -67,27 +68,22 @@ mfaTranslate_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<mfGeom> in = ( na > 0 ) ? sPtr<mfGeom>::d_cast((*args)[0]) : sPtr<mfGeom>();
-	/* 平行移動量はベクトル [x,y](2D 向け・z=0)または [x,y,z]。文法が translate(m,x,y,z) も m>>>v も
-	 * この形に統一して渡す。[0,0(,0)] は恒等(エラーにしない)。 */
-	sPtr<pigDataArray> v = ( na > 1 ) ? (*args)[1]->obt_array()
-	                                  : sPtr<pigDataArray>();
-	if ( ! v.is_notNull() || v->length() < 2 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "translate: needs a vector [x,y] or [x,y,z]"))));
+	sPtr<pigData> arg = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
+
+	/* ★ 引数の解釈と行列の組み立ては **common/affine.h** (カーネル非依存・7 モジュール共通)。
+	 *   受け付ける書き方だけでなく **拒否の理由** もそこに集約してある (#3486)。
+	 *   理由の受け皿 buf は呼び手が持つ (モジュール側に static を置かない)。 */
+	double e[12];
+	const char *why = 0;
+	char buf[256];
+	if ( ! srava_affine::matrix_translate(arg, e, &why, buf, (int)sizeof buf) ) {
+		result = mfa_err(thNEW(stdString,(why)));
 		mesh = thNEW(mfMesh,(manifold::Manifold()));
 		return;
 	}
-	double x = v->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();
-	double y = v->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
-	double z = ( v->length() >= 3 ) ? v->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt() : 0.0;
-
-	/* 平行移動 = 恒等 + 平行移動列。3D 多態 apply_affine(double[12])に委譲。 */
-	double e[12] = {
-	    1.0, 0.0, 0.0, x,
-	    0.0, 1.0, 0.0, y,
-	    0.0, 0.0, 1.0, z
-	};
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<mfGeom>();
+	/* ★ #3498: Manifold::Transform は **遅延**する (mfMesh.h の mf_eval_err の一覧)。 */
+	if ( (result = mf_eval_err(mesh, brk_, "translate")) != thNULL ) mesh = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

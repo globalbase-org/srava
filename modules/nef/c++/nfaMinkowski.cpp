@@ -77,18 +77,18 @@ nfaMinkowski_::compute()
 	sPtr<nfMesh> a = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	sPtr<nfMesh> b = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
 	if ( ! a.is_notNull() || ! b.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("minkowski: needs two Nef meshes"))));
+		result = nfa_err(thNEW(stdString,("minkowski: needs two Nef meshes")));
 		return;
 	}
 	/* ★非有界は CGAL に渡さない (黙って片方が返ってくる)。complement の結果などがここに来る。 */
 	if ( ! a->is_bounded() || ! b->is_bounded() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("minkowski: an unbounded Nef has no Minkowski sum (e.g. the result of complement)"))));
+		result = nfa_err(thNEW(stdString,
+		    ("minkowski: an unbounded Nef has no Minkowski sum (e.g. the result of complement)")));
 		return;
 	}
 	mesh = a->op_minkowski(b);
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("minkowski: computation failed"))));
+		result = nfa_err(thNEW(stdString,("minkowski: computation failed")));
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

@@ -27,9 +27,10 @@
  * ロード記録 (旧 pigModuleLoader の g_log/g_dirs) もここが持つ。
  * 登録経路は register_descriptor の 1 本 (#3427 ①)。
  *
- * ★ K4 (hash_salt): 同一 op でもカーネルが違えば結果 byte が異なるため、キャッシュキーに
- *   弁別ソルトを混ぜる。**基準カーネル (混ぜない) は登録しない** → その op のキャッシュキーは
- *   従来のまま byte 不変。非基準カーネルだけ salt を持つ (manifold="\x01MFM")。
+ * ★ K4 (cache_salt): 同一 op でもカーネルが違えば結果 byte が異なるため、キャッシュキーに
+ *   弁別ソルトを混ぜる。★ #3466 (ABI v17) でソルトは記述子の申告をやめ、**モジュール名 + その
+ *   .so の指紋 (size/mtime)** からレジストリが作るようになった。例外は無く、**全モジュールが
+ *   必ずソルトを持つ**。
  */
 #include "ts2/c++/stdObject.h"         /* 基底 (thNEW で app 所有にするため) */
 #include "pig/c++/pigData.h"           /* pigDataCacheHelperFn (pdc フック・旧 g_pdcHelperFn) */
@@ -206,6 +207,15 @@ public:
 	 * set_priority は「今ロードした扱い」= 後勝ちの tie-break も更新する。 */
 	void        set_priority(int module_id, int p);
 	void        set_exec_default(int module_id, int exec);
+	/* ★ #3503: 実効 grace_ms。優先順は env SRAVA_AGENT_GRACE_MS > module(so,{grace}) > 記述子。
+	 *   env を最優先にしてあるのは **救済**のため — grace=-1 のモジュールがハングしたときに
+	 *   再ビルドせず抜けられる必要がある (と、測定で 0 に固定したいため)。 */
+	int         grace_ms(int module_id) const;
+	void        set_grace_ms(int module_id, int ms);
+	/* ★ #3503: 実効 panic_ms (in-proc の abort 猶予)。grace_ms と同じ優先順
+	 *   (env SRAVA_INPROC_PANIC_MS > module(so,{panic}) > 記述子)。 */
+	int         panic_ms(int module_id) const;
+	void        set_panic_ms(int module_id, int ms);
 	/* ★ #3436 P4: module id の実効 **N'** (1 ノードあたり受け取りたい最大項数・policy)。
 	 *   module(so,{arity:k}) の上書き優先 → 記述子の arity → **既定 2**。docs/sig_grammar_design.md §5.4。 */
 	int         arity(int module_id) const;
@@ -233,9 +243,20 @@ public:
 	/* 既定カーネル = 登録済みモジュールの **priority 最大** (同値は後勝ち)。無ければ ""。 */
 	const char* default_module_name() const;
 
-	/* キャッシュキー弁別ソルト (K4)。記述子 (hash_salt) を直読みし、無効モジュールは 0
-	 * (#3439 ④: 派生テーブル salts_v を廃止)。 */
-	const char* hash_salt(int module_id) const;
+	/* ★ #3466 (ABI v18・2026-09-01): キャッシュキー弁別ソルト (K4)。
+	 *   形は "\x01" + モジュール名 + "\x01" + "v" + 記述子の cache_version。
+	 *   ・**名前**    — 一意性はローダが既に強制している (register_module(name) が name→id・
+	 *                   同名 .so は shadow)。記述子が写しを別に持つ理由が無い
+	 *   ・**版番号**  — そのモジュールの計算を変えたときに手で上げる (info.txt の
+	 *                   SRAVA_CACHE_FORMAT と同じ運用)。名前だけでは弱すぎ (計算を変えても
+	 *                   古い結果が当たる)、.so の size/mtime では強すぎる (結果ハッシュが
+	 *                   ビルドのたびに変わり、可換 op の引数ソートを通じて n 項の木の形が
+	 *                   ビルド依存になる)。その中間を取る
+	 *   ・**区切り**  — compute_arg_hash() は op 名 → ソルト → 引数の順に FNV へ流すので、
+	 *                   区切りが無いと op="op"+salt="x" と op="opx"+salt無し が同じキーになる。
+	 *                   識別子に現れない \x01 で断つ
+	 *   ★ 未登録 id は 0 を返す。 */
+	const char* cache_salt(int module_id) const;
 
 	/* ---- .so 動的ロード (旧 pigModuleLoader・docs §3.1) ----
 	 * .so を 1 個ロードして自分へ配線する。成功で記述子 (.so 内の静的寿命) を返す。失敗は 0 で、
@@ -292,6 +313,9 @@ private:
 	 *     ensure_initialized を通らないので、cgal を使った後でも落とせてしまっていた。 */
 	std::vector<char>                          used_v;
 	std::vector<std::string>  descPath_v;   /* id → その記述子を供給した .so のパス (#3425 ①) */
+	/* ★ #3466: id → キャッシュキー弁別ソルト。register_descriptor で 1 回だけ組み立てる
+	 *   (.so の stat はロード時 1 回。以後は文字列を返すだけ)。 */
+	std::vector<std::string>  salt_v;
 	std::string               loadingPath_; /* load_file が register_descriptor に渡す出所 (内部) */
 	/* agent(so,{...}) 上書き (descriptor は .so 内 const で変更できない)。
 	 * sentinel: prio=INT_MIN / exec=-1 (=未設定)。seq = 登録/上書きの通し番号 (後勝ち tie-break)。 */
@@ -302,6 +326,8 @@ private:
 	std::vector<sPtr<stdObject> > data_v;
 	int                       configuringId_;   /* configure 呼び出し中のモジュール id (他は -1) */
 	std::vector<int>          arityOvr_v;   /* ★ #3436 P4: module(so,{arity:k}) の上書き (0=未設定) */
+	std::vector<int>          graceOvr_v;   /* ★ #3503: module(so,{grace:N}) の上書き (INT_MIN=未設定) */
+	std::vector<int>          panicOvr_v;   /* ★ #3503: module(so,{panic:N}) の上書き (INT_MIN=未設定) */
 	std::vector<sPtr<pigData> > optsOvr_v;  /* ★ #3441: module(so,{opts}) のハッシュ全体 (疎・未設定=thNULL) */
 	std::vector<long>         seq_v;
 	long                      seqN_;

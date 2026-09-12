@@ -60,7 +60,7 @@ mfaVolume_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<mfMesh> in = ( na > 0 ) ? sPtr<mfMesh>::d_cast((*args)[0]) : sPtr<mfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: needs a 3D mesh"))));
+		result = mfa_err(thNEW(stdString,("volume: needs a 3D mesh")));
 		return;
 	}
 	result = thNEW(pigDataFloat,(in->op_volume()));

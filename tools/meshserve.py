@@ -6,13 +6,14 @@ Linux 側でファイルを上書きすると、ブラウザ側が mtime ポー�
 SMB も f3d の watch も介さないので、属性キャッシュや「再起動で視点が飛ぶ」問題が出ない。
 
   python3 tools/meshserve.py out.stl                 # http://<this-ip>:8088/ をブラウザで
-  python3 tools/meshserve.py out.3mf --port 9000 --host 10.131.0.53
+  python3 tools/meshserve.py out.3mf --port 9000 --host 192.0.2.10
 
 依存: Python 標準ライブラリのみ(サーバ)。three.js は CDN(unpkg)。
 対応形式: STL / 3MF / PLY / AMF(拡張子で自動判別。OFF/OBJ は未対応 → STL で出すと確実)。
-LAN(10.131)前提。ブラウザは Mac の Safari/Chrome で http://10.131.0.53:8088/ を開く。
+LAN 内での利用を前提にしている(既定の bind は 0.0.0.0)。別マシンのブラウザから
+http://<このホストの IP>:8088/ を開く。
 """
-import argparse, os, sys, errno, socketserver, http.server
+import argparse, os, sys, errno, socket, socketserver, http.server
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <title>meshserve</title>
@@ -203,10 +204,11 @@ def main():
                 % (a.port, sys.argv[0], a.mesh, a.port + 1))
             raise SystemExit(1)
         raise
-    shown = a.host if a.host != "0.0.0.0" else "10.131.0.53"
+    # 0.0.0.0 を bind したときは表示用にこのホストの名前を出す (別マシンから開く用)。
+    shown = a.host if a.host != "0.0.0.0" else socket.gethostname()
     print("meshserve: %s" % Handler.mesh_path)
-    print("  Mac のブラウザで  http://%s:%d/  を開く" % (shown, a.port))
-    print("  Linux 側で上書きすると視点を保ったまま自動リロード。Ctrl-C で停止。")
+    print("  ブラウザで  http://%s:%d/  を開く" % (shown, a.port))
+    print("  ファイルを上書きすると視点を保ったまま自動リロード。Ctrl-C で停止。")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

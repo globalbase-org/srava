@@ -60,7 +60,7 @@ PIG_WIRE_DEF(cgMesh, cg_mk_reader, cg_mk_writer);
 extern const pigModuleType cgal_provides[];
 const pigModuleType cgal_provides[] = {
 	{ &cgMesh::WIRE, "cg-mesh3d,cg-cross2d",
-	  "MESH,PLY2,MFM3,MFC2,NEFB" },
+	  "MESH,PLY2,MFM3,MFC2,NEFB" },   /* ★ #3499: NEF3 (nef_snc = 常に SNC) は読まない → 橋 nef_cg.so */
 	{ 0, 0, 0 },
 };
 

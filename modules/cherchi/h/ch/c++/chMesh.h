@@ -66,13 +66,15 @@
  *   [u32 nv][u32 nt] 頂点×nv(double x,y,z) 三角形×nt(u32 i,j,k)
  *   ★ 4CC は **形式** の名前であって型の名前ではないので、manifold / geogram と共有する。
  *   型の区別 (ch-mesh3d) は codec 行の types 申告と型スタンプが担い、キャッシュの弁別は
- *   hash_salt (CH_SALT) が担うので、同じ 4CC でも衝突しない (型の出どころは sig と型スタンプ)。
+ *   レジストリのソルト (モジュール名 + .so 指紋・#3466) が担うので、同じ 4CC でも衝突しない
+ *   (型の出どころは sig と型スタンプ)。
  *
  * ★ IRMB のヘッダ (booleans.h) は **この .h からは include しない**。テンプレート地獄で
  *   **コンパイルが重い**ので、実体を触る chMesh.cpp だけが include する
  *   (op の TU 12 本が巻き込まれない)。ここで持つのは素の配列だけ。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<stdint.h>
 #include	<vector>
@@ -81,7 +83,6 @@
 #define CH_TYPE		"ch-mesh3d"
 /* ★ wire 形式の 4CC。manifold / geogram と **同一レイアウトなので同じ 4CC を共有する**。 */
 #define CH_TAG		"MFM3"
-#define CH_SALT		"\x01" "CHM"
 
 /* codec の Sink/Source 抽象 (mfChunkSink/ggChunkSink と同シグネチャ)。 */
 struct chChunkSink   { virtual void chunk(const uint8_t *data, int n) = 0; virtual ~chChunkSink()   {} };
@@ -99,8 +100,16 @@ public:
 	virtual void encode(chChunkSink&)   = 0;
 	virtual void decode(chChunkSource&) = 0;
 	int  decode_failed() const { return decodeErr_; }
+	/* ★ #3479: 立てた **理由** (立てていなければ 0)。reader がこれを拾って errCode と一緒に
+	 *   parent へ渡す。従来は「読めなかった」という事実だけが残り、利用者に届く文は
+	 *   「codec が無い / 表現できない / 形式が違う」の 3 択を並べた推測だった。
+	 *   ★文字列リテラル前提 (寿命は .so と同じ)。 */
+	const char* decode_why() const { return decodeWhy_; }
 protected:
+	/* decodeErr_ と理由は必ず対で立てる (理由の無い拒否を作らない)。 */
+	void set_decode_err(const char* why) { decodeErr_ = 1; decodeWhy_ = why; }
 	int  decodeErr_ = 0;
+	const char* decodeWhy_ = 0;
 public:
 	virtual bool write_to(const char *path, const char *unit) = 0;
 	/* reader 用ファクトリ: D_META タグから具体型を生成 (未知タグは null)。 */
@@ -144,9 +153,22 @@ public:
 	 *   kind = "union" / "intersection" / "difference" (difference は左 fold: x0-x1-x2-…)。
 	 * ⚠ err/errsz は **呼び手が用意する理由の受け皿**。モジュール側に static を置かない
 	 *   (in-proc では 1 プロセスに複数 op が同居しうるので混線する。ひさ指示 2026-08-26)。 */
+	/* ★ #3481: module("cherchi.so",{threads:N}) の受け口 (記述子の .configure に配線)。
+	 *   N>0 = op あたりの op 内並列の上限 / N<=0 = 指定なし (TBB 既定へ戻す)。
+	 *   ⚠ configure は module() ごとに 1 回で op ごとには呼ばれない。値はモジュール専用
+	 *     スロットへ預け、op の計算入口が ch_in_arena() (chArena.h) 経由で読む。 */
+	static void configure(sPtr<pigData> opts);
+
 	static const int CH_MAX_OPERANDS = 32;   /* = IRMB の NBIT */
 	static sPtr<chMesh> op_bool_nary(sArray<sPtr<chMesh> >& ops, const char *kind,
 	                                 char *err = 0, int errsz = 0);
+
+	/* ---- アフィン変換 (行優先 double[12] = 3x4。cgMesh3D::apply_affine と同じ規約) ----
+	 * 引数の解釈と行列の組み立ては common/affine.h (カーネル非依存)。ここは適用だけ。
+	 * 座標は素の double 配列なので全頂点を掛けるだけ。
+	 * ⚠ 反射 (det<0) では面の向きが裏返るので **三角形の頂点順を入れ替える**。
+	 *   IRMB は面の向きで label の内外を決めるので、直さないと裏返った立体を黙って返す。 */
+	sPtr<chMesh> apply_affine(const double e[12]);
 
 	/* planner から届いた引数配列をそのまま食う入口 (chaUnion/Intersection/Difference 共通)。
 	 * 失敗時は null を返し *errmsg に理由を置く (errbuf は理由の受け皿)。 */
@@ -154,6 +176,15 @@ public:
 	                                   const char **errmsg, char *errbuf = 0, int errbufsz = 0);
 
 	double volume() const;
+
+	/* ---- 素性を訊く op (#3487) ----------------------------------------------
+	 * 中身は common/meshprops.h (カーネル非依存)。chMesh は素の配列を持つので直に渡せる。
+	 * valid の定義は 7 カーネル共通で ① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い
+	 * (meshprops.h 冒頭に根拠つきで書いてある)。 */
+	int    op_bbox(double mn[3], double mx[3]) const;
+	int    op_centroid(double c[3]) const;
+	double op_area() const;
+	int    op_valid() const;
 	int    nverts() const { return (int)(coords_.size() / 3); }
 	int    nfaces() const { return (int)(tris_.size()   / 3); }
 
@@ -168,5 +199,9 @@ private:
 	std::vector<uint32_t> tris_;     /* 3*nt */
 	int                   meshExactInput_ = 0;   /* 1 = 入力が cgal の "MESH" (厳密境界) */
 };
+
+/* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
+ *   素の cha_err(...) を使うとモジュール名が付かない。 */
+PIG_DEFINE_MODULE_ERR(cha_err, CH_MODULE_NAME)
 
 #endif

@@ -65,5 +65,5 @@ mfaNverts_::compute()
 	sPtr<mfCross> c2 = sPtr<mfCross>::d_cast(a);
 	if ( m3.is_notNull() )      result = thNEW(pigDataInteger,((INTEGER64)m3->op_nverts()));
 	else if ( c2.is_notNull() ) result = thNEW(pigDataInteger,((INTEGER64)c2->op_nverts()));
-	else result = thNEW(pigDataError,(thNEW(stdString,("nverts: needs a mesh"))));
+	else result = mfa_err(thNEW(stdString,("nverts: needs a mesh")));
 }

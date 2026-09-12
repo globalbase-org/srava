@@ -236,7 +236,7 @@ cgaImport_::compute()
 		sPtr<cgMesh2D> m2 = thNEW(cgMesh2D,());
 		if ( ! parse_svg(p, m2) ) {
 			sPtr<stdString> msg = thNEW(stdString,("import: failed to read SVG "));
-			result = thNEW(pigDataError,(msg->add(path)));
+			result = cga_err(msg->add(path));
 		}
 		mesh = m2;
 		return;
@@ -245,7 +245,7 @@ cgaImport_::compute()
 		sPtr<cgMesh2D> m2 = thNEW(cgMesh2D,());
 		if ( ! parse_dxf(p, m2) ) {
 			sPtr<stdString> msg = thNEW(stdString,("import: failed to read DXF "));
-			result = thNEW(pigDataError,(msg->add(path)));
+			result = cga_err(msg->add(path));
 		}
 		mesh = m2;
 		return;
@@ -256,7 +256,7 @@ cgaImport_::compute()
 	bool ok = CGAL::Polygon_mesh_processing::IO::read_polygon_mesh(std::string(p), m3->mesh());
 	if ( ! ok || m3->mesh().number_of_vertices() == 0 ) {
 		sPtr<stdString> msg = thNEW(stdString,("import: failed to read "));
-		result = thNEW(pigDataError,(msg->add(path)));
+		result = cga_err(msg->add(path));
 	}
 	mesh = m3;
 }

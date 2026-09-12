@@ -4,9 +4,11 @@
  * volume / export (= to_mesh) の時だけ。
  */
 #include	"nf/c++/nfMesh.h"
+#include	"common/blockframe.h"   /* ★ #3507: ブロック分割フレーミング */
 #include	"cg/c++/cgaMeshCodec.h"        /* 厳密境界の共通 codec (cg の "MESH" と同一形式) */
 #include	"ts2/c++/stdString.h"
 
+#include	<CGAL/Aff_transformation_3.h>                       /* アフィン変換 (#3486) */
 #include	<CGAL/IO/Nef_polyhedron_iostream_3.h>   /* ★SNC シリアライズの**定義**はここ (宣言は Nef_polyhedron_3.h) */
 #include	<CGAL/minkowski_sum_3.h>                /* Minkowski 和 (内部で凸分解・#3440) */
 #include	<CGAL/boost/graph/convert_nef_polyhedron_to_polygon_mesh.h>
@@ -15,7 +17,8 @@
 #include	<CGAL/boost/graph/generators.h>          /* make_icosahedron / make_hexahedron (offset の球と箱) */
 #include	<CGAL/subdivision_method_3.h>            /* Loop 細分 (近似球) */
 #include	<CGAL/Polygon_mesh_processing/connected_components.h>   /* シェル分解 (空洞の復元・#3440) */
-#include	<CGAL/Polygon_mesh_processing/measure.h>                /* 符号付き体積 (向きの判定) */
+#include	<CGAL/Polygon_mesh_processing/measure.h>
+#include	<CGAL/Polygon_mesh_processing/self_intersections.h>   /* valid の ③ (#3487) */                /* 符号付き体積 (向きの判定) */
 #include	<CGAL/Polygon_mesh_processing/orientation.h>            /* reverse_face_orientations */
 #include	<CGAL/convex_decomposition_3.h>                         /* 凸分解 (#3441) */
 #include	<CGAL/Polyhedron_3.h>                                   /* convert_inner_shell_to_polyhedron の受け皿 */
@@ -25,7 +28,6 @@
 #include	<CGAL/normal_vector_newell_3.h>       /* 面の法線 (Nef の平面向き) */
 #include	<CGAL/Nef_3/Mark_bounded_volumes.h>   /* 有界セルを「中身」にする (#3445) */
 #include	<algorithm>
-#include	<stdexcept>
 #include	<vector>
 #include	<cmath>
 
@@ -66,43 +68,85 @@ nfMesh::get_str()
 	return thNEW(stdString,(s.c_str()));
 }
 
-/* ---- cache 書き出し: SNC そのもの ([u32 len][SNC テキスト]) ----
+/* ---- cache 書き出し: SNC そのもの ([u32 blocklen][block]…[u32 0]・#3507) ----
  * ★境界表現で書くと非有界な Nef (箱の補集合など) が「箱」に化ける。SNC なら非有界・低次元も
  *   厳密に往復する (nfMesh.h 冒頭の実測メモ参照)。 */
 void
 nfMesh::encode(nfChunkSink &sink)
 {
-	/* ★ハイブリッド (#3433): 普通の立体 (有界かつ 2-多様体) は **厳密境界**で書き、
-	 *   Nef 固有の値 (非有界/非多様体) だけ SNC で書く。形式は payload 先頭 1 バイトで自己記述する
-	 *   (4CC を増やさない = 型↔タグ 1:1 の不変条件を壊さない・routing 無傷)。
-	 *   狙い: (a) 普通の立体で cache が cg 並みに小さくなる (SNC は ~18x 太い)
-	 *         (b) 境界形式は **cgal も manifold もそのまま読める** (mf は CGAL 非依存のまま nf を消費可) */
+	/* ★ 形式は payload 先頭 1 バイトで自己記述する (4CC を増やさない = 型↔タグ 1:1 の
+	 *   不変条件を壊さない・routing 無傷)。
+	 *
+	 * ★★ **境界表現を持てるかは @to_mesh@ を実際に試して決める** (2026-09-06)。
+	 *   ⚠ #3499 以降、この判定が要るのは **hybrid だけ** (snc は常に SNC を書く)。
+	 *   従来の条件は @is_bounded() && n_.is_simple()@ だったが、@to_mesh@ は 2-多様体で
+	 *   なくても「marked volume ごとの全シェル」で境界を作れる — @volume@ / @export@ が
+	 *   非 2-多様体の値でも通っているのはこの経路。is_simple() で切ると
+	 *   **境界を持てる値まで「境界の無い SNC」として書かれ、cgal / manifold から読めなく
+	 *   なっていた** (実測: 3 球の XOR は 4 つの塊が稜で接するので is_simple()=false になり、
+	 *   volume は出るのに cast("mf-mesh3d", ...) が拒否されていた)。 */
 #if defined(NF_WIRE_HYBRID)
-	/* ★ 空洞 (中空立体) の扱い (#3440): 境界形式は「面の集まり」なので、素朴に読み戻すと
-	 *   入れ子シェルが「もう 1 つの立体」になり **空洞が中実に化ける** (中空箱が 26 → 27)。
-	 *   → 読み側 (@set_from_mesh@) を **シェルごとの Nef を対称差 (even-odd) で畳む**よう直したので、
-	 *     空洞つき立体も境界形式で安全に運べる。cg / mf への降格も通る (両者とも中空立体を表現できる)。
-	 *   ★ここを「空洞があれば SNC」に逃がすと cache が太り、cg/mf へ渡せなくなるので**しない**。 */
-	uint8_t form = ( is_bounded() && n_.is_simple() ) ? NF_FORM_BOUNDARY : NF_FORM_SNC;
+	Mesh bnd;
+	bool haveBnd = to_mesh(bnd);
+	/* ★ハイブリッド (#3433): 普通の立体 (有界かつ 2-多様体) は **厳密境界だけ**で書く。
+	 *   狙い: (a) 普通の立体で cache が cg 並みに小さくなる (SNC は ~18x 太い)
+	 *         (b) 境界形式は **cgal も manifold もそのまま読める** (mf は CGAL 非依存のまま nf を消費可)
+	 *   ★ 空洞 (中空立体) の扱い (#3440): 境界形式は「面の集まり」なので、素朴に読み戻すと
+	 *     入れ子シェルが「もう 1 つの立体」になり空洞が中実に化ける。→ 読み側
+	 *     (@set_from_mesh@) を **シェルごとの Nef を対称差 (even-odd) で畳む**よう直したので、
+	 *     空洞つき立体も境界形式で安全に運べる。
+	 *
+	 *   ⚠ **2-多様体でない値に境界形式は使えない**。境界だけを書き戻すと内部の仕切り面が
+	 *     消え、@convex_decomposition@ の結果が 1 塊に化ける (@nparts@ / @part@ が壊れる) —
+	 *     点集合は同じでも **値が変わる**。そこで #3478 の SNC_BND を使い、
+	 *     **SNC を本体・境界を付録**として両方書く。nef 自身は前半の SNC を読むので
+	 *     値は完全に保たれ、他カーネルは後半の境界を読める。cache は太るが、
+	 *     太るのは元々 SNC で書いていた値だけ (付録ぶんの増加は境界 1 枚)。 */
+	uint8_t form = haveBnd ? ( n_.is_simple() ? NF_FORM_BOUNDARY : NF_FORM_SNC_BND )
+	                       : NF_FORM_SNC;
 #else
-	uint8_t form = NF_FORM_SNC;   /* nef_snc: 常に SNC (Nef 本来の表現をそのまま持ち回る) */
+	/* ★★ #3499 (2026-09-07): nef_snc は **常に SNC だけ** を書く (Nef 本来の表現)。
+	 *   #3478 はここで境界を付録として併記していた (NF_FORM_SNC_BND) が、**撤回した**:
+	 *     ・付録のために **encode ごとに to_mesh() が走る**。データ量の増加は数 % だが、
+	 *       実時間の代償はそれよりずっと大きい (#3499 で実測)。
+	 *     ・「常に SNC」は nef_snc という変種の定義そのもので、付録はその境界を曖昧にしていた。
+	 *   ⇒ 他カーネルへ渡す口は **橋モジュール** (nef_cg.so / nef_mf.so) が持つ。
+	 *     cast が呼ばれたときだけ to_mesh() を払う (occt_mf と同じ分担)。
+	 *   ⚠ したがって cgal.so / manifold.so は **NEF3 を読まない**。読もうとすると
+	 *     「SNC は CGAL 無しでは解釈できない」で正しく落ちる。 */
+	uint8_t form = NF_FORM_SNC;
 #endif
 	sink.chunk(&form, 1);
+
+	struct Adapt { nfChunkSink *s; void chunk(const uint8_t *d, int n) { s->chunk(d, n); } } a;
+	a.s = &sink;
+
+#if defined(NF_WIRE_HYBRID)
 	if ( form == NF_FORM_BOUNDARY ) {
-		struct Adapt { nfChunkSink *s; void chunk(const uint8_t *d, int n) { s->chunk(d, n); } } a;
-		a.s = &sink;
-		Mesh m;
-		to_mesh(m);
-		cgaMeshCodec::encode(m, a);
+		cgaMeshCodec::encode(bnd, a);
 		return;
 	}
-	std::ostringstream os;
-	os << n_;
-	std::string s = os.str();
-	uint32_t n = (uint32_t)s.size();
-	uint8_t b[4] = { (uint8_t)n, (uint8_t)(n >> 8), (uint8_t)(n >> 16), (uint8_t)(n >> 24) };
-	sink.chunk(b, 4);
-	if ( n > 0 ) sink.chunk((const uint8_t*)s.data(), (int)n);
+#endif
+	/* ★★ #3507 (2026-09-10): SNC を **ブロック分割**で直接流す。
+	 *   旧実装は @ostringstream@ に全文を作り @str()@ でもう 1 本コピーしていた
+	 *   (SNC 2.80 GiB の模型では **この 1 op だけで一時領域 5.6 GiB**)。全長を先頭に置く
+	 *   形式がそれを強制していたので、形式ごと [u32 blocklen][block]…[u32 0] へ変えた。
+	 *   ⇒ 一時領域は固定 1 MiB ・ @int@ の 2 GiB 問題は構造的に消え (#3504 / #3506)、
+	 *     長さ欄 u32 による **4 GiB の上限も無くなる**。 */
+	{
+		blockframe::obuf<nfChunkSink> ob(sink);
+		std::ostream                  os(&ob);
+		os << n_;
+		os.flush();
+		ob.finish();          /* 残りを出して終端 [u32 0] を書く */
+	}
+#if defined(NF_WIRE_HYBRID)
+	/* ★ #3478: 後半の厳密境界 (cg の "MESH" と同一フレーミング)。読み手は前半の
+	 *   ブロック列を終端 [u32 0] まで読み捨てればここに着く (#3507。旧形式では
+	 *   前置された全長で読み飛ばしていた)。★ #3499 以降 **これを書くのは hybrid だけ**。 */
+	if ( form == NF_FORM_SNC_BND )
+		cgaMeshCodec::encode(bnd, a);
+#endif
 }
 
 void
@@ -113,14 +157,22 @@ nfMesh::decode(nfChunkSource &src)
 	uint8_t form = NF_FORM_SNC;
 	src.pull(&form, 1);                                       /* ★形式バイト (encode 参照) */
 	if ( form == NF_FORM_BOUNDARY ) { decode_boundary(src); return; }
-	uint8_t b[4];
-	src.pull(b, 4);
-	uint32_t n = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-	std::string s;
-	s.resize(n);
-	if ( n > 0 ) src.pull((uint8_t*)&s[0], (int)n);
-	std::istringstream is(s);
-	is >> n_;
+	/* ★ #3478: NF_FORM_SNC_BND も **前半の SNC を読むだけ** (後半の境界は他カーネル向けの
+	 *   付録で、nef にとっては冗長)。reader が残りを閉じるので読み飛ばす必要もない。 */
+	/* ★ #3507: ブロック列を逐次に読む (全文バッファを作らない)。
+	 *   ★ 途中で読み終えても **drain() で終端まで読み捨てる** — ストリームは先読みで
+	 *     ブロックを丸ごと抱えているので、呼ばないと Source の位置がずれる
+	 *     (hybrid の [SNC][境界] のように後ろに別の値が続く形式で効く)。 */
+	{
+		blockframe::ibuf<nfChunkSource> ib(src);
+		std::istream                    is(&ib);
+		is >> n_;
+		if ( ! ib.drain() ) {
+			buildErr_ = 1;
+			lastErr_  = "the stored SNC frame is corrupt (implausible block length)";
+			return;
+		}
+	}
 }
 
 /* ---- "MESH" (cg の厳密境界・cgaMeshCodec フレーミング) を読んで SNC を組む = 昇格読み ---- */
@@ -363,6 +415,77 @@ nfMesh::set_from_mesh(Mesh &m)
 }
 
 /* ---- 有界性: SNC の最初の volume(無限体積)が mark されていれば非有界 ---- */
+/* ---- 素性を訊く op (#3487) ---------------------------------------------------
+ * 境界表現へ落としてから CGAL の厳密述語で測る (volume / export と同じ経路)。
+ * 返り値 0 = to_mesh に失敗 (非有界 / 非 2-多様体) で、呼び側が明示エラーにする。 */
+int
+nfMesh::op_bbox(double mn[3], double mx[3])
+{
+	Mesh m;
+	if ( ! to_mesh(m) ) return 0;
+	bool first = true;
+	for ( Mesh::Vertex_index v : m.vertices() ) {
+		double x = CGAL::to_double(m.point(v).x());
+		double y = CGAL::to_double(m.point(v).y());
+		double z = CGAL::to_double(m.point(v).z());
+		if ( first ) { mn[0]=mx[0]=x; mn[1]=mx[1]=y; mn[2]=mx[2]=z; first = false; }
+		else {
+			if ( x < mn[0] ) mn[0] = x;  if ( x > mx[0] ) mx[0] = x;
+			if ( y < mn[1] ) mn[1] = y;  if ( y > mx[1] ) mx[1] = y;
+			if ( z < mn[2] ) mn[2] = z;  if ( z > mx[2] ) mx[2] = z;
+		}
+	}
+	if ( first ) { mn[0]=mn[1]=mn[2]=mx[0]=mx[1]=mx[2] = 0.0; }
+	return 3;
+}
+
+int
+nfMesh::op_centroid(double c[3])
+{
+	Mesh m;
+	if ( ! to_mesh(m) ) return 0;
+	/* cgMesh3D::op_centroid と同じ式 (原点四面体への分解・符号付き体積で加重平均)。 */
+	double cx = 0, cy = 0, cz = 0, vol = 0;
+	for ( Mesh::Face_index f : m.faces() ) {
+		Mesh::Halfedge_index h = m.halfedge(f);
+		const Point_3& A = m.point(m.source(h));
+		const Point_3& B = m.point(m.target(h));
+		const Point_3& C = m.point(m.target(m.next(h)));
+		double ax = CGAL::to_double(A.x()), ay = CGAL::to_double(A.y()), az = CGAL::to_double(A.z());
+		double bx = CGAL::to_double(B.x()), by = CGAL::to_double(B.y()), bz = CGAL::to_double(B.z());
+		double dx = CGAL::to_double(C.x()), dy = CGAL::to_double(C.y()), dz = CGAL::to_double(C.z());
+		double v = ( ax*(by*dz - bz*dy) - ay*(bx*dz - bz*dx) + az*(bx*dy - by*dx) ) / 6.0;
+		vol += v;
+		cx += v * (ax + bx + dx) / 4.0;
+		cy += v * (ay + by + dy) / 4.0;
+		cz += v * (az + bz + dz) / 4.0;
+	}
+	if ( vol != 0.0 ) { c[0] = cx/vol; c[1] = cy/vol; c[2] = cz/vol; }
+	else              { c[0] = c[1] = c[2] = 0.0; }
+	return 3;
+}
+
+int
+nfMesh::op_area(double *out)
+{
+	Mesh m;
+	if ( ! to_mesh(m) ) return 0;
+	*out = CGAL::to_double(CGAL::Polygon_mesh_processing::area(m));
+	return 1;
+}
+
+int
+nfMesh::op_valid()
+{
+	Mesh m;
+	/* to_mesh の失敗 = 非有界 or 非 2-多様体 = 「閉じた 2-多様体である」を満たさない。 */
+	if ( ! to_mesh(m) ) return 0;
+	if ( m.number_of_faces() == 0 ) return 0;            /* ① 空でない */
+	if ( ! CGAL::is_closed(m) ) return 0;                /* ② 閉じている */
+	return CGAL::Polygon_mesh_processing::does_self_intersect(m) ? 0 : 1;   /* ③ */
+}
+
+
 bool
 nfMesh::is_bounded() const
 {
@@ -377,29 +500,52 @@ nfMesh::is_bounded() const
 bool
 nfMesh::to_mesh(Mesh &out)
 {
-	if ( ! is_bounded() ) return false;
+	lastErr_ = 0;
+	if ( ! is_bounded() ) { lastErr_ = "the Nef is unbounded"; return false; }
 	if ( n_.is_simple() ) {
+		std::size_t nf0 = out.number_of_faces();
 		CGAL::convert_nef_polyhedron_to_polygon_mesh(n_, out, true /* 三角化 */);
+		/* ★★ #3504: この変換は **面を 1 枚も出せなくても何も言わない** (例外も戻り値も無い)。
+		 *   SNC に中身 (marked volume) があるのに面が増えなかったら、それは「空集合」ではなく
+		 *   **書き出しの失敗**なので false を返す。ここで通すと export が 0 三角形の STL を
+		 *   書いて rc=0 を返し、測定側は体積 0.0 を正しい値として拾ってしまう
+		 *   (xor N>=24 で実際に起きた・2026-09-09)。
+		 *   ⚠ 本当の空集合 (marked volume が 0) は面 0 が正しい答えなのでそのまま通す。 */
+		if ( out.number_of_faces() == nf0 && op_nparts() > 0 ) {
+			lastErr_ = "the SNC has solid volumes but no triangle came out";
+			return false;
+		}
 		return true;
 	}
-	/* ★ 仕切り面を持つ Nef (凸分解の結果など・#3441) は境界が 2-多様体でないので上の変換は使えない。
-	 *   **marked な volume ごとに外側シェルを取り出し**、別々の連結成分として 1 つの Mesh に束ねる。
-	 *   こうすると volume は片の合計 (= 分解前と同じ)・export は片が別成分として出る。
-	 *   ★最初の volume は無限体積なので飛ばす (is_bounded() で mark 無しは確認済み)。 */
+	/* ★ 仕切り面を持つ Nef (凸分解の結果・稜だけで接する 2 立体の和など) は境界が 2-多様体で
+	 *   ないので上の変換は使えない。**marked な volume ごとに全シェルを取り出し**、別々の
+	 *   連結成分として 1 つの Mesh に束ねる。volume は片の合計 (= 分解前と同じ)・export は
+	 *   片が別成分として出る。
+	 *   ★最初の volume は無限体積なので飛ばす (is_bounded() で mark 無しは確認済み)。
+	 *   ⚠⚠ **全シェルを回すこと** (2026-09-06 修正)。ここが shells_begin() の 1 枚だけだった
+	 *   ため、**非 2-多様体な値の空洞が黙って埋まっていた**。実測: 中空の箱 (8-1=7) と、
+	 *   稜だけで接する箱 (8) の和は 15 のはずが **16** を返していた (空洞ぶんの 1 が消える)。
+	 *   op_part は最初から全シェルを回しており、そちらだけが正しかった。 */
 	typedef CGAL::Polyhedron_3<K> Poly;
 	int nPart = 0;
 	Nef::Volume_const_iterator ci = n_.volumes_begin();
 	for ( ++ci ; ci != n_.volumes_end() ; ++ci ) {
 		if ( ! ci->mark() ) continue;
-		Poly p;
-		n_.convert_inner_shell_to_polyhedron(ci->shells_begin(), p);
-		if ( p.size_of_facets() == 0 ) continue;
-		Mesh part;
-		CGAL::copy_face_graph(p, part);
-		CGAL::Polygon_mesh_processing::triangulate_faces(part);
-		CGAL::copy_face_graph(part, out);   /* 別連結成分として追記 */
-		++nPart;
+		int nShell = 0;
+		for ( Nef::Shell_entry_const_iterator si = ci->shells_begin() ;
+		      si != ci->shells_end() ; ++si ) {
+			Poly p;
+			n_.convert_inner_shell_to_polyhedron(si, p);
+			if ( p.size_of_facets() == 0 ) continue;
+			Mesh part;
+			CGAL::copy_face_graph(p, part);
+			CGAL::Polygon_mesh_processing::triangulate_faces(part);
+			CGAL::copy_face_graph(part, out);   /* 別連結成分として追記 */
+			++nShell;
+		}
+		if ( nShell > 0 ) ++nPart;
 	}
+	if ( nPart == 0 ) lastErr_ = "no shell of the SNC could be turned into facets";
 	return nPart > 0;
 }
 
@@ -437,6 +583,34 @@ sPtr<nfMesh>
 nfMesh::op_complement()
 {
 	return thNEW(nfMesh,(n_.complement()));
+}
+
+/* ---- アフィン変換 (行優先 double[12] = 3x4) — #3486 ----------------------------
+ * ★ **Nef のまま**変換する (型維持・境界表現へ戻さない)。非有界な Nef も通る。
+ * ⚠ 反射 (det<0) の向き補正は **CGAL の Nef_polyhedron_3::transform が中でやる**ので、
+ *   cgMesh3D::apply_affine のように reverse_face_orientations を後から当ててはいけない
+ *   (当てると二重に裏返る)。Nef は面の向きを頂点ごとの **球面地図の巡回順**で持っており、
+ *   transform() は SM_decorator 経由でそこも直す。実測 2026-09-05:
+ *     [0,3]x[0,1]^2 を x 鏡像 → 体積 3 のまま -x 側に移動・後段の union/difference も正しい
+ *   (素の頂点書き換えだと補集合に化ける)。
+ * ⚠ 行列の要素は double のまま K::FT へ入れる。EPECK なのは「その行列を厳密に適用する」
+ *   ところまでで、回転の cos/sin が厳密になるわけではない。 */
+sPtr<nfMesh>
+nfMesh::apply_affine(const double e[12])
+{
+	/* NB: K::FT(e[i]) を ctor に直接並べると most vexing parse (関数宣言化) になるので、
+	 * いったん FT の配列へ移してから添字式で渡す (cgMesh3D::apply_affine と同じ理由)。 */
+	K::FT f[12];
+	for ( int i = 0 ; i < 12 ; ++i )
+		f[i] = K::FT(e[i]);
+	CGAL::Aff_transformation_3<K> aff(
+	    f[0], f[1], f[2],  f[3],
+	    f[4], f[5], f[6],  f[7],
+	    f[8], f[9], f[10], f[11] );
+
+	Nef n = n_;   /* Handle_for なので rep 共有。transform() が is_shared() を見て COW する */
+	n.transform(aff);
+	return thNEW(nfMesh,(n));
 }
 
 /* ---- Minkowski 和 A ⊕ B (#3440) ----

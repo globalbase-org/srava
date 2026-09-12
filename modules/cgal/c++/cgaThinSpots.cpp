@@ -67,7 +67,7 @@ cgaThinSpots_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh3D> in = ( na > 0 ) ? sPtr<cgMesh3D>::d_cast((*args)[0]) : sPtr<cgMesh3D>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("thin_spots: needs a 3D mesh"))));
+		result = cga_err(thNEW(stdString,("thin_spots: needs a 3D mesh")));
 		return;
 	}
 	double t_min = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;

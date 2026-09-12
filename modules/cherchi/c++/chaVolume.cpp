@@ -62,7 +62,7 @@ chaVolume_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<chMesh> in = ( na > 0 ) ? sPtr<chMesh>::d_cast((*args)[0]) : sPtr<chMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: needs a cherchi mesh"))));
+		result = cha_err(thNEW(stdString,("volume: needs a cherchi mesh")));
 		return;
 	}
 	result = thNEW(pigDataFloat,(in->volume()));

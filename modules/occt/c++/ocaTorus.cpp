@@ -76,12 +76,12 @@ ocaTorus_::compute()
 	double R = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double r = ( na > 1 ) ? (*args)[1]->get_flt() : 0.25;
 	if ( !(R > 0) || !(r > 0) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("torus: R and r must be > 0"))));
+		result = oca_err(thNEW(stdString,("torus: R and r must be > 0")));
 		return;
 	}
 	if ( r >= R ) {
 		/* r >= R は自己交差する (中央の穴が潰れる)。OCCT は作ってしまうことがあるので先に弾く。 */
-		result = thNEW(pigDataError,(thNEW(stdString,("torus: r must be < R (self-intersecting otherwise)"))));
+		result = oca_err(thNEW(stdString,("torus: r must be < R (self-intersecting otherwise)")));
 		return;
 	}
 	/* 原点中心・軸は +Z (穴が Z 方向に空く)。 */
@@ -90,7 +90,7 @@ ocaTorus_::compute()
 	/* ★ プリミティブは遅延構築。IsDone() は立たないので IsNull() で見る (ocaBox と同じ罠)。 */
 	TopoDS_Shape sh = mk.Shape();
 	if ( sh.IsNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("torus: OCCT produced a null shape"))));
+		result = oca_err(thNEW(stdString,("torus: OCCT produced a null shape")));
 		return;
 	}
 	out = thNEW(ocShape,());

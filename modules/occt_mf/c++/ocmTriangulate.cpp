@@ -26,6 +26,11 @@
 #include	<vector>
 #include	<map>
 #include	<tuple>
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] occt_mf/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(ocm_err, "occt_mf")
+
 
 CLASS_TINYSTATE(ocm/c++/ocmTriangulate,pig/c++/ptsCalcBody)
 
@@ -86,22 +91,22 @@ ocmTriangulate_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
 	if ( ! in.is_notNull() || in->shape().IsNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("triangulate: needs an OCCT shape"))));
+		result = ocm_err(thNEW(stdString,("triangulate: needs an OCCT shape")));
 		return;
 	}
 	/* deflection = **曲面と弦の最大距離**。小さいほど三角形が増える。★ここが情報損失を伴う
 	 *   パラメータなので、暗黙 cast にせず明示 op で必ず書かせる (voxelize の dx と同じ思想)。 */
 	double defl = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
 	if ( !(defl > 0) ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("triangulate: deflection (max chord distance) must be > 0"))));
+		result = ocm_err(thNEW(stdString,
+		    ("triangulate: deflection (max chord distance) must be > 0")));
 		return;
 	}
 
 	TopoDS_Shape s = in->shape();
 	BRepMesh_IncrementalMesh mesher(s, defl);
 	if ( ! mesher.IsDone() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("triangulate: BRepMesh failed"))));
+		result = ocm_err(thNEW(stdString,("triangulate: BRepMesh failed")));
 		return;
 	}
 
@@ -148,7 +153,7 @@ ocmTriangulate_::compute()
 		}
 	}
 	if ( tt.empty() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("triangulate: produced no triangles"))));
+		result = ocm_err(thNEW(stdString,("triangulate: produced no triangles")));
 		return;
 	}
 

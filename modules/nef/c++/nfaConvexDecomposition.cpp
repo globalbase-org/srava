@@ -73,18 +73,18 @@ nfaConvexDecomposition_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("convex_decomposition: needs a Nef mesh"))));
+		result = nfa_err(thNEW(stdString,("convex_decomposition: needs a Nef mesh")));
 		return;
 	}
 	/* ★非有界は凸分解できない (CGAL の前提)。先に弾いて明示エラーにする。 */
 	if ( ! in->is_bounded() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("convex_decomposition: an unbounded Nef cannot be decomposed (e.g. the result of complement)"))));
+		result = nfa_err(thNEW(stdString,
+		    ("convex_decomposition: an unbounded Nef cannot be decomposed (e.g. the result of complement)")));
 		return;
 	}
 	mesh = in->op_convex_decomposition();
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,("convex_decomposition: computation failed"))));
+		result = nfa_err(thNEW(stdString,("convex_decomposition: computation failed")));
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

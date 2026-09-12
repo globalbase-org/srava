@@ -12,8 +12,9 @@
 #
 set -euo pipefail
 
-# tinyState develop-v2 の build ディレクトリ。別環境では TINYSTATE_BUILD で上書き可。
-BUILD="${TINYSTATE_BUILD:-/home/joshua/proj/claude/gs/tinyState/develop-v2/build}"
+# tinyState の build ディレクトリ (install_manifest.txt がある場所)。
+# 環境ごとに違うので、既定に合わない場合は TINYSTATE_BUILD で上書きする。
+BUILD="${TINYSTATE_BUILD:-$HOME/proj/claude/gs/tinyState/develop-v2/build}"
 MANIFEST="$BUILD/install_manifest.txt"
 
 # ---- preflight -------------------------------------------------------------

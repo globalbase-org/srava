@@ -126,11 +126,11 @@ cgaExtrude_::compute()
 
 	mesh = thNEW(cgMesh3D,());
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("extrude: needs a 2D polygon"))));
+		result = cga_err(thNEW(stdString,("extrude: needs a 2D polygon")));
 		return;
 	}
 	if ( h == 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("extrude: height must be non-zero"))));
+		result = cga_err(thNEW(stdString,("extrude: height must be non-zero")));
 		return;
 	}
 

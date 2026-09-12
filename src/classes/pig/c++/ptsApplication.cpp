@@ -85,6 +85,13 @@ public:
 	int			agent_count();              /* 現在の生存数 */
 	void			set_agentError(sPtr<pigData> e);  /* エラー集約(先勝ち)+ 全 agent を起こす */
 	sPtr<pigData>		get_agentError();           /* 集約済みエラー(無ければ thNULL) */
+	/* ★ #3417 (2026-09-06): 生存中の全 agent へ **destroy を撃つ**。
+	 *   set_agentError の wake-all と対になる操作で、あちらが「起こして自分で畳ませる」のに対し
+	 *   こちらは「畳めと要求する」。撤収が始まったのに countAgent が下がらないとき
+	 *   (planner の WAITAGENTS) に使う。
+	 *   ⚠ destroy() は冪等なので二度撃っても害は無いが、既に is_destroyed() のものは飛ばす
+	 *     (set_agentError の走査と同じ流儀)。 */
+	void			destroy_agents();
 	/* ★ agent のエラーを **記録だけ**する (2026-08-26・ひさ提案)。
 	 * set_agentError は「最初の 1 件」しか保たない (先勝ち) ので、**落ちた本人の理由が
 	 * 傍観者の汎用エラーに負けて消える**ことがあった。async の continue-and-collect と同じく
@@ -140,6 +147,23 @@ public:
 	 * in-proc は planner に含まれるので pid=0 は無視する。 */
 	void			load_pid_add(uint32_t pid);
 	void			load_pid_del(uint32_t pid);
+
+	/* ★★ #3503 (ひさ設計 2026-09-07): **in-proc 居座りの panic は planner が撃つ**。
+	 *
+	 * in-proc の実行体が destroy に応じないと、その mediator は永久に TSE_RETURN を待つ。
+	 * 殺せる子プロセスが無いので抜ける道は abort しか無いが、⚠ **mediator が自分で
+	 * abort してはいけない** — in-proc と process は同居するので、そのとき生きている
+	 * agent プロセスが全部迷子になる (子は setpgid で別プロセスグループに居るので
+	 * 端末のシグナルも届かない = #3417 が潰した居残りに戻る)。
+	 *
+	 * ⇒ mediator は **PE_PANIC のエラーを set_agentError で上げるだけ** (撤収の指標を
+	 *   get_agentError() 1 本にした #3417 の流儀に乗る)。planner (WAITAGENTS) が
+	 *   その種別を見分け、**子プロセスを持つ agent が 0** になってから撃つ。
+	 * ⚠ 権威は load 制御の pid 表ではない (あちらは #3419 の集計用で、起動失敗や pid 登録前の
+	 *   窓を表していない)。pigfAgent が med->is_external() を見て数える。 */
+	void			ext_agent_add();
+	void			ext_agent_del();
+	int			ext_agent_count();
 	/* ★ #3419 §14.9: in-proc agent は planner と同一アドレス空間で RSS では区別できないので
 	 * **数える** (契機は ptsMediatorInternal の enable/teardown)。 */
 	void			load_inproc_add();
@@ -180,12 +204,15 @@ public:
 	void			gate_idle_stats(long long *sum_ms, long long *max_ms, int *n_agents, int *n_waited);
 	/* ★ #3419: 走行中のピーク実使用 / ピーク RSS を取り出す (サマリ表示用)。 */
 	void			gate_peak_memory(unsigned long long *live_out, unsigned long long *rss_out);
-	/* ゲート待ち行列を priority 順にしているか (0=先着順・既定 / 1=priority 順)。
-	 * pigfAgent はこれを見る必要はない (priority() は常に返してよく、無効なら参照されないだけ)。
-	 * サマリ表示と、実験条件をログに残すために公開する。 */
+	/* ★★ #3508: ゲート待ち行列の並べ方。PIG_GATE_ORDER_* を返す。
+	 *   pigfAgent::priority() は delta のときだけ「生存 cache 値の増減」を返す (それ以外は生成順)。 */
+	int			gate_order();
+	const char*		gate_order_name();      /* "fifo" / "lifo" / "delta" (ログ・サマリ用) */
+	/* ゲート待ち行列を priority 順にしているか (0=先着順 / 1=priority 順)。サマリ表示用。 */
 	int			gate_order_lifo();
 
 private:
+	void			apply_gate_order(int order);   /* ★★ #3508: 並べ方をセマフォへ反映 */
 	int			mem_ok();     /* 空きメモリが watermark 以上か(取得不能環境は常に真) */
 protected:
 	int			countAgent;
@@ -220,8 +247,10 @@ protected:
 	unsigned long long	peakLiveBytes;
 	unsigned long long	peakRssBytes;
 	void			mem_peak_sample();   /* 標本 1 点(安い。glibc 以外では RSS のみ) */
-	int			gateLifo;      /* ★ ゲート待ち行列を priority 順にしたか(SRAVA_GATE_ORDER=lifo) */
+	int			gateLifo;      /* ★ ゲート待ち行列を priority 順にしたか (fifo 以外なら 1) */
+	int			gateOrder;     /* ★★ #3508: PIG_GATE_ORDER_* (fifo / lifo / delta) */
 	sArray<uint32_t>	loadPids;     /* ★ #3419: 稼働中の agent プロセス pid */
+	int			extAgentN;    /* ★ #3503: 子プロセスを持つ agent の数 */
 	unsigned		loadN;        /* 稼働中 agent 数 (§12.8: 種別で分けない) */
 	unsigned		loadPeak;     /* ★ その走行での同時 agent 数の最大 (サマリ用) */
 	unsigned		loadInproc;   /* ★ #3419 §14.9: うち in-proc で走っている数 */
@@ -288,6 +317,7 @@ ptsApplication_::ptsApplication_(TS_ARGS0)
     loadN = 0;
     loadPeak = 0;
     loadInproc = 0;
+    extAgentN  = 0;   /* ★ #3503 */
     gateSem = thNEW(stdLimitSemaphore,(cap));   /* limit=cap(固定)・count=生存 agent 数。待ち行列内蔵。 */
     /* ---- ★ #3419 (2026-08-23): ゲートの**入場順序**。既定は従来どおり先着順(FIFO)。
      *   SRAVA_GATE_ORDER=lifo で待ち行列を priority() 順にする(tinyState #3449 の enablePriority)。
@@ -302,14 +332,13 @@ ptsApplication_::ptsApplication_(TS_ARGS0)
     gateIdleWaited = 0;
     peakLiveBytes = 0;
     peakRssBytes = 0;
-    gateLifo = 0;
+    gateLifo  = 0;
+    gateOrder = PIG_GATE_ORDER_DELTA;   /* ★★ #3508: 既定 (下で env / 設定表に上書きされる) */
     {
         /* ⚠ ここは rootEnv がまだ無い (planner の env 生成前) ので環境変数だけ。
          * srava 変数からの上書きは refresh_gate_config() が周期的に反映する (§17.3)。 */
         const char *go = ::getenv("SRAVA_GATE_ORDER");
-        if ( go != 0 && ::strcmp(go, "lifo") == 0 )
-            gateLifo = 1;
-        gateSem->enablePriority = gateLifo;
+        apply_gate_order(pig_gate_order_parse(( go != 0 ) ? go : PIG_GATE_ORDER_DEFAULT));
     }
     memMarginMB = 1024;    /* (未使用・将来用) 低メモリ時に入場を絞る際の閾値。
                             * ★ この経路は現在**無効**: pigfAgent の GATE が mem_ok()/gate_mem_wait() を
@@ -445,6 +474,35 @@ ptsApplication_::gate_order_lifo()
 	return gateLifo;
 }
 
+/* ★★ #3508: 並べ方そのもの。pigfAgent::priority() がキーを選ぶのに見る。 */
+int
+ptsApplication_::gate_order()
+{
+	return gateOrder;
+}
+
+const char *
+ptsApplication_::gate_order_name()
+{
+	return pig_gate_order_name(gateOrder);
+}
+
+/* ★★ #3508: 並べ方をセマフォへ反映する。**2 つの軸を両方書く**:
+ *   enablePriority … キーに priority() を使うか
+ *   insNeq         … *同点* の入り方 (1 = 到着順 / 0 = LIFO)。tinyState #3509 で口が開いた。
+ * delta では葉が全員 +1・二項 op が全員 -1 で並ぶので、同点を到着順にすると開始直後が
+ * **幅優先のバースト**になる。そこだけ insNeq(0) にして同点を LIFO にする。
+ * lifo は gateSeq が一意なので同点が起きない ⇒ 従来どおり insNeq(1) のまま (挙動不変)。 */
+void
+ptsApplication_::apply_gate_order(int order)
+{
+	gateOrder = order;
+	gateLifo  = ( order != PIG_GATE_ORDER_FIFO );
+	if ( gateSem == thNULL ) return;
+	gateSem->enablePriority = gateLifo;
+	gateSem->insNeq(( order == PIG_GATE_ORDER_DELTA ) ? 0 : 1);
+}
+
 /* 入場(セマフォ取得)。count < limit なら count++ して返る。満杯なら get() が sException を投げて yield し、
  * release / limit 拡大で起こされて呼び出し元の状態が再走する。待ち行列はセマフォ内部の stdQueue が管理する
  * (= 旧 gateWaiters 手管理の wakeup 再登録レースが構造的に起きない)。2 レジーム判定は pigfAgent 側。 */
@@ -530,6 +588,21 @@ ptsApplication_::set_agentError(sPtr<pigData> e)
 	int first = ( agentError == thNULL );
 	if ( first )                   /* 先勝ち(最初のエラーを保持) */
 		agentError = e;
+	/* ★★ #3503: **PE_PANIC だけは先勝ちを覆す**。
+	 *
+	 * panic は必ず *撤収の途中*で起きる (in-proc の実行体が destroy に応じないと分かるのは
+	 * 撤収を始めた後だから)。⇒ その時点で agentError には既に撤収の理由
+	 * ("interrupted by SIGINT" 等) が入っており、先勝ちのままだと **panic が捨てられて
+	 * planner が永久に待つ**。実際そうなっていた (#3503 の実装中に踏んだ)。
+	 *
+	 * ⚠ 上書きしてよいのは「利用者に見せる理由」ではなく **終わり方が変わる**から。
+	 *   通常の撤収は「全 agent が畳まれたら CLEANUP」で終わるが、panic は
+	 *   「子プロセスを持つ agent が 0 になったら abort」で終わる。行き先が違う以上、
+	 *   最初の理由を保持したままでは planner が分岐を選べない。
+	 * ⚠ panic どうしの上書きはしない (2 本目が固まっても理由は変わらない)。 */
+	if ( ! first && e != thNULL && e->is_panic()
+	  && ( agentError == thNULL || ! agentError->is_panic() ) )
+		agentError = e;
 	wakeup();                      /* プランナー(=自分)を起こす */
 	if ( first ) {
 		/* 生存中の全 agent を起こす。各 agent は待ち状態頭の SHOULD_ABORT で撤収(agent kill+FIN)。
@@ -543,6 +616,14 @@ ptsApplication_::set_agentError(sPtr<pigData> e)
 /* agent のエラーを記録だけする (起こさない・撤収トリガにしない)。
  * ★ 同一文言は畳む: 撤収で多数の agent が同じ "aborted" を出すので、そのまま溜めると
  *   末尾の列挙が同じ行で埋まる。★ 上限も置く (壊れ方が「大量出力」にならないように)。 */
+void
+ptsApplication_::destroy_agents()
+{
+	for ( int i = 0 ; i < liveAgents.length() ; ++i )
+		if ( liveAgents[i].is_notNull() && ! liveAgents[i]->is_destroyed() )
+			liveAgents[i]->destroy();
+}
+
 void
 ptsApplication_::record_agentError(sPtr<pigData> e)
 {
@@ -805,6 +886,29 @@ ptsApplication_::load_inproc_del()
 	if ( load_control != thNULL ) load_control->set_inproc(loadInproc);
 }
 
+
+/* ★ #3503: **子プロセスを持つ** agent の生死 (pigfAgent が med->is_external() を見て呼ぶ)。
+ * planner の in-proc panic はこれが 0 になってから撃つ。 */
+void
+ptsApplication_::ext_agent_add()
+{
+	extAgentN++;
+}
+
+void
+ptsApplication_::ext_agent_del()
+{
+	if ( extAgentN > 0 ) extAgentN--;
+	/* 最後の 1 つが畳まれたら planner を起こす — panic 待ちの WAITAGENTS がそれで進む。 */
+	if ( extAgentN == 0 ) wakeup();
+}
+
+int
+ptsApplication_::ext_agent_count()
+{
+	return extAgentN;
+}
+
 void
 ptsApplication_::load_pid_add(uint32_t pid)
 {
@@ -863,14 +967,38 @@ pigcfg_table(void)
 		{ "LOAD_RAMP",       "SRAVA_LOAD_RAMP",       "1",    0 },
 		{ "LOAD_RAMP_MS",    "SRAVA_LOAD_RAMP_MS",    "250",  0 },
 		{ "LOAD_RAMP_START", "SRAVA_LOAD_RAMP_START", "2",    1 },   /* #3451: 最初の agent 入場までは代入可 */
+		{ "LOAD_FOLLOW_SLACK", "SRAVA_LOAD_FOLLOW_SLACK", "2",  0 },   /* 実効 <= 実並列度 + これ */
 		{ "LOAD_AGENT",      "SRAVA_LOAD_AGENT",      "0",    0 },
 		{ "LOAD_LOG",        "SRAVA_LOAD_LOG",        "0",    0 },
-		{ "GATE_ORDER",      "SRAVA_GATE_ORDER",      "fifo", 0 },
+		/* ★★ #3508 (2026-09-10): 既定を delta へ。fifo / lifo は **対照の口として残す**。 */
+		{ "GATE_ORDER",      "SRAVA_GATE_ORDER",      PIG_GATE_ORDER_DEFAULT, 0 },
 		{ "GATE_WHEN",       "SRAVA_GATE_WHEN",       "auto", 0 },
 		{ "GATE_TRACE",      "SRAVA_GATE_TRACE",      "0",    0 },
 		{ 0, 0, 0, 0 }
 	};
 	return T;
+}
+
+/* ★★ #3508: 入場順の名前 ↔ 値。**未知の名前は既定へ倒す**が、黙って倒すのはここだけで、
+ *   利用者が綴りを間違えた場合は SRAVA_GATE_TRACE / サマリの order 表示で気づける。 */
+int
+pig_gate_order_parse(const char *name)
+{
+	if ( name == 0 || name[0] == 0 )        return PIG_GATE_ORDER_DELTA;
+	if ( ::strcmp(name, "fifo")  == 0 )     return PIG_GATE_ORDER_FIFO;
+	if ( ::strcmp(name, "lifo")  == 0 )     return PIG_GATE_ORDER_LIFO;
+	if ( ::strcmp(name, "delta") == 0 )     return PIG_GATE_ORDER_DELTA;
+	return PIG_GATE_ORDER_DELTA;
+}
+
+const char *
+pig_gate_order_name(int order)
+{
+	switch ( order ) {
+	case PIG_GATE_ORDER_FIFO:  return "fifo";
+	case PIG_GATE_ORDER_LIFO:  return "lifo";
+	default:                   return "delta";
+	}
 }
 
 static const pigCfgEntry *
@@ -912,11 +1040,9 @@ ptsApplication_::refresh_gate_config()
 {
 	if ( gateSem == thNULL ) return;
 	sPtr<stdString> go = cfg_str("GATE_ORDER");
-	int lifo = ( go.is_notNull() && ::strcmp(go->get_str(), "lifo") == 0 );
-	if ( lifo != gateLifo ) {
-		gateLifo = lifo;
-		gateSem->enablePriority = gateLifo;
-	}
+	int order = pig_gate_order_parse(go.is_notNull() ? go->get_str() : PIG_GATE_ORDER_DEFAULT);
+	if ( order != gateOrder )
+		apply_gate_order(order);
 }
 
 void

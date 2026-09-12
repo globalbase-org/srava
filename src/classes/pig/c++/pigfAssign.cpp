@@ -1,10 +1,11 @@
 /*
  * pigfAssign — 代入(変数定義+束縛)の tinyState helper。
  * args[0] = 変数名(テキスト)。args[1] = 代入値。
- * 肝: 変数名 args[0] は is_error 判定で compact 解決するが、代入値 args[1] は
- *     compact しない(= 実際に参照されるまで遅延)。env->def_var に未 compact の
- *     ノードをそのまま束縛する。戻り値は args[0](変数名)── args[1] を返すと
- *     呼び元(pigfSequence 等)がエラー判定で compact してしまい遅延が縮退するため。
+ * 肝: 変数名 args[0] も代入値 args[1] も compact してから束縛する。**両方 is_error を
+ *     見る** (右辺のエラーは束縛せずその場で伝播・2026-09-04)。戻り値は args[0](変数名)
+ *     ── args[1] を返すと呼び元(pigfSequence 等)が再度エラー判定で compact してしまうため。
+ *     幾何は compact() で継続 pair(promise→pigDataCache) に解決されるので、右辺を見ても
+ *     遅延は縮退しない。
  */
 #include	"pig/c++/pigfFunction.h"
 #include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
@@ -107,24 +108,31 @@ TS_STATE(ACT_START)
 	}
 	sPtr<pigData> val = ( args.length() >= 2 ) ? args[1]
 	                                           : sPtr<pigData>(thNEW(pigDataNull,()));
-	// DEF(var あり)= def_var / SET(var なし)= set_var。_front のモードで分岐。
-	if ( sPtr<pigDataFunction_b>::d_cast(_front)->get_mode() == PIG_ASSIGN_DEF ) {
-		// DEF: 値を **定義地点(現 env)で compact** してから束縛 = レキシカルスコープ。
-		// 遅延束縛だと自由変数が「使用地点(force 地点)の env」で解決され、内側スコープの同名
-		// シャドウを誤って拾う(dynamic scope バグ)。定義時 compact で定義環境に固定する。
-		// 安全性: 値は実値に、mesh は継続 pair("delayed".promise→pigDataCache=変数なし)に、
-		// lambda は値(env は参照なので自己束縛も後から見える)に解決されるだけで型は変わらない
-		// (再帰・クロージャ・while/for は検証で不変)。
-		if ( args.length() >= 2 )
-			val = val->compact();
-		env->def_var(args[0]->get_str(), val);
-	} else {
-		// SET(再代入): 値を **先に compact**(= 旧束縛で評価。yield しうるが再走で前進)してから
-		// 束縛する。これで `a = a ||| box` のような自己参照が「新束縛を指す」循環(無限再帰)を防ぐ。
-		if ( args.length() >= 2 )
-			val = val->compact();
-		env->set_var(args[0]->get_str(), val);
+	// 値を **代入地点で compact** してから束縛する。DEF/SET で理由が違う:
+	//   DEF: 定義地点(現 env)で固定 = レキシカルスコープ。遅延束縛だと自由変数が
+	//        「使用地点(force 地点)の env」で解決され、内側スコープの同名シャドウを誤って
+	//        拾う(dynamic scope バグ)。
+	//   SET: 旧束縛で評価してから束縛。`a = a ||| box` のような自己参照が「新束縛を指す」
+	//        循環(無限再帰)になるのを防ぐ。
+	// 安全性: 値は実値に、mesh は継続 pair("delayed".promise→pigDataCache=変数なし)に、
+	// lambda は値(env は参照なので自己束縛も後から見える)に解決されるだけで型は変わらない
+	// (再帰・クロージャ・while/for は検証で不変)。
+	if ( args.length() >= 2 ) {
+		val = val->compact();
+		/* ★ 右辺がエラーならエラーを**束縛せず**その場で伝播する (2026-09-04 ひさ指示)。
+		 * 分割代入 (PIG_ASSIGN_DEF_LIST・上) と添字代入 (pigDataOperatorSetIndex) は
+		 * 以前から右辺を is_error 判定しており、**通常代入だけが見ていなかった**。
+		 * 「遅延を保つため見ない」という旧来の理由は、キャッシュの遅延を継続 pair
+		 * (car/cdr) で繋ぐ以前の残骸で、いまは compact() が幾何を promise に解決するので
+		 * 遅延は損なわれない。エラーを束縛すると、使用地点まで発覚が遅れて位置情報が
+		 * 代入式から離れてしまう。 */
+		if ( val->is_error() ) { asgErr = val; return rDO|FIN_START; }
 	}
+	// DEF(var あり)= def_var / SET(var なし)= set_var。_front のモードで分岐。
+	if ( sPtr<pigDataFunction_b>::d_cast(_front)->get_mode() == PIG_ASSIGN_DEF )
+		env->def_var(args[0]->get_str(), val);
+	else
+		env->set_var(args[0]->get_str(), val);
 	return rDO|FIN_START;
 }
 TS_STATE(FIN_START)                // pigfFunction の FIN gate を上書き

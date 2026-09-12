@@ -127,11 +127,11 @@ cgaRevolve_::compute()
 
 	mesh = thNEW(cgMesh3D,());
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("revolve: needs a 2D polygon"))));
+		result = cga_err(thNEW(stdString,("revolve: needs a 2D polygon")));
 		return;
 	}
 	if ( angle <= 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("revolve: angle must be > 0"))));
+		result = cga_err(thNEW(stdString,("revolve: angle must be > 0")));
 		return;
 	}
 	if ( angle > 360.0 ) angle = 360.0;
@@ -174,7 +174,7 @@ cgaRevolve_::compute()
 			ringRange.push_back(std::make_pair(start, cnt));
 		}
 		if ( badRadius ) {
-			result = thNEW(pigDataError,(thNEW(stdString,("revolve: profile x (radius) must be >= 0"))));
+			result = cga_err(thNEW(stdString,("revolve: profile x (radius) must be >= 0")));
 			return;
 		}
 		int ng = (int)gp.size();

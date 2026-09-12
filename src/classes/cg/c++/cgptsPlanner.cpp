@@ -165,9 +165,17 @@ protected:
 	 *   (モジュール側の lint と同じ方針・ひさ指示 2026-08-26)。 */
 	sArray<sPtr<stdString> >	shownErrors;
 	void			show_error_m(sPtr<stdString> m);   /* 表示 + 記録 */
-	unsigned		sig_abort_flag : 1;   /* INT/TERM/HUP のいずれかを受けた */
+	/* ★ #3417 (2026-09-06): 旧 sig_abort_flag / sig_abort_num を **廃止**した。
+	 *   「撤収すべきか」を agentError と 2 重に持っていたのが混乱の元で、
+	 *   実際 WAITAGENTS の `sig_abort_flag && get_agentError()==NULL` は
+	 *   「2 つの真理値がズレている瞬間」を扱うためだけの分岐になっていた
+	 *   (そのせいで 2 回目以降の Ctrl+C が無視されていた)。
+	 *   ⇒ 撤収の唯一の指標は **get_agentError() != thNULL**。
+	 *      シグナル番号は filter() がその場で exitCodeOut へ畳むので保持不要。
+	 *   下の 2 つは「同じ手を二度打たない」ための記憶で、撤収の判定には使わない。 */
 	unsigned		eval_error : 1;       /* 評価結果がエラー値だった(キャッシュ掃除を抑止) */
-	int			sig_abort_num;        /* 最初に受けたシグナル番号(exit code/メッセージ用) */
+	unsigned		treeDestroyed : 1;    /* EVAL で tree->destroy() を撃った */
+	unsigned		agentsDestroyed : 1;  /* WAITAGENTS で全 agent へ destroy を撃った */
 	const char *		srcText;      /* 実行するソース(ctor 引数。NULL=env/既定にフォールバック) */
 	sPtr<stdString>		srcName;      /* エラー表示用ファイル名(parser へ渡す) */
 	int *			exitCodeOut;  /* 終了コードの書き込み先(ctor 引数。NULL なら下の local を指す) */
@@ -202,9 +210,9 @@ cgptsPlanner_::cgptsPlanner_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    sig_abort_flag = 0;
+    treeDestroyed   = 0;
+    agentsDestroyed = 0;
     eval_error     = 0;
-    sig_abort_num  = 0;
     asyncErrors    = 0;
     syncTail       = thNEW(pigDataNull,());   /* 初回 async の prev=解決済み null(即発火可) */
     srcText       = _src;
@@ -231,9 +239,25 @@ cgptsPlanner_::filter(sPtr<stdEvent> ev)
 		return ev;
 	if ( ev->type == TSE_SIGNAL &&
 	     ( ev->msg_int == SIGINT || ev->msg_int == SIGTERM || ev->msg_int == SIGHUP ) ) {
-		if ( ! sig_abort_flag )
-			sig_abort_num = ev->msg_int;   /* 先勝ち */
-		sig_abort_flag = 1;
+		/* ★ #3417 (2026-09-06): フラグではなく **撤収エラーそのもの**をここで作る。
+		 *   ・撤収の指標を agentError 1 本に寄せる (旧 sig_abort_flag / sig_abort_num は廃止)
+		 *   ・set_agentError が **全 agent の wake-all** を連れてくるので、イベント待ちで
+		 *     詰まった agent にも届く (フラグ代入だけにすると届かない)
+		 *   ・PE_FATAL = 「待つ意味がない」。既存の「fatal は in-flight agent を即撤収」に乗る
+		 *   ・終了コード 128+signum はここで畳む (signum を後まで持ち回らずに済む)
+		 *   ⚠ tsSignal は self-pipe → TSE_SIGNAL なので、ここは **シグナルハンドラ文脈ではない**。
+		 *     thNEW してよい。
+		 *   ⚠ 先勝ち: 2 回目以降のシグナルでは何も起きない (連打で段階を上げる設計は採らない。
+		 *     is_destroyed() は冪等で 2 度目の destroy が伝わらないうえ、キーボードの
+		 *     チャッタリングで graceful のつもりが kill になる — ひさ判断 2026-09-06)。 */
+		if ( get_agentError() == thNULL ) {
+			const int sn = (int)ev->msg_int;
+			const char *nm = ( sn == SIGTERM ) ? "SIGTERM" : ( sn == SIGHUP ) ? "SIGHUP" : "SIGINT";
+			char msg[64];
+			::snprintf(msg, sizeof msg, "interrupted by %s", nm);
+			(*exitCodeOut) = 128 + sn;
+			set_agentError(thNEW(pigDataError,(msg, thNULL, PE_FATAL)));
+		}
 	}
 	return TS_BASECLASS::filter(ev);
 }
@@ -465,7 +489,7 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 
 	/* 終了系シグナル(SIGINT=Ctrl+C / SIGTERM=素の kill / SIGHUP=端末切断)を TSE_SIGNAL イベント化
 	 * (self-pipe)。filter() がフラグを立て、各状態が見て撤収する。tsSignal がハンドラを差し替えるので、
-	 * これより前に raise すると既定動作で即死する点に注意。3 つとも同じ撤収経路(INTERRUPT)に合流する。 */
+	 * これより前に raise すると既定動作で即死する点に注意。3 つとも filter() で同じ撤収経路へ合流する。 */
 	sig_int  = thNEW(tsSignal,(ifThis, SIGINT));
 	sig_term = thNEW(tsSignal,(ifThis, SIGTERM));
 	sig_hup  = thNEW(tsSignal,(ifThis, SIGHUP));
@@ -560,8 +584,19 @@ TS_STATE(ACT_cgptsPlanner_VALUE)
  * 放置する(関数型: 欲しいものが得られればよい)。 */
 TS_STATE(ACT_cgptsPlanner_EVAL)
 {
-	if ( sig_abort_flag )                     /* 終了系シグナル: 評価を打ち切り、自ら set_agentError して撤収 */
-		return rDO|ACT_cgptsPlanner_INTERRUPT;
+	/* ★ #3417 (2026-09-06): 撤収が始まっていたら **評価ツリーへ destroy を撃つ**。
+	 *   ⚠ 打ってから `tree->is_error()` の解決を待つ (この順序が本質)。is_error() の答えが
+	 *     出た後に destroy しても pigDataError は pigDataError のままで何も起きない。
+	 *   ★ なぜ要るか: 正常終了 (exit(msg)) の経路には既に tree->destroy() が在り、そのコメントが
+	 *     「**agent 以外の helper (pigfSystem 等) はこの経路でしか止まらない**」と書いている。
+	 *     撤収経路に無いのは非対称で、Ctrl+C では system() の子プロセスが止まらなかった。
+	 *   ★ 撤収の契機はシグナルに限らない。agent が 1 つ落ちても set_agentError が立つので、
+	 *     「1 つ落ちたら全部畳んで planner も終わる」という既存の流れとここで合流する。
+	 *   ⚠ 一度だけ打つ (destroy は冪等だが、EVAL は yield で何度も再入する)。 */
+	if ( get_agentError() != thNULL && ! treeDestroyed ) {
+		treeDestroyed = 1;
+		if ( tree != thNULL ) tree->destroy();
+	}
 	if ( tree->is_error() ) {
 		sPtr<pigData> tv = tree->compact();
 		if ( tv->control_kind() == CTRL_EXIT ) {   /* exit(msg): 正常終了。メッセージがあれば表示し exit 0。
@@ -583,7 +618,12 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 			return rDO|ACT_cgptsPlanner_WAITAGENTS;
 		}
 		show_error_m(tree->get_str());
-		(*exitCodeOut) = 1;
+		/* ★ #3417 (2026-09-06): **既に立っている終了コードを上書きしない**。
+		 *   シグナル撤収では filter() が 128+signum を置いてから tree->destroy() で
+		 *   評価がエラーに落ちるので、無条件に 1 を書くと 130 が 1 に化ける (実測で踏んだ)。
+		 *   CLEANUP の `if ( (*exitCodeOut) == 0 ) (*exitCodeOut) = 1;` と同じ流儀に揃える。 */
+		if ( (*exitCodeOut) == 0 )
+			(*exitCodeOut) = 1;
 		eval_error = 1;   /* キャッシュ掃除を抑止(評価が途中で失敗 → usedCaches 不完全の恐れ) */
 		/* 確定的な型/プログラムエラー(fatal: mesh+mesh・未定義変数・引数不一致等)は待つ意味がないので、
 		 * SIGINT と同様に set_agentError で **in-flight agent を即撤収**して終了する。幾何の失敗等
@@ -608,27 +648,57 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 TS_STATE(ACT_cgptsPlanner_WAITAGENTS)
 {
 	if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] planner WAITAGENTS count=%d\n", agent_count());
-	/* 待機中に終了系シグナル → まだ未集約なら set_agentError して in-flight agent を撤収させる。 */
-	if ( sig_abort_flag && get_agentError() == thNULL )
-		return rDO|ACT_cgptsPlanner_INTERRUPT;
+	/* ★ #3417 (2026-09-06): 撤収中なら **生存中の全 agent へ destroy を撃つ**。
+	 *   旧実装は `sig_abort_flag && get_agentError()==NULL` を見て INTERRUPT へ戻るだけで、
+	 *   agent には何も送っていなかった (set_agentError の wake-all 頼み)。しかも
+	 *   agentError が既に立っていれば何も起きないので、**2 回目以降の Ctrl+C が無効**だった。
+	 *   ⇒ 指標が 1 本になったので、条件は「撤収中か」だけ。一度だけ撃つ。 */
+	if ( get_agentError() != thNULL && ! agentsDestroyed ) {
+		agentsDestroyed = 1;
+		destroy_agents();
+	}
+	/* ★★ #3503 (ひさ設計 2026-09-07): **in-proc 居座りの panic はここで撃つ**。
+	 *
+	 * in-proc の実行体が destroy に応じないと、その agent は永久に畳まれず agent_count() は
+	 * 0 にならない = ここで止まる。ptsMediatorInternal が猶予切れで要求を上げてくるので、
+	 * **生きている MediatorExternal が 0 になったことを確認してから** abort する。
+	 *
+	 * ⚠ mediator に撃たせてはいけない — in-proc と process は同居するので、そのとき生きている
+	 *   agent プロセスが全部迷子になる (子は setpgid で別プロセスグループに居るので端末の
+	 *   シグナルも届かず、#3417 が潰した居残りに戻る)。撃つ前に子が居ないことを確かめられるのは
+	 *   全体を見ている planner だけ。
+	 * ★ abort にするのは core が残るため — 固まったスレッドのスタックが見えないと直しようがない。
+	 * ⚠ 既定では要求そのものが上がらない (SRAVA_INPROC_PANIC_MS 未設定 = panic 無効)。 */
+	{
+		sPtr<pigData> ae = get_agentError();
+		if ( ae != thNULL && ae->is_panic() ) {
+			const int nx = ( ptsApp != thNULL ) ? ptsApp->ext_agent_count() : 0;
+			if ( nx == 0 ) {
+				sPtr<stdString> m = ae->get_str();
+				::fprintf(stderr,
+				    "\n*** srava: %s. No agent processes remain (nothing will be orphaned), "
+				    "so the planner is aborting. "
+				    "(SRAVA_INPROC_PANIC_MS sets the wait; exec_default:\"process\" avoids this) ***\n",
+				    ( m.is_notNull() ) ? m->get_str() : "in-proc module did not fold");
+				::fflush(stderr);
+				::abort();
+			}
+			if ( osglue_env_int("PIG_DBG_TD", 0) )
+				::fprintf(stderr, "[td] planner: PE_PANIC pending; %d agent process(es) left\n", nx);
+			return 0;   /* 子が畳まれるのを待つ (ext_agent_del が最後の 1 つで wakeup) */
+		}
+	}
 	if ( agent_count() == 0 )
 		return rDO|ACT_cgptsPlanner_CLEANUP;
 	return 0;   /* wakeup 待ち(最後の agent の agent_leave、または set_agentError) */
 }
 
-/* 終了系シグナル受信: 自ら set_agentError(全 agent の撤収トリガ)。以後は WAITAGENTS で countAgent==0 を
- * 待ってから(in-flight agent が A_SAVE_BEGIN 後 ABORT して FIN するのを待つ)cleanup する。
- * exit code = 128 + signum(INT=130 / TERM=143 / HUP=129)。 */
-TS_STATE(ACT_cgptsPlanner_INTERRUPT)
-{
-	int sn = ( sig_abort_num != 0 ) ? sig_abort_num : SIGINT;
-	const char *nm = ( sn == SIGTERM ) ? "SIGTERM" : ( sn == SIGHUP ) ? "SIGHUP" : "SIGINT";
-	char msg[64];
-	::snprintf(msg, sizeof msg, "interrupted by %s", nm);
-	set_agentError(thNEW(pigDataError,(msg)));
-	(*exitCodeOut) = 128 + sn;
-	return rDO|ACT_cgptsPlanner_WAITAGENTS;
-}
+/* ★ #3417 (2026-09-06): ACT_cgptsPlanner_INTERRUPT は **廃止**した。
+ *   やっていたのは set_agentError と exitCodeOut への代入の 2 行だけで、状態を 1 つ使う
+ *   価値が無く、しかも「フラグは立っているがエラーは未集約」という中間状態を作るために
+ *   WAITAGENTS に専用の分岐が要っていた (それが 2 回目以降の Ctrl+C を無効にしていた)。
+ *   ⇒ どちらの仕事も filter() がシグナルを受けたその場で済ませる。
+ *      exit code = 128 + signum (INT=130 / TERM=143 / HUP=129) も filter() が畳む。 */
 
 /* SRAVA_CACHE_RETAIN を (mode, cutoff) に解釈する。終了時クリーンアップの方針を決める。
  *   返り = retain_mode: 0=即削除(未使用の完了キャッシュを全削除・既定) / 1=期日保持(cutoff より古い完了のみ削除) /
@@ -696,7 +766,7 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 	int had_error = ( ae != thNULL ) || eval_error || ( async_err > 0 );
 
 	/* ★ 予約変数 EXIT_CODE の反映 (2026-08-11)。プログラムが `EXIT_CODE = n;` で明示した値を
-	 * 終了コードにする。エラー終了時は下の分岐が 1 / INTERRUPT の 128+signum を立てるので、
+	 * 終了コードにする。エラー終了時は下の分岐が 1 / filter() が 128+signum を立てるので、
 	 * **エラーコードが優先** (成功時の明示指定という位置づけ)。
 	 * 範囲外は **警告して 0-255 にクランプ** する。無言で切り詰めるのは、まさにこの修正で潰した
 	 * 「結果値が黙って exit に漏れる」不具合と同じ轍なので避ける。 */

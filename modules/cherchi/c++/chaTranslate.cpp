@@ -66,14 +66,14 @@ chaTranslate_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<chMesh> in = ( na > 0 ) ? sPtr<chMesh>::d_cast((*args)[0]) : sPtr<chMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("translate: needs a cherchi mesh"))));
+		result = cha_err(thNEW(stdString,("translate: needs a cherchi mesh")));
 		return;
 	}
 	/* ★配列は d_cast でなく obt_array (map/lambda 由来の遅延ノードも解決される)。 */
 	sPtr<pigDataArray> v = ( na > 1 && (*args)[1].is_notNull() ) ? (*args)[1]->obt_array()
 	                                                            : sPtr<pigDataArray>();
 	if ( ! v.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("translate: needs [x,y,z]"))));
+		result = cha_err(thNEW(stdString,("translate: needs [x,y,z]")));
 		return;
 	}
 	double t[3] = { 0.0, 0.0, 0.0 };

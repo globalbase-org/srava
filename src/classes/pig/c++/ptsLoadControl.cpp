@@ -124,6 +124,7 @@ private:
 	INTEGER64		lastCpuUs;     /* 前回 CPU サンプルの時刻 (単調・<0 = 未サンプル) */
 	INTEGER64		windowUs;
 	unsigned		fixedAgent;
+	unsigned		followSlack;   /* ★ 実効 <= 実並列度 + これ (SRAVA_LOAD_FOLLOW_SLACK・既定 2) */
 	int			cpuPct;
 	int			memPct;
 	int			logOn;
@@ -213,6 +214,7 @@ ptsLoadControl_::ptsLoadControl_(TS_ARGS0)
 	cpuPct      = env_int("SRAVA_LOAD_CPU",   90);
 	cpuOff      = ( cpuPct <= 0 );
 	fixedAgent  = (unsigned)env_int("SRAVA_LOAD_AGENT", 0);
+	followSlack = (unsigned)env_int("SRAVA_LOAD_FOLLOW_SLACK", 2);
 	logOn       = env_int("SRAVA_LOAD_LOG",    0);
 	/* ⚠ 黙って無視しない: SRAVA_LOAD_AGENT は SRAVA_LOAD_CPU=0 のときだけ読まれる。 */
 	if ( fixedAgent > 0 && ! cpuOff )
@@ -410,7 +412,14 @@ ptsLoadControl_::follow_down()
 	unsigned target = l_agent();
 	if ( rampOff ) { apply(target, "追従(ランプ無効)"); return; }
 	if ( target < effLimit ) { apply(target, "下げ追従"); return; }
-	unsigned cap = cAgent + 2;                  /* ★ 並列度に張り付かせる */
+	/* ★ 2026-09-10: この +2 を `SRAVA_LOAD_FOLLOW_SLACK` で振れるようにした (既定 2 = 従来と同一)。
+	 *   ⚠ 大きくすると *この機構を実質無効化* する。上げは OOM が回復不能なので慎重に
+	 *     (下げは遅くなるだけで回復可能、という上の非対称の設計判断に従う)。
+	 *   ★ 測定で分かったこと: 起動直後は実並列度が小さいので **この項が常に最小**になり、
+	 *     LOAD_RAMP_START も LOAD_MEM_MB も直接には効かない (実効は 実並列度+2 に張り付く)。
+	 *     予算が効くのは「入場が遅れる → 実並列度が上がらない → 天井も上がらない」という
+	 *     間接の経路。振れる口を用意したのはこれを測るため。 */
+	unsigned cap = cAgent + followSlack;        /* ★ 並列度に張り付かせる */
 	if ( effLimit > cap ) apply(cap, "並列度に追従");
 }
 
@@ -621,6 +630,7 @@ ptsLoadControl_::refresh_config()
 	cpuOff     = ( pct <= 0 );
 	cpuPct     = pct;
 	fixedAgent = (unsigned)cfg_of(ptsApp, "LOAD_AGENT", "SRAVA_LOAD_AGENT", 0);
+	followSlack = (unsigned)cfg_of(ptsApp, "LOAD_FOLLOW_SLACK", "SRAVA_LOAD_FOLLOW_SLACK", 2);
 	logOn      = cfg_of(ptsApp, "LOAD_LOG", "SRAVA_LOAD_LOG", 0);
 	rampUs     = (INTEGER64)cfg_of(ptsApp, "LOAD_RAMP_MS", "SRAVA_LOAD_RAMP_MS", 250) * 1000;
 	rampOff    = ( cfg_of(ptsApp, "LOAD_RAMP", "SRAVA_LOAD_RAMP", 1) == 0 );

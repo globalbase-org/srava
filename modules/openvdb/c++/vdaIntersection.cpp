@@ -9,6 +9,7 @@
 #include	"vd/c++/vdGrid.h"
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"ts2/c++/stdString.h"
+#include	<string>
 #include	"_ts2/c++/vdaIntersection_.h"
 
 #include	<stdio.h>
@@ -69,7 +70,11 @@ vdaIntersection_::compute()
 {
 	/* ★ #3441: op 内並列 (TBB) は **op あたり**の予算で走らせる。予算未指定なら素通し。
 	 *   ⚠ 包み忘れるとその op だけ無制限になるので、compute() 単位で一律に包む。 */
-	vd_in_arena([&]{
+	std::string vdwhy;
+	/* ★ #3474 続き: 例外境界。openvdb が投げると受け手が無く、ワーカースレッド
+	 *   由来なら agent ごと死ぬ (vdArena.h の vd_arena_guard 参照)。 */
+	if ( ! vd_arena_guard("intersection", [&]{
+
 	vdGrid::ensure_init();
 	/* ★ #3436 P4: n 項で受ける (agent の中で逐次に畳む = 中間 .vdb の往復が消える)。 */
 	const char *msg = 0;
@@ -78,9 +83,10 @@ vdaIntersection_::compute()
 	if ( ! out.is_notNull() ) {
 		char b[256];
 		::snprintf(b, sizeof b, "intersection: %s", msg ? msg : "openvdb CSG failed");
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = vda_err(thNEW(stdString,(b)));
 	}
-	});
+	}, vdwhy) )
+		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }
 
 sPtr<pigData>

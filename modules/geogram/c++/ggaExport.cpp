@@ -87,7 +87,7 @@ ggaExport_::compute()
 	sPtr<ggMesh> mIn = ( na > 1 ) ? sPtr<ggMesh>::d_cast((*args)[1]) : sPtr<ggMesh>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("export: no mesh to write"))));
+		result = gga_err(thNEW(stdString,("export: no mesh to write")));
 		return;
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
@@ -95,7 +95,7 @@ ggaExport_::compute()
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
 		char b[256];
 		::snprintf(b, sizeof b, "export: cannot write %s (geogram supports off/stl/obj/ply)", p);
-		result = thNEW(pigDataError,(thNEW(stdString,(b))));
+		result = gga_err(thNEW(stdString,(b)));
 		return;
 	}
 	pHashKeyType refHash = gg_hash_file(p);

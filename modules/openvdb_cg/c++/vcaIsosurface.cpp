@@ -10,11 +10,17 @@
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"cg/c++/cgMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	<string>
 #include	"_ts2/c++/vcaIsosurface_.h"
 
 
 #include	<openvdb/tools/VolumeToMesh.h>
 #include	<vector>
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] openvdb_cg/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(vca_err, "openvdb_cg")
+
 
 CLASS_TINYSTATE(vc/c++/vcaIsosurface,pig/c++/ptsCalcBody)
 
@@ -72,12 +78,16 @@ vcaIsosurface_::compute()
 {
 	/* ★ #3441: op 内並列 (TBB) は **op あたり**の予算で走らせる。予算未指定なら素通し。
 	 *   ⚠ 包み忘れるとその op だけ無制限になるので、compute() 単位で一律に包む。 */
-	vd_in_arena([&]{
+	std::string vdwhy;
+	/* ★ #3474 続き: 例外境界。openvdb が投げると受け手が無く、ワーカースレッド
+	 *   由来なら agent ごと死ぬ (vdArena.h の vd_arena_guard 参照)。 */
+	if ( ! vd_arena_guard("isosurface", [&]{
+
 	vdGrid::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
 	if ( ! in.is_notNull() || ! in->grid() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("isosurface: needs an openvdb grid"))));
+		result = vca_err(thNEW(stdString,("isosurface: needs an openvdb grid")));
 		return;
 	}
 	double iso = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
@@ -89,8 +99,8 @@ vcaIsosurface_::compute()
 	std::vector<openvdb::Vec4I> quads;
 	openvdb::tools::volumeToMesh(*in->grid(), points, quads, iso);
 	if ( points.empty() || quads.empty() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("isosurface: empty surface (isovalue outside the narrow band?)"))));
+		result = vca_err(thNEW(stdString,
+		    ("isosurface: empty surface (isovalue outside the narrow band?)")));
 		return;
 	}
 
@@ -122,7 +132,8 @@ vcaIsosurface_::compute()
 		vi.push_back(m.add_vertex(Mesh::Point(v[i], v[i+1], v[i+2])));
 	for ( size_t i = 0 ; i + 2 < t.size() ; i += 3 )
 		m.add_face(vi[t[i]], vi[t[i+1]], vi[t[i+2]]);
-	});
+	}, vdwhy) )
+		result = vca_err(thNEW(stdString,(vdwhy.c_str())));
 }
 
 sPtr<pigData>

@@ -8,6 +8,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"cg/c++/cgMesh.h"
+#include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/cgaScale_.h"
@@ -67,39 +68,20 @@ void
 cgaScale_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<cgMesh>  in  = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
+	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	sPtr<pigData> arg = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();
 
-	/* X は配列 [sx,sy,sz](軸別)または スカラ(均等)。 */
-	double sx, sy, sz;
-	sPtr<pigDataArray> av = arg.is_notNull() ? arg->obt_array()
-	                                         : sPtr<pigDataArray>();
-	if ( av.is_notNull() ) {
-		if ( av->length() < 3 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,(
-			    "scale: vector needs 3 components [sx,sy,sz]"))));
-			mesh = thNEW(cgMesh3D,());
-			return;
-		}
-		sx = av->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();
-		sy = av->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
-		sz = av->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt();
-	} else {
-		sx = sy = sz = arg.is_notNull() ? arg->get_flt() : 1.0;   /* 均等スケール */
-	}
-
-	if ( sx == 0.0 || sy == 0.0 || sz == 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "scale: degenerate (zero) scale factor"))));
+	/* ★ 引数の解釈と行列の組み立ては **common/affine.h** (カーネル非依存・7 モジュール共通)。
+	 *   受け付ける書き方だけでなく **拒否の理由** もそこに集約してある (#3486)。
+	 *   理由の受け皿 buf は呼び手が持つ (モジュール側に static を置かない)。 */
+	double e[12];
+	const char *why = 0;
+	char buf[256];
+	if ( ! srava_affine::matrix_scale(arg, e, &why, buf, (int)sizeof buf) ) {
+		result = cga_err(thNEW(stdString,(why)));
 		mesh = thNEW(cgMesh3D,());
 		return;
 	}
-
-	double e[12] = {
-	    sx,  0.0, 0.0, 0.0,
-	    0.0, sy,  0.0, 0.0,
-	    0.0, 0.0, sz,  0.0
-	};
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<cgMesh>();
 }
 

@@ -8,6 +8,11 @@
 #include	"d4/c++/d4Mesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d4aNfaces_.h"
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] d4/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(d4a_err, "d4")
+
 
 CLASS_TINYSTATE(d4/c++/d4aNfaces,pig/c++/ptsCalcBody)
 
@@ -61,7 +66,7 @@ d4aNfaces_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<d4Mesh> in = ( na > 0 ) ? sPtr<d4Mesh>::d_cast((*args)[0]) : sPtr<d4Mesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nfaces: needs a d4 mesh"))));
+		result = d4a_err(thNEW(stdString,("nfaces: needs a d4 mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->nf()));

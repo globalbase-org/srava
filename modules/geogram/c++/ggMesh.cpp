@@ -2,6 +2,8 @@
  * ggMesh — geogram 幾何の実装 (#3435 P3)。設計の背景はヘッダ冒頭を参照。
  */
 #include	"gg/c++/ggMesh.h"
+#include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
+#include	"common/meshprops.h"   /* bbox / centroid / area / valid (#3487) */
 #include	"ts2/c++/stdString.h"
 
 #include	<geogram/basic/common.h>
@@ -130,6 +132,69 @@ ggMesh::add_triangle(int a, int b, int c)
 	m_.facets.create_triangle((GEO::index_t)a, (GEO::index_t)b, (GEO::index_t)c);
 }
 
+/* ---- 素性を訊く op (#3487) — 中身は common/meshprops.h ------------------------
+ * ★ GEO::Mesh は頂点を連続した double 配列で持つが、面は corner の配列なので
+ *   三角形の頂点番号だけ写して TriView を作る (三角形以外の面は諦めて飛ばす —
+ *   このモジュールが作る mesh は常に三角形)。 */
+namespace {
+struct GgSoup {
+	std::vector<double>   c;
+	std::vector<uint32_t> t;
+	GgSoup(const GEO::Mesh& m) {
+		c.resize((size_t)m.vertices.nb() * 3);
+		for ( GEO::index_t i = 0 ; i < m.vertices.nb() ; ++i ) {
+			const GEO::vec3& p = m.vertices.point(i);
+			c[3*(size_t)i] = p.x; c[3*(size_t)i+1] = p.y; c[3*(size_t)i+2] = p.z;
+		}
+		t.reserve((size_t)m.facets.nb() * 3);
+		for ( GEO::index_t f = 0 ; f < m.facets.nb() ; ++f ) {
+			if ( m.facets.nb_vertices(f) != 3 ) continue;
+			for ( GEO::index_t k = 0 ; k < 3 ; ++k )
+				t.push_back((uint32_t)m.facets.vertex(f, k));
+		}
+	}
+	srava_mesh::TriView view() const {
+		return srava_mesh::TriView(c.empty() ? 0 : &c[0], (int)(c.size()/3),
+		                           t.empty() ? 0 : &t[0], (int)(t.size()/3));
+	}
+};
+}
+
+int
+ggMesh::op_bbox(double mn[3], double mx[3]) const
+{
+	GgSoup s(m_);
+	srava_mesh::TriView v = s.view();
+	srava_mesh::bbox(v, mn, mx);
+	return 3;
+}
+
+int
+ggMesh::op_centroid(double c[3]) const
+{
+	GgSoup s(m_);
+	srava_mesh::TriView v = s.view();
+	srava_mesh::centroid(v, c);
+	return 3;
+}
+
+double
+ggMesh::op_area() const
+{
+	GgSoup s(m_);
+	srava_mesh::TriView v = s.view();
+	return srava_mesh::area(v);
+}
+
+int
+ggMesh::op_valid() const
+{
+	GgSoup s(m_);
+	srava_mesh::TriView v = s.view();
+	return srava_mesh::valid(v);
+}
+
+
 double
 ggMesh::volume() const
 {
@@ -203,6 +268,38 @@ gg_bool(const GEO::Mesh &A, sPtr<ggMesh> b, const char *expr, char *err, int err
 sPtr<ggMesh> ggMesh::op_union(sPtr<ggMesh> b, char *e, int n)        { return gg_bool(m_, b, "A+B", e, n); }
 sPtr<ggMesh> ggMesh::op_intersection(sPtr<ggMesh> b, char *e, int n) { return gg_bool(m_, b, "A*B", e, n); }
 sPtr<ggMesh> ggMesh::op_difference(sPtr<ggMesh> b, char *e, int n)   { return gg_bool(m_, b, "A-B", e, n); }
+
+/* ---- アフィン変換 (行優先 double[12] = 3x4) — #3486 ----------------------------
+ * 座標は double なので全頂点に掛けるだけ。
+ * ⚠ 反射 (det<0) では面の向きが裏返るので **三角形の頂点順を入れ替える**。geogram の
+ *   arrangement は面の向きで内外を決めるため、直さないと体積が負の裏返った立体になり、
+ *   後段のブールが黙って誤る (cgMesh3D::apply_affine が reverse_face_orientations を
+ *   当てているのと同じ補正を、素の配列に対して自分でやる)。 */
+sPtr<ggMesh>
+ggMesh::apply_affine(const double e[12])
+{
+	sPtr<ggMesh> out = thNEW(ggMesh,());
+	out->m_.copy(m_);
+	for ( GEO::index_t i = 0 ; i < out->m_.vertices.nb() ; ++i ) {
+		GEO::vec3 &p = out->m_.vertices.point(i);
+		double o[3];
+		srava_affine::xform_point(e, p.x, p.y, p.z, o);
+		p = GEO::vec3(o[0], o[1], o[2]);
+	}
+	if ( srava_affine::det3(e) < 0.0 ) {
+		for ( GEO::index_t f = 0 ; f < out->m_.facets.nb() ; ++f ) {
+			GEO::index_t nv = out->m_.facets.nb_vertices(f);
+			/* 巡回順を逆にする (0 は残して 1..nv-1 を反転)。三角形なら 1 と 2 の入れ替え。 */
+			for ( GEO::index_t k = 1 ; k < 1 + (nv - 1) / 2 ; ++k ) {
+				GEO::index_t j = nv - k;
+				GEO::index_t t = out->m_.facets.vertex(f, k);
+				out->m_.facets.set_vertex(f, k, out->m_.facets.vertex(f, j));
+				out->m_.facets.set_vertex(f, j, t);
+			}
+		}
+	}
+	return out;
+}
 
 /* ---- n 項ブール (#3436 P4) --------------------------------------------------
  * geogram の n 項ブールは「全オペランドを 1 つの Mesh に集め、facet 属性 "operand_bit" に

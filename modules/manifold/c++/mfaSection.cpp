@@ -80,7 +80,7 @@ mfaSection_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<mfMesh> in = ( na > 0 ) ? sPtr<mfMesh>::d_cast((*args)[0]) : sPtr<mfMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("section: needs a 3D mesh"))));
+		result = mfa_err(thNEW(stdString,("section: needs a 3D mesh")));
 		return;
 	}
 	double P[3], N[3];
@@ -90,8 +90,8 @@ mfaSection_::compute()
 	double nlen = ::sqrt(N[0]*N[0] + N[1]*N[1] + N[2]*N[2]);
 	int zaxis = ( nlen > 0.0 && ::fabs(N[0]/nlen) < 1e-9 && ::fabs(N[1]/nlen) < 1e-9 );
 	if ( ! zaxis ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "section: Manifold kernel supports only Z-normal planes ([0,0,1]); use exact kernel for arbitrary planes"))));
+		result = mfa_err(thNEW(stdString,(
+		    "section: Manifold kernel supports only Z-normal planes ([0,0,1]); use exact kernel for arbitrary planes")));
 		return;
 	}
 	/* ★ 3 要素配列仕様(ひさ設計 2026-08-15)の mf 版。mode: 0=平面ちょうど / -1=直下 / +1=直上。

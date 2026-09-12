@@ -68,7 +68,7 @@ ocaVolume_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("volume: needs an OCCT shape"))));
+		result = oca_err(thNEW(stdString,("volume: needs an OCCT shape")));
 		return;
 	}
 	result = thNEW(pigDataFloat,(in->volume()));

@@ -10,6 +10,7 @@
 #include	"nf/c++/nfMesh.h"
 #include	"_ts2/c++/ptsnfWireCacheStreamReaderMesh_.h"
 
+#include	<stdio.h>   /* #3479: snprintf (理由文の組み立て) */
 #include	<string.h>   /* memcmp */
 
 CLASS_TINYSTATE(nf/c++/ptsnfWireCacheStreamReaderMesh,pig/c++/ptsWireCacheStreamReader)
@@ -67,6 +68,8 @@ ptsnfWireCacheStreamReaderMesh_::ptsnfWireCacheStreamReaderMesh_(TS_ARGS0)
 void
 ptsnfWireCacheStreamReaderMesh_::pull(uint8_t *dst, int n)
 {
+	/* ★ #3506: 負の n は呼び手の誤り。黙って 0 バイト返すと空の値として通ってしまう。 */
+	if ( n < 0 ) { pullErr = 1; return; }
 	int got = 0;
 	while ( got < n ) {
 		while ( chunkPos >= rec_payload.length() ) {
@@ -110,8 +113,14 @@ ptsnfWireCacheStreamReaderMesh_::more()
 TS_STATE(INI_ptsWireCacheStreamReader_METADATA)   /* D_META タグが nf の受理形式か検証 */
 {
 	const uint8_t *m = ( meta.length() > 0 ) ? &meta[0] : (const uint8_t*)0;
-	if ( nfGeom::create_for_meta(m, meta.length()) == thNULL )
-		errCode = -2;      /* nf の対応形式ではない(未知タグ) */
+	if ( nfGeom::create_for_meta(m, meta.length()) == thNULL ) {
+		/* ★ #3479: どの形式を誰が読めなかったのかを言う。従来は errCode だけで、
+		 *   利用者には「materialize できない」としか届かなかった。 */
+		char b[128];
+		::snprintf(b, sizeof b, "module '%s' has no reader for format '%.4s'",
+		           NF_MODULE_NAME, ( meta.length() >= 4 ) ? (const char*)m : "????");
+		set_err(-2, b);
+	}      /* nf の対応形式ではない(未知タグ) */
 	return rDO|INI_ptsWireCacheStreamReader_METADATA_FINISH;
 }
 TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを nfGeom へ decode */
@@ -120,7 +129,13 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	pullErr  = 0;
 	const uint8_t *mp = ( meta.length() > 0 ) ? &meta[0] : (const uint8_t*)0;
 	sPtr<nfGeom> geom = nfGeom::create_for_meta(mp, meta.length());
-	if ( geom == thNULL ) { errCode = -2; return rDO|FIN_START; }
+	if ( geom == thNULL ) {                     /* META gate と同じ理由 (再掲) */
+		char b[128];
+		::snprintf(b, sizeof b, "module '%s' has no reader for format '%.4s'",
+		           NF_MODULE_NAME, ( meta.length() >= 4 ) ? (const char*)mp : "????");
+		set_err(-2, b);
+		return rDO|FIN_START;
+	}
 	struct Src : nfChunkSource {
 		ptsnfWireCacheStreamReaderMesh_ *r;
 		void pull(uint8_t *dst, int n) { r->pull(dst, n); }
@@ -128,14 +143,21 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	} src;
 	src.r = this;
 	geom->decode(src);
-	if ( pullErr ) { errCode = -1; return rDO|FIN_START; }
+	if ( pullErr ) { set_err(-1, "the cache stream ended or could not be read while decoding"); return rDO|FIN_START; }
 	/* ★ 境界メッシュから Nef を作れなかった (自己交差など Nef の前提を満たさない入力)。
 	 *   黙って空集合を返すと volume が 0 になるので、ここでエラーにする。
 	 *   ★これを入れる前は CGAL の assertion で **agent プロセスごと落ちて**いた
 	 *   ("agent closed unexpectedly" としか出ず原因が分からなかった)。 */
 	{
 		sPtr<nfMesh> m3 = sPtr<nfMesh>::d_cast(geom);
-		if ( m3.is_notNull() && m3->build_failed() ) { errCode = -2; return rDO|FIN_START; }
+		if ( m3.is_notNull() && m3->build_failed() ) {
+			/* ★ #3504: 理由が付いていればそれを出す (4 GiB 超の SNC など)。 */
+			const char *why = m3->last_error();
+			set_err(-2, why ? why
+			                : "the stored boundary mesh could not be built into a Nef polyhedron "
+			                  "(self-intersecting or otherwise not a valid solid boundary)");
+			return rDO|FIN_START;
+		}
 	}
 	result = geom;
 	return rDO|FIN_START;

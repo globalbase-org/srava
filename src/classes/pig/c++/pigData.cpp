@@ -139,20 +139,54 @@ sPtr<pigData> pigData::p_ge(sPtr<pigData> left) {
 
 sPtr<stdString> pigDataNull::get_str() { return thNEW(stdString, ("null")); }
 
-pigDataError::pigDataError(const char *m, sPtr<pigInfo> i, int fatal) : pigData(i), fatal_(fatal) {
-  msg = thNEW(stdString, (m));
+/* ★ #3475: 文言の組み立ては **ここ 1 箇所**。"[TAG] module/op: message" の 3 段。
+ *   タグは属性を wire (テキスト) 越しに運ぶための表現なので、cls != PE_NORMAL のときだけ付く。
+ *   module は名乗る相手が居るときだけ付く (0 なら付かない = planner 自身のエラー等)。
+ * ⚠ 既にタグで始まる文言には**重ねない**。agent から返ってきた文字列でエラーを作り直す経路が
+ *   あり、そこで "[FATAL] [FATAL] ..." になるのを防ぐ。 */
+static sPtr<stdString>
+pig_err_compose(sPtr<stdString> m, int cls, const char *module)
+{
+  const char *tag = ( cls == PE_FATAL )   ? PIG_ERRTAG_FATAL
+                  : ( cls == PE_DERIVED ) ? PIG_ERRTAG_DERIVED : 0;
+  const char *raw = m.is_notNull() ? m->get_str() : "";
+  if ( tag != 0 && ::strncmp(raw, tag, ::strlen(tag)) == 0 ) tag = 0;   /* 二重付与を避ける */
+  if ( tag == 0 && module == 0 ) return m;
+  sPtr<stdString> out = thNEW(stdString, ( tag ? tag : "" ));
+  if ( module != 0 ) { out = out->add(thNEW(stdString,(module)))->add(thNEW(stdString,("/"))); }
+  return out->add(m);
 }
-pigDataError::pigDataError(sPtr<stdString> m, sPtr<pigInfo> i, int fatal) : pigData(i), msg(m), fatal_(fatal) {}
+
+pigDataError::pigDataError(const char *m, sPtr<pigInfo> i, int cls, const char *module)
+  : pigData(i), cls_(cls) {
+  msg = pig_err_compose(thNEW(stdString, (m)), cls, module);
+}
+pigDataError::pigDataError(sPtr<stdString> m, sPtr<pigInfo> i, int cls, const char *module)
+  : pigData(i), cls_(cls) {
+  msg = pig_err_compose(m, cls, module);
+}
 sPtr<stdString> pigDataError::get_str() {
-  /* ソース位置(file,line)が刻まれていれば ERROR[file,line] msg、無ければ従来の ERROR: msg。 */
+  /* ソース位置(file,line)が刻まれていれば ERROR[file,line] msg、無ければ従来の ERROR: msg。
+   * ★ #3475: **表示では属性タグを落とす** ([FATAL] / [DERIVED] は wire を跨ぐための表現で、
+   *   利用者に見せる情報ではない)。モジュール名前置き (cgal/union: ...) は残す — どのカーネルが
+   *   失敗したかは利用者が追跡に使う。 */
+  sPtr<stdString> body = msg;
+  if ( body.is_notNull() ) {
+    const char *raw = body->get_str();
+    const char *tag = ( ::strncmp(raw, PIG_ERRTAG_FATAL,   ::strlen(PIG_ERRTAG_FATAL))   == 0 )
+                          ? PIG_ERRTAG_FATAL
+                    : ( ::strncmp(raw, PIG_ERRTAG_DERIVED, ::strlen(PIG_ERRTAG_DERIVED)) == 0 )
+                          ? PIG_ERRTAG_DERIVED : 0;
+    if ( tag != 0 ) body = thNEW(stdString, (raw + ::strlen(tag)));
+  }
   if ( info.is_notNull() && info->get_lineno() > 0 ) {
     char hd[512];
     const char *fn = info->get_filename().is_notNull()
                      ? info->get_filename()->get_str() : "?";
     ::snprintf(hd, sizeof hd, "ERROR[%s,%d] ", fn, info->get_lineno());
-    return thNEW(stdString, (hd))->add(msg);
+    return thNEW(stdString, (hd))->add(body);
   }
-  return thNEW(stdString, ("ERROR: "))->add(msg);
+  return thNEW(stdString, ("ERROR: "))->add(body);
 }
 
 /* ------------------------------------------------------------------ */
@@ -424,6 +458,31 @@ void pigDataCache::conv_set_body(const char* type, sPtr<pigData> b) {
 void pigDataCache::conv_finish(const char* type) {
   int i = conv_index(type);
   if (i >= 0) { converted[i].done = 1; converted[i].helper = thNULL; }
+}
+/* ★ #3479: 実体化に失敗した理由を該当エントリへ (conv_set_body と対)。
+ *   body が null になった事実だけでなく **なぜ null か** を残す。 */
+void pigDataCache::conv_set_error(const char* type, sPtr<stdString> why) {
+  int i = conv_index(type);
+  if (i >= 0 && why.is_notNull()) converted[i].why = why;
+}
+/* ★ #3479: 記録済みの理由を集めて 1 本にする。候補列 (ABI v19 の複数配線) を順に試して全部
+ *   落ちた場合は理由が複数あるので、型名を添えて並べる。1 個だけなら型名は付けない
+ *   (呼び手のメッセージが既にどの op のどの引数かを言っており、型名まで出すと冗長)。 */
+sPtr<stdString> pigDataCache::load_error() {
+  int n = 0, first = -1;
+  for (size_t k = 0; k < converted.size(); ++k)
+    if (converted[k].why.is_notNull()) { ++n; if (first < 0) first = (int)k; }
+  if (n == 0) return sPtr<stdString>();
+  if (n == 1) return converted[first].why;
+  std::string acc;
+  for (size_t k = 0; k < converted.size(); ++k) {
+    if (converted[k].why == thNULL) continue;
+    if (!acc.empty()) acc += "; ";
+    acc += converted[k].type->get_str();
+    acc += ": ";
+    acc += converted[k].why->get_str();
+  }
+  return thNEW(stdString,(acc.c_str()));
 }
 
 /* file 先頭の D_META 4CC を同期で覗く (get_body の候補選定 / type_name 用)。1=D_META(out に 4CC 充填)・
@@ -1354,6 +1413,23 @@ void pigDataOperatorModule::_start() {
       /* ★ #3436 P4: arity = N' (このモジュールが 1 ノードあたり受け取りたい最大項数・policy)。
        *   2 以上の**有限整数**のみ (「上限なし」は取らない。できるだけ多くやりたければ大きい整数を書く)。
        *   実際の項数は k = min(N', op の sig が申告する N, 群の執行者が許す最大)。 */
+      /* ★ #3503: grace = 撤収の猶予 (ミリ秒)。0=即 kill / >0=猶予つき / -1=graceful のみ。
+       *   ⚠ -1 は「**全 op・全経路が中断要求を見る**」と宣言すること。止まらない経路が
+       *     1 つでもあると Ctrl+C で永久ハングする (process なら居残り・in-proc なら planner ごと)。
+       *     迷ったら >0 — 申告が間違っていても代償は遅延だけで済む。 */
+      sPtr<pigData> gr = opts->get_ix(thNEW(pigDataString, ("grace")));
+      if (gr.is_notNull() && !gr->is_error()) {
+        int g = (int)gr->get_int();
+        if (g < -1) { result = thNEW(pigDataError,
+            ("module: grace must be -1 (graceful only), 0 (kill at once) or a positive number of milliseconds", info)); return; }
+        reg->set_grace_ms(id, g);
+      }
+      /* ★ #3503: panic = in-proc で居座ったときに planner を abort するまでの猶予 (ミリ秒)。
+       *   <=0 = 無効 (既定) / >0 = その時間。grace と対だが **同じ値にしない**のが普通 —
+       *   process の猶予切れは agent 1 つ、in-proc の abort は **セッション全体**を失う。 */
+      sPtr<pigData> pn = opts->get_ix(thNEW(pigDataString, ("panic")));
+      if (pn.is_notNull() && !pn->is_error())
+        reg->set_panic_ms(id, (int)pn->get_int());
       sPtr<pigData> ar = opts->get_ix(thNEW(pigDataString, ("arity")));
       if (ar.is_notNull() && !ar->is_error()) {
         int k = (int)ar->get_int();

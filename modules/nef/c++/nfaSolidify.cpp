@@ -83,13 +83,13 @@ nfaSolidify_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<pigData> in = ( na > 0 ) ? (*args)[0] : sPtr<pigData>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("solidify: needs a mesh"))));
+		result = nfa_err(thNEW(stdString,("solidify: needs a mesh")));
 		return;
 	}
 	mesh = nfMesh::solidify_mesh(in);
 	if ( ! mesh.is_notNull() )
-		result = thNEW(pigDataError,(thNEW(stdString,
-		    ("solidify: could not rebuild a solid from the given boundary"))));
+		result = nfa_err(thNEW(stdString,
+		    ("solidify: could not rebuild a solid from the given boundary")));
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

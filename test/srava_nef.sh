@@ -24,8 +24,11 @@
 #   offset    … ★3D offset (#3440 の 2 で cgal.so から移設)。膨張/収縮/中空箱/非有界エラー。
 #   cavity    … ★内部空洞を持つ立体が cache を渡っても壊れないこと (hybrid の境界形式のバグ回帰)。
 #   convex    … ★凸分解 (#3441)。凸=1 片 / 凹=2 片以上 (nparts) / 各片を part(d,i) で取り出せる
-#               (体積の合計が元と一致) / 内壁ができて cg 降格不可 / 範囲外は明示エラー。
-#   unify     … ★内壁除去 (#3442・正則化)。単一立体は不変 / 空洞は保つ / 凸分解の内壁を消せる。
+#               (体積の合計が元と一致) / **cache を渡っても nparts が保たれる** (SNC が本体のまま
+#               であることの回帰・2026-09-06) / 範囲外は明示エラー。
+#   unify     … ★内壁除去 (#3442・正則化)。単一立体は不変 / 空洞は保つ /
+#               凸分解の内壁を消せる (**nparts が 2 → 1** で直接観測・2026-09-06 に
+#               「cg へ降格できるようになること」から替えた)。
 #   selfx     … ★自己交差メッシュ (自分を貫く tube) は明示エラー・**agent は落ちない**
 #               (以前は CGAL の assertion で agent ごと死んでいた)。
 #   solidify  … ★壊れた境界からのソリッド再構成 (#3445)。自己交差 tube の体積が
@@ -38,6 +41,12 @@
 #               ⑤ ★負の対照: **solidify には gg を足していない** — geogram も持つ op なので
 #                 all-foreign を書くと nef が geogram の自型 solidify まで奪う (priority 5>3)。
 #                 nef の priority を上げても solidify(gg) に NEF タグが出ないことを固定する。
+#   nonmani   … ★**2-多様体でない有界の値も他カーネルへ出せる**こと (2026-09-06)。
+#               ① 稜だけで接する「中空の箱 + 箱」の体積が 15 (空洞を落とさない)
+#               ② その値を cg / mf へ cast できて体積が保たれる
+#               ③ ★負の対照: **非有界** (complement) は依然として不可で、理由が付く
+#               ⚠ ① は to_mesh が marked volume の **全シェル**を回すことの回帰。
+#                 shells_begin() の 1 枚だけを見ていた頃は 16 (空洞ぶんの 1 が消える) だった。
 #   chain     … ★**Nef 型を維持したまま op 連鎖する**こと (#3433 の中心要件)。
 #               union 連鎖の mesh cache が全て NEF3 で、MESH への往復が **1 つも無い**ことを見る。
 #               往復が入ると変換税で Nef 本来のコストが測れない (ベンチが無意味になる)。
@@ -75,6 +84,9 @@ count_tag() {   # $1=dir $2=tag
 }
 
 case "$MODE" in
+# ★ #3485: ここは **意図的な routing 依存** — cgal / manifold / geogram を上げても nef 固有 op (minkowski / complement / 3D offset) は持ち主へ落ちる、
+#   ことを見ている。名指し ("mod"::op) に直すと **検査の意味が消える**。
+#   承認済みリスト = test/routing_dependency.txt (ctest srava_routing_dependency が見張る)
 agree)
 	S='var s = sphere(1.5, 40); print("VOL", volume(union(s, translate(s,[0.5,0.5,0.5]))));'
 	NF=$(SRAVA_CACHE_DIR="$D-a" \
@@ -135,23 +147,21 @@ unbounded)
 
 downgrade)
 	# ★ #3440 の 3 以降、**cgal.so は CGAL Nef に依存しない** (SNC をパースできない)。
-	#   よって nf → cg の降格が通るのは **payload が厳密境界形式で書かれている値だけ**:
-	#     hybrid … 有界・2-多様体・**空洞なし** の立体 (= 境界形式で書かれる) は通る
-	#     snc    … 常に SNC なので **どれも通らない** (計画時に承知した代償)
+	#   よって nf → cg の降格の通り方が **変種で分かれる**:
+	#     hybrid … 有界・2-多様体の立体は境界形式 (NF_FORM_BOUNDARY) で書かれる。cgal.so が
+	#              そのまま読むので **cgal 自身の cast** が受ける。
+	#     snc    … ★ #3499 以降 **常に SNC だけ**。cgal.so は読めないので、**橋モジュール
+	#              nef_cg.so** が受ける (そこで初めて to_mesh() を払う)。
+	#              #3478 の「SNC の後ろに境界を併記する」は撤回した — 付録のために
+	#              encode ごとに to_mesh() が走る代償が大きかった。
+	#   ★ どちらの経路でも「境界表現を取れない値」= 非有界 は通らない。
+	#     ここが cgal の Nef 非依存を見張る点で、下の ② がそれを固定する。
 	#   いずれの不可も **明示エラー** (黙って 0 や 8 を返さない)。
 	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
 	      print(\"VOL\", volume(cast(\"cg-mesh3d\", b)));" "$SRAVA" 2>&1)
 	V=$(echo "$OUT" | sed -n 's/^VOL //p')
-	if [ "$VAR" = hybrid ] ; then
-		ok=$(awk -v a="$V" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
-		if [ "$ok" != "1" ] ; then echo "FAIL: nf->cg 降格 volume=$V (期待 8)" ; echo "$OUT" ; exit 1 ; fi
-	else
-		if [ -n "$V" ] ; then
-			echo "FAIL: snc の nf->cg 降格が値 '$V' を返した = cgal が SNC を読んでいる (Nef 依存が戻った合図)"
-			echo "$OUT" ; exit 1
-		fi
-		V="明示エラー(SNC)"
-	fi
+	ok=$(awk -v a="$V" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	if [ "$ok" != "1" ] ; then echo "FAIL: nf->cg 降格 volume=$V (期待 8)" ; echo "$OUT" ; exit 1 ; fi
 	# ② 非有界な Nef は cg で表現できない → 明示エラー。黙って 0 (空 mesh) や 8 (境界だけ拾う) にしない
 	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
 	       var c = complement(box(2,2,2)); print(\"VOL\", volume(cast(\"cg-mesh3d\", c)));" "$SRAVA" 2>&1)
@@ -166,37 +176,29 @@ downgrade)
 	#   snc   … cgal は NEF3 を読めると申告していない (CGAL Nef 非依存) → **planner の routing** が
 	#             申告の段で落とす。planner は形式に踏み込まない (in-proc の値はまだメモリ上の
 	#             body でしかなく 4CC は pigDataCache の都合) ので、出るのは **型名**。
-	if [ "$VAR" = hybrid ] ; then
-		if ! echo "$OUT2" | grep -q "$TAG" ; then
-			echo "FAIL: エラーメッセージが入力形式 ($TAG) を示していない" ; echo "$OUT2" ; exit 1
-		fi
-	else
-		if ! echo "$OUT2" | grep -q "no module declares a conversion" ; then
-			echo "FAIL: SNC の不可が routing の申告エラーになっていない" ; echo "$OUT2" ; exit 1
-		fi
-		if ! echo "$OUT2" | grep -q "$TYPE" ; then
-			echo "FAIL: エラーメッセージが入力の型名 ($TYPE) を示していない" ; echo "$OUT2" ; exit 1
-		fi
+	# ★ #3499: 不可を出す層がまた変種で分かれた。どちらの文面にも $TAG が出ることは変わらない。
+	#   hybrid … cgal は NEFB を読めると申告している → 実際に読んだ **codec 層**が落とす。
+	#   snc   … cgal は NEF3 を読めると申告しない → **橋 nef_cg.so の cast 本体**が落とす。
+	#           橋は自分が NEF3 を受けていることを知っているので、文面に 4CC を書いている。
+	if ! echo "$OUT2" | grep -q "$TAG" ; then
+		echo "FAIL: エラーメッセージが入力形式 ($TAG) を示していない" ; echo "$OUT2" ; exit 1
+	fi
+	# ★ #3479: 「読めなかった」だけでなく **なぜ** が出ること (理由の配線が生きている見張り)。
+	if ! echo "$OUT2" | grep -q "it is unbounded" ; then
+		echo "FAIL: 非有界の不可に理由が付いていない" ; echo "$OUT2" ; exit 1
 	fi
 	# ③ ★空洞つき立体 (中空箱) の降格。cg は中空立体を表現できるので **通るのが正**。
 	#    hybrid は空洞つきも境界形式で書く (読み側がシェルを even-odd で復元できるようになったため)。
-	#    snc は常に SNC なので通らない。ここが hybrid で落ちたら、書き側が空洞を SNC へ逃がしている
-	#    (= cache が太り cg/mf へ渡せなくなる退行) の合図。
+	#    snc は橋 nef_cg.so が to_mesh() して渡す (#3499)。
+	#    ここが落ちたら、hybrid なら書き側が空洞を「境界を書けない値」へ逃がしている、
+	#    snc なら to_mesh() が空洞を落としている、の合図。
 	OUT3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
 	       var h = difference(box(3,3,3), translate(box(1,1,1),[1,1,1]));
 	       print(\"VOL\", volume(cast(\"cg-mesh3d\", h)));" "$SRAVA" 2>&1)
 	V3=$(echo "$OUT3" | sed -n 's/^VOL //p')
-	if [ "$VAR" = hybrid ] ; then
-		ok=$(awk -v a="$V3" 'BEGIN{ d=a-26; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
-		if [ "$ok" != "1" ] ; then
-			echo "FAIL: 空洞つき立体の cg 降格が $V3 (期待 27-1=26)" ; echo "$OUT3" ; exit 1
-		fi
-	else
-		if [ -n "$V3" ] ; then
-			echo "FAIL: snc の空洞つき cg 降格が値 '$V3' を返した = cgal が SNC を読んでいる"
-			echo "$OUT3" ; exit 1
-		fi
-		V3="明示エラー(SNC)"
+	ok=$(awk -v a="$V3" 'BEGIN{ d=a-26; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	if [ "$ok" != "1" ] ; then
+		echo "FAIL: 空洞つき立体の cg 降格が $V3 (期待 27-1=26)" ; echo "$OUT3" ; exit 1
 	fi
 	echo "NEF-DOWNGRADE-OK[$VAR] 立体=$V 空洞つき=$V3 / 非有界=明示エラー"
 	;;
@@ -221,32 +223,27 @@ mfcross)
 	ok=$(awk -v a="$MIX" -v b="$PURE" 'BEGIN{ d=a-b; if(d<0)d=-d; s=(a<0?-a:a); if(s<1)s=1;
 	                                          print (d/s < 1e-12) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: 混成=$MIX 純nf=$PURE (一致すべき)" ; exit 1 ; fi
-	# ③④ ★nf → mf の**直接**変換は変種で成否が変わる。これは仕様どおりで、両方を固定する:
-	#   hybrid … 有界立体は厳密境界形式 (cg の "MESH" と同一フレーミング) で書かれるので
-	#            **manifold が CGAL 無しで読める** → 通る。非有界 (SNC 形式) は読めない = 明示エラー。
-	#   snc    … 常に SNC なので manifold は読めない (CGAL 非依存 = GPL 非汚染を守る) → 常に明示エラー。
-	#            ★#3440 の 3 で cgal も Nef 非依存になったため、**cg を挟む 2 段の逃げ道も無くなった**
-	#            (SNC を読めるのは nef 自身だけ)。snc の値を他カーネルへ渡す道は無い = 計画時に
-	#            承知した代償。snc のまま export するか、hybrid を使う。
-	#   ★ manifold の codec は "NEFB" だけを申告する = **読めないものを申告しない**ので、
-	#     planner が routing 段階で正しく判断できる (#3439 の「宣言と実態を一致させる」)。
+	# ③④ ★nf → mf の**直接**変換。**両変種とも有界なら通る**が、経路が違う (#3499):
+	#   hybrid … 有界立体は厳密境界形式 (cg の "MESH" と同一フレーミング) で書かれるので、
+	#            manifold.so が **CGAL 無しで**直接読む。
+	#   snc    … 常に SNC だけなので manifold.so は読めない。**橋 nef_mf.so** が
+	#            to_mesh() → 厳密境界 → double と落として渡す。
+	#   ★ どちらでも manifold.so 自身は **CGAL 非依存のまま** (GPL 非汚染)。CGAL を引くのは
+	#     nef_mf.so だけ。
+	#   ★ 通らないのは「境界表現を取れない値」= 非有界 だけ。下の非有界チェックが
+	#     それを固定する = manifold/cgal に Nef 依存が戻っていないことの見張り。
 	V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
 	     module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
 	     print(\"VOL\", volume(cast(\"mf-mesh3d\", b)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-	if [ "$VAR" = hybrid ] ; then
-		ok=$(awk -v a="$V3" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
-		[ "$ok" = "1" ] || { echo "FAIL: hybrid の nf->mf 直接 (有界) が volume=$V3 (期待 8)" ; exit 1 ; }
-	else
-		[ -z "$V3" ] || { echo "FAIL: snc (常に SNC) の nf->mf 直接が通った = manifold が SNC を読んでいる: $V3" ; exit 1 ; }
-		# ★cg を挟む 2 段も通らないこと (#3440 の 3 で cgal が Nef 非依存になった)。
-		#   ここが通るようになったら cgal に Nef が戻った合図 = テストが落ちる。
-		V3=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
-		     module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
-		     print(\"VOL\", volume(cast(\"mf-mesh3d\", cast(\"cg-mesh3d\", b))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-		[ -z "$V3" ] || { echo "FAIL: snc の nf->cg->mf 2 段が通った = cgal が SNC を読んでいる: $V3" ; exit 1 ; }
-		V3="明示エラー(SNC は他カーネルへ渡せない)"
-	fi
-	# 非有界は両変種とも mf へ渡せない (SNC 形式になるので manifold は読めない)
+	ok=$(awk -v a="$V3" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: nf->mf 直接 (有界) が volume=$V3 (期待 8)" ; exit 1 ; }
+	# cg を挟む 2 段も同じ値になること (経路が違っても答えは 1 つ)。
+	V4=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
+	     module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
+	     print(\"VOL\", volume(cast(\"mf-mesh3d\", cast(\"cg-mesh3d\", b))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
+	ok=$(awk -v a="$V4" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: nf->cg->mf 2 段が volume=$V4 (期待 8)" ; exit 1 ; }
+	# 非有界は両変種とも mf へ渡せない (境界を併記できない = SNC だけになるので manifold は読めない)
 	OUT4=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
 	       var c = complement(box(2,2,2));
 	       module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
@@ -254,6 +251,10 @@ mfcross)
 	if echo "$OUT4" | grep -q "^VOL " ; then
 		echo "FAIL: 非有界 nf の mf 変換が通った = manifold に CGAL が入った可能性 (設計判断が要る)"
 		echo "$OUT4" ; exit 1
+	fi
+	# ★ #3479: 不可には **理由** が付くこと (理由の配線が生きている見張り)。
+	if ! echo "$OUT4" | grep -q "it is unbounded" ; then
+		echo "FAIL: 非有界の不可に理由が付いていない" ; echo "$OUT4" ; exit 1
 	fi
 	echo "NEF-MFCROSS-OK[$VAR] mf->nf=$V 混成=$MIX 純nf=$PURE nf->mf=$V3 (非有界は明示エラー)"
 	;;
@@ -518,6 +519,52 @@ cavity)
 	echo "NEF-CAVITY-OK 空洞=$V 2段=$V2 離れた2立体=$V3 cg昇格=$V4 mf昇格=$V5 3段入れ子=$V6"
 	;;
 
+nonmani)
+	# ★ 2-多様体でない有界の値も境界を持てる (2026-09-06)。
+	#   nef は marked volume ごとの **全シェル**から境界を作れるので、is_simple() が偽でも
+	#   他カーネルへ出せる。以前は is_simple() で切っていたため「volume は出るのに
+	#   cast("mf-mesh3d", ...) は拒否される」状態だった。
+	#   題材: 中空の箱 (8-1=7) と、**稜だけで接する** 箱 (8) の和 = 15。
+	#     ・稜での接触 → 境界が 2-多様体でない (is_simple()=false)
+	#     ・中空 → 空洞があるので「外側シェルだけ」を書くと 16 に化ける (全シェルの回帰)
+	U='(box(2,2,2) --- translate(box(1,1,1),[0.5,0.5,0.5])) ||| translate(box(2,2,2),[2,2,0])'
+	rm -rf "$D-a"
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"manifold.so\",{priority:1});
+	      module(\"cgal.so\",{priority:50}); module(\"$SO\",{priority:99});
+	      print(\"V\",  volume($U));
+	      print(\"NP\", nparts($U));
+	      print(\"CG\", volume(cast(\"cg-mesh3d\", $U)));
+	      print(\"MF\", volume(cast(\"mf-mesh3d\", $U)));" "$SRAVA" 2>&1)
+	V=$(echo "$OUT"  | sed -n 's/^V //p')
+	NP=$(echo "$OUT" | sed -n 's/^NP //p')
+	CG=$(echo "$OUT" | sed -n 's/^CG //p')
+	MF=$(echo "$OUT" | sed -n 's/^MF //p')
+	# ① 空洞を落とさない (全シェルを回している証拠。落とすと 16)
+	ok=$(awk -v a="$V" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	[ "$ok" = "1" ] || {
+		echo "FAIL: 非 2-多様体 + 空洞の体積が $V (期待 15。16 なら空洞を落としている)"
+		echo "$OUT" ; exit 1 ; }
+	[ "$NP" = "2" ] || { echo "FAIL: 塊の数が $NP (期待 2)" ; echo "$OUT" ; exit 1 ; }
+	# ② 他カーネルへ出せて体積が保たれる (以前はここで拒否されていた)
+	for pair in "cg $CG" "mf $MF" ; do
+		set -- $pair
+		ok=$(awk -v a="$2" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+		[ "$ok" = "1" ] || {
+			echo "FAIL: $1 への cast が $2 (期待 15)" ; echo "$OUT" ; exit 1 ; }
+	done
+	# ③ ★負の対照: 非有界は依然として不可で、**理由が付く**
+	rm -rf "$D-b"
+	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"manifold.so\",{priority:1});
+	       module(\"$SO\",{priority:99});
+	       print(\"V\", volume(cast(\"mf-mesh3d\", complement(box(1,1,1)))));" "$SRAVA" 2>&1)
+	if echo "$OUT2" | grep -q "^V " ; then
+		echo "FAIL: 非有界が mf へ通った (境界表現が無いので不可であるべき)" ; echo "$OUT2" ; exit 1
+	fi
+	echo "$OUT2" | grep -q "it is unbounded" || {
+		echo "FAIL: 非有界の不可に理由が付いていない" ; echo "$OUT2" ; exit 1 ; }
+	echo "NEF-NONMANI-OK 体積=$V 塊=$NP cg=$CG mf=$MF / 非有界は理由つきで不可"
+	;;
+
 convex)
 	# ★凸分解 (#3441)。L 字 (凹形状) を凸片へ割る。
 	#   ① 凸形状は 1 片・凹形状は 2 片以上 (nparts で数える)
@@ -547,11 +594,28 @@ convex)
 	     print (a!="" && b!="" && a>0 && b>0 && d<1e-9) ? 1 : 0 }')
 	[ "$ok" = "1" ] || {
 		echo "FAIL: 片の体積 $P0 + $P1 が 15 にならない = part(d,i) が塊を取り出せていない" ; exit 1 ; }
-	OUT2=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
-	       print(\"VOL\", volume(cast(\"cg-mesh3d\", convex_decomposition($L))));" "$SRAVA" 2>&1)
-	if echo "$OUT2" | grep -q "^VOL " ; then
-		echo "FAIL: 分解直後が cg へ降格できた = 内壁が入っていない (分解できていない)" ; exit 1
-	fi
+	# ★ 2026-09-06: ここは以前「**cg へ降格できないこと**」を内壁の証拠にしていたが、
+	#   それは表現側の副作用であって内壁そのものの観測ではなかった。nef が非 2-多様体でも
+	#   境界を併記するようになり (境界は各片が別の連結成分として出る)、降格は通る。
+	#   ⇒ 内壁は nparts が直接見ている (上の ①)。ここで固定するのは
+	#      **SNC が本体のまま**であること — 降格できるようになっても cache を渡って
+	#      nparts が 2 のままで、part(d,i) が使えること (境界だけで書くと 1 塊に化ける)。
+	rm -rf "$D-a2"
+	CVX="convex_decomposition($L)"
+	SRC2="module(\"$SO\",{priority:99});
+	      print(\"N\", nparts($CVX));
+	      print(\"VOL\", volume(cast(\"cg-mesh3d\", $CVX)));"
+	OUT2=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$SRC2" "$SRAVA" 2>&1)
+	OUT2W=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$SRC2" "$SRAVA" 2>&1)   # warm (同じ cache)
+	NC=$(echo "$OUT2"  | sed -n 's/^N //p')
+	NW=$(echo "$OUT2W" | sed -n 's/^N //p')
+	VC=$(echo "$OUT2"  | sed -n 's/^VOL //p')
+	[ "$NC" = "2" ] || { echo "FAIL: 分解直後の nparts が $NC (期待 2)" ; echo "$OUT2" ; exit 1 ; }
+	[ "$NW" = "2" ] || {
+		echo "FAIL: cache を渡ると nparts が $NW (期待 2) = SNC でなく境界だけで書かれている" 
+		echo "$OUT2W" ; exit 1 ; }
+	ok=$(awk -v a="$VC" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: 分解直後の cg 降格が $VC (期待 15)" ; echo "$OUT2" ; exit 1 ; }
 	OUT3=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
 	       print(\"VOL\", volume(part(convex_decomposition($L), 5)));" "$SRAVA" 2>&1)
 	if echo "$OUT3" | grep -q "^VOL " ; then
@@ -560,7 +624,7 @@ convex)
 	if ! echo "$OUT3" | grep -qE "ERROR.*part:" ; then
 		echo "FAIL: part の範囲外エラーが出ていない" ; echo "$OUT3" ; exit 1
 	fi
-	echo "NEF-CONVEX-OK 箱=$NB 片 / L字=$NL 片 (体積 $P0 + $P1 = $VD) / 内壁で cg 降格不可 / 範囲外はエラー"
+	echo "NEF-CONVEX-OK 箱=$NB 片 / L字=$NL 片 (体積 $P0 + $P1 = $VD) / cache 越しに nparts=$NW / 範囲外はエラー"
 	;;
 
 unify)
@@ -578,24 +642,23 @@ unify)
 	     "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V2" 'BEGIN{ d=a-26; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	[ "$ok" = "1" ] || { echo "FAIL: 中空箱の unify が $V2 (期待 26 = 空洞を保つ)" ; exit 1 ; }
-	# ★内壁が消えたことの**観測**: 内壁があると境界が 2-多様体でないので cg へ降格できない。
-	#   unify 後に降格できれば内壁は消えている。ただし cgal は SNC を読めない (#3440 の 3) ので
-	#   この観測は **hybrid でしかできない**。snc は体積だけ見る (契約どおりの限界)。
-	if [ "$VAR" = hybrid ] ; then
-		V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
-		     print(\"VOL\", volume(cast(\"cg-mesh3d\", unify(convex_decomposition($L)))));" \
-		     "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-		ok=$(awk -v a="$V3" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
-		[ "$ok" = "1" ] || {
-			echo "FAIL: 凸分解を unify した結果の cg 降格が $V3 (期待 15) = 内壁が消えていない" ; exit 1 ; }
-	else
-		V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
-		     print(\"VOL\", volume(unify(convex_decomposition($L))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-		ok=$(awk -v a="$V3" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
-		[ "$ok" = "1" ] || { echo "FAIL: 凸分解を unify した体積が $V3 (期待 15)" ; exit 1 ; }
-		V3="$V3 (cg 降格は snc では不可 = 設計どおり)"
-	fi
-	echo "NEF-UNIFY-OK 単一=$V1 中空=$V2 (空洞維持) 内壁除去後の cg 降格=$V3"
+	# ★内壁が消えたことの**直接の観測**: 内壁は marked volume を分ける仕切りなので、
+	#   消えれば **nparts が 2 → 1** になる。
+	#   ⚠ 2026-09-06 まではここを「cg へ降格できるようになること」で見ていたが、
+	#     nef が非 2-多様体でも境界を併記するようになり **分解直後でも降格が通る**ので
+	#     観測にならなくなった。nparts なら表現の都合に依らず、snc 変種でも同じに見える
+	#     (以前は「hybrid でしかできない」と書いてあった制約も消えた)。
+	N3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	     print(\"N\", nparts(convex_decomposition($L)));
+	     print(\"N\", nparts(unify(convex_decomposition($L))));
+	     print(\"V\", volume(unify(convex_decomposition($L))));" "$SRAVA" 2>&1)
+	NP=$(echo "$N3" | sed -n 's/^N //p' | tr '\n' ' ')
+	VU=$(echo "$N3" | sed -n 's/^V //p')
+	[ "$NP" = "2 1 " ] || {
+		echo "FAIL: 凸分解 → unify の nparts が [$NP] (期待 [2 1 ] = 内壁が消えた)" ; echo "$N3" ; exit 1 ; }
+	ok=$(awk -v a="$VU" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: 凸分解を unify した体積が $VU (期待 15 = 不変)" ; exit 1 ; }
+	echo "NEF-UNIFY-OK 単一=$V1 中空=$V2 (空洞維持) 内壁除去で nparts [$NP] 体積=$VU"
 	;;
 
 selfx)
@@ -666,9 +729,13 @@ solidify)
 	#      geogram (double のまま) へ行くのが正しい振り分けだから。ここで見たいのは「nef を選べば
 	#      nef が mf を昇格読みして同じ答えを出す」ことなので、明示的に nef を最上位にする。
 	#      既定の振り分けそのものは ggcross ⑥ が見る。
+	#    ⚠ 2026-09-05: tube を **nef 自身も持つ**ようになったので、priority:120 のままだと
+	#      $SELFX が nef で走って入力が nf になり、この検査が「cg / mf 入力」を見なくなる
+	#      (CG は同じ値が出るので **落ちずに意味だけ失われる**・MF は cast nf→mf が無くて落ちた)。
+	#      入力の生成元を "cgal"::tube と **名指し**して意図を式に固定する。
 	OUT3=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="module(\"$SO\",{priority:120});
-	       print(\"CG\", volume(solidify($SELFX)));
-	       print(\"MF\", volume(solidify(cast(\"mf-mesh3d\", $SELFX))));" "$SRAVA" 2>&1)
+	       print(\"CG\", volume(solidify(\"cgal\"::$SELFX)));
+	       print(\"MF\", volume(solidify(cast(\"mf-mesh3d\", \"cgal\"::$SELFX))));" "$SRAVA" 2>&1)
 	for k in CG MF ; do
 		got=$(echo "$OUT3" | sed -n "s/^$k //p")
 		ok=$(awk -v a="$got" 'BEGIN{ d=a-48.608763289596638; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')

@@ -89,3 +89,14 @@ TS_THREAD(ACT_START)                          /* 本文を D_CHUNK へストリ�
 	}
 	return rDO|FIN_START;
 }
+
+/* ★ §9 (2026-09-04): 書き終えたら本体を手放す。
+ * ⚠ ZOM に入ってもこの状態機械は tsThread のワーカーに握られたまま残ることがある
+ *   (__tsThread_body の prev_target が「最後に走らせた仕事」を保持するため)。
+ *   ここで落とさないと **本体がそのぶん常駐する**。基底の FIN_START はこの 1 行が
+ *   無いだけなので、上書きして基底の後片付けへ chain する。 */
+TS_STATE(FIN_START)
+{
+	_geom = thNULL;
+	return rDO|FIN_ptsWireCacheStreamWriter_START;
+}

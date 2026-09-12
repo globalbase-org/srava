@@ -64,5 +64,5 @@ mfaArea_::compute()
 	sPtr<mfCross> c2 = sPtr<mfCross>::d_cast(a);
 	if ( m3.is_notNull() )      result = thNEW(pigDataFloat,(m3->op_area()));
 	else if ( c2.is_notNull() ) result = thNEW(pigDataFloat,(c2->op_area()));
-	else result = thNEW(pigDataError,(thNEW(stdString,("area: needs a mesh"))));
+	else result = mfa_err(thNEW(stdString,("area: needs a mesh")));
 }

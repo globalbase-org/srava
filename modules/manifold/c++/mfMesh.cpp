@@ -2,7 +2,9 @@
  * mfMesh — Manifold 幾何ラッパの実装(cgMesh3D のミラー・CGAL 非依存)。
  */
 #include	"mf/c++/mfMesh.h"
+#include	"common/meshprops.h"   /* valid の共通定義 (#3487) */
 #include	"ts2/c++/stdString.h"
+#include	"common/blockframe.h"   /* ★ #3507: SNC のブロック列を終端まで読み捨てる */
 
 #include	<cstdio>
 #include	<cstring>
@@ -144,19 +146,41 @@ mfMesh::decode_mesh_exact(mfChunkSource &src)
 	m_ = Manifold(m);
 }
 
-/* ★ #3433: NEF3 (nef.so の出力) を読む。payload 先頭 1 バイト = 形式
+/* ★ #3433: nef_hybrid の出力 (4CC "NEFB") を読む。payload 先頭 1 バイト = 形式
  *   (nfMesh.h の NF_FORM_*・安定契約としてここに inline 再現):
  *     1 = 厳密境界 → cg の "MESH" と同一フレーミングなので decode_mesh_exact をそのまま使える
  *     0 = SNC      → パースに CGAL が要る。manifold.so は **CGAL 非依存 (GPL 非汚染)** を設計として
- *                    守っているので読まない。黙って空 mesh にせず decodeErr_ を立てて落とす
- *                    (nf → mf が要るなら cast("cg-mesh3d", x) を挟んで cg 経由で降ろす)。 */
+ *                    守っているので読まない。黙って空 mesh にせず理由つきで落とす。
+ *   ⚠ 受理する 4CC は "NEFB" **だけ**で、nef_snc の "NEF3" は create_for_meta が弾く (#3478 で対処予定)。
+ *   ⚠ 旧コメントは迂回路として cast("cg-mesh3d", x) を勧めていたが **成立しない** —
+ *     cgal.so も CGAL Nef に依存しない方針 (#3440) なので SNC を読めず、同じ理由で落ちる
+ *     (2026-09-05 実測)。形式 0 で書かれる値は非有界か非多様体で、cg にも mf にも表現が無い。 */
 void
 mfMesh::decode_nef3(mfChunkSource &src)
 {
 	uint8_t form = 0;
 	src.pull(&form, 1);
-	if ( form == 1 ) { decode_mesh_exact(src); return; }
-	decodeErr_ = 1;
+	if ( form == 1 ) { decode_mesh_exact(src); return; }   /* NF_FORM_BOUNDARY */
+	/* ★ #3478: NF_FORM_SNC_BND (=2) は [SNC のブロック列][厳密境界]。SNC は読めないが、
+	 *   終端まで読み捨てれば後半は form 1 と同一フレーミングなので同じ経路で読める。 */
+	if ( form == 2 ) {
+		/* ★ #3507: SNC は [u32 blocklen][block]…[u32 0] のブロック列になった。
+		 *   前置された全長で読み飛ばすのではなく、**終端まで読み捨てる**。 */
+		blockframe::ibuf<mfChunkSource> ib(src);
+		if ( ! ib.drain() ) {
+			set_decode_err("the stored SNC frame is corrupt (implausible block length)");
+			return;
+		}
+		decode_mesh_exact(src);
+		return;
+	}
+	/* ★ 2026-09-06: 「非 2-多様体だから」は **もう理由ではない** — nef は marked volume ごとの
+	 *   全シェルから境界を作れるので、有界なら非 2-多様体でも境界を併記する。
+	 *   ここまで来るのは **境界表現がそもそも取れない値** (非有界) だけ。 */
+	set_decode_err("the Nef value is stored as a bare SNC with no boundary section "
+	               "(it has no boundary representation at all — e.g. it is unbounded, "
+	               "like the result of complement), which manifold cannot represent "
+	               "and cannot parse without CGAL");
 }
 
 /* ---- exact→float 2D (cast の cg→mf downgrade): CGAL の PLY2(cgMesh2D 形式・厳密有理数リング)を
@@ -335,6 +359,72 @@ mfMesh::apply_affine(const double e[12])
 }
 
 /* ---- 計測 / 妥当性 ---- */
+/* ---- ★★ #3498: 遅延 CSG 木の評価を **compute() の中へ引き出す** ----------------
+ * 但し書きは全部 mfMesh.h の mfGeom::force_eval に書いた。ここは実装だけ。
+ *
+ * ★ 木の評価結果は @c CsgOpNode の @c cache_ (mutable メンバ) に入るので、ここで
+ *   *コピー越しに* 評価しても本体 m_ が後で使い回せる。⇒ encode() の GetMeshGL64 は
+ *   評価済みの葉を読むだけになり、**総仕事量は増えない**。
+ * ⚠ 逆に言えば「評価がどの段で計上されるか」だけが変わる。測定への影響はそこ。 */
+/* ⚠ manifold の @c ToString(Error) は **MANIFOLD_DEBUG でしか定義されない** (manifold.h)。
+ *   既定ビルドには無いので、名前が要るならこちらで持つ。 */
+static const char *
+mf_error_name(manifold::Manifold::Error e)
+{
+	typedef manifold::Manifold M;
+	switch ( e ) {
+	case M::Error::NoError:                      return "no error";
+	case M::Error::NonFiniteVertex:              return "non-finite vertex";
+	case M::Error::NotManifold:                  return "not manifold";
+	case M::Error::VertexOutOfBounds:            return "vertex out of bounds";
+	case M::Error::PropertiesWrongLength:        return "properties wrong length";
+	case M::Error::MissingPositionProperties:    return "missing position properties";
+	case M::Error::MergeVectorsDifferentLengths: return "merge vectors different lengths";
+	case M::Error::MergeIndexOutOfBounds:        return "merge index out of bounds";
+	case M::Error::TransformWrongLength:         return "transform wrong length";
+	case M::Error::RunIndexWrongLength:          return "run index wrong length";
+	case M::Error::FaceIDWrongLength:            return "face ID wrong length";
+	case M::Error::InvalidConstruction:          return "invalid construction";
+	case M::Error::ResultTooLarge:               return "result too large";
+	case M::Error::InvalidTangents:              return "invalid tangents";
+	case M::Error::Cancelled:                    return "cancelled";
+	}
+	return "unknown error";
+}
+
+int
+mfMesh::force_eval(const pigBreak *brk, const char **why)
+{
+	manifold::ExecutionContext ctx;
+	/* ★ 押し出し口。dtor が返るまでの間だけ、別スレッドの cancel() がここへ届く。
+	 *   登録の時点で既に旗が立っていれば pigBreakHook がその場で撃つので、
+	 *   「destroy が先・計算が後」の順でも取りこぼさない。 */
+	pigBreakHook hook(brk, [&ctx]{ ctx.Cancel(); });
+
+	const Manifold::Error st = m_.WithContext(ctx).Status();
+	if ( st == Manifold::Error::Cancelled ) {
+		if ( why ) *why = "cancelled";
+		return 0;
+	}
+	if ( st != Manifold::Error::NoError ) {
+		if ( why ) *why = mf_error_name(st);
+		return 0;
+	}
+	return 1;
+}
+
+/* ★ #3498: 2D は ExecutionContext を取る口が無い (CrossSection の API に無い)。
+ *   入口で旗を見るだけ = 中断の粒度は op 単位。 */
+int
+mfCross::force_eval(const pigBreak *brk, const char **why)
+{
+	if ( brk != 0 && brk->cancelled() ) {
+		if ( why ) *why = "cancelled";
+		return 0;
+	}
+	return 1;
+}
+
 double mfMesh::op_volume() { return m_.Volume(); }
 double mfMesh::op_area()   { return m_.SurfaceArea(); }
 
@@ -359,7 +449,26 @@ mfMesh::op_nfaces()
 int
 mfMesh::op_valid()
 {
-	return ( m_.Status() == Manifold::Error::NoError && ! m_.IsEmpty() ) ? 1 : 0;
+	/* ★ #3487: 共通定義は ① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い
+	 *   (定義の全文と経緯は src/h/common/meshprops.h の冒頭)。
+	 *   Status()==NoError ∧ !IsEmpty() が見ているのは ①② まで — **Manifold の型不変条件は
+	 *   自己交差を含まない**。実測 (2026-09-05): #3445 の自己交差 tube (体積 52.02 =
+	 *   交差部を二重に数えた値) を cgal / nef / geogram / cherchi は 0 と答えるのに
+	 *   manifold だけが 1 と答えていた。③ を足して揃える。
+	 *   ⚠ ③ の実装は common/meshprops.h (double の述語)。Manifold の座標はもともと
+	 *     double なので、厳密述語を持ち込んでも意味は増えない。 */
+	if ( m_.Status() != Manifold::Error::NoError || m_.IsEmpty() ) return 0;
+	MeshGL64 g = m_.GetMeshGL64();
+	const size_t np = (size_t)g.numProp;
+	const size_t nv = ( np > 0 ) ? g.vertProperties.size() / np : 0;
+	std::vector<double>   c(nv * 3);
+	for ( size_t i = 0 ; i < nv ; ++i )
+		for ( int k = 0 ; k < 3 ; ++k )
+			c[3*i + k] = g.vertProperties[i*np + k];
+	std::vector<uint32_t> t(g.triVerts.begin(), g.triVerts.end());
+	srava_mesh::TriView v(c.empty() ? 0 : &c[0], (int)nv,
+	                      t.empty() ? 0 : &t[0], (int)(t.size()/3));
+	return srava_mesh::self_intersects(v) ? 0 : 1;
 }
 
 int
@@ -667,7 +776,8 @@ mfGeom::create_for_meta(const uint8_t *meta, int len)
 	if ( len == 4 && ::memcmp(meta, "MFC2", 4) == 0 )
 		return thNEW(mfCross,(manifold::CrossSection()));
 	/* ★ Phase D: CGAL の 3D exact mesh "MESH" も受理し、decode 時に有理数文字列→double で Manifold 化
-	 *   (cast("manifold", exactMesh) の損失変換。cg agent 非依存=文字列パースのみ)。 */
+	 *   (cast("mf-mesh3d", exactMesh) の損失変換。cg agent 非依存=文字列パースのみ)。
+	 *   ⚠ 旧 cast("manifold", …) のカーネル名指しは rev4 で廃止 (cast は **目標型名** を取る)。 */
 	if ( len == 4 && ::memcmp(meta, "MESH", 4) == 0 ) {
 		sPtr<mfMesh> m = thNEW(mfMesh,(Manifold()));
 		m->set_mesh_exact_input();
@@ -682,6 +792,12 @@ mfGeom::create_for_meta(const uint8_t *meta, int len)
 	}
 	/* ★ #3433: nef の "NEF3" も受理する。payload 先頭 1 バイトが形式で、境界形式 (=1) なら
 	 *   cg の "MESH" と同一フレーミングなので **CGAL 無しで**読める。SNC (=0) は読めない。 */
+	/* ★★ #3499: 受理するのは **"NEFB" (nef_hybrid) だけ**。#3478 は nef_snc の "NEF3" も
+	 *   受けていたが、それは nef_snc が SNC の後ろに厳密境界を付録として書いていたから
+	 *   成立していた。その付録は encode ごとの to_mesh() が高くつくので撤回し、nef_snc は
+	 *   「常に SNC だけ」へ戻した。nf-mesh3d → mf-mesh3d の変換は **橋モジュール nef_mf.so**
+	 *   が持つ。ここで名乗ったままにすると、橋があるのに mf 側の reader が先に掴んで
+	 *   「読めない」で落ちる。 */
 	if ( len == 4 && ::memcmp(meta, "NEFB", 4) == 0 ) {
 		sPtr<mfMesh> m = thNEW(mfMesh,(Manifold()));
 		m->set_nef3_input();

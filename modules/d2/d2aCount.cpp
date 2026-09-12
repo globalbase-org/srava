@@ -9,6 +9,11 @@
 #include	"d2/c++/d2Shape.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d2aCount_.h"
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] d2/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(d2a_err, "d2")
+
 
 CLASS_TINYSTATE(d2/c++/d2aCount,pig/c++/ptsCalcBody)
 
@@ -62,7 +67,7 @@ d2aCount_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<d2Shape> in = ( na > 0 ) ? sPtr<d2Shape>::d_cast((*args)[0]) : sPtr<d2Shape>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("dcount: needs a d2 shape"))));
+		result = d2a_err(thNEW(stdString,("dcount: needs a d2 shape")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->np()));

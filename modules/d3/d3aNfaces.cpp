@@ -8,6 +8,11 @@
 #include	"d3/c++/d3Mesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d3aNfaces_.h"
+#include	"pig/c++/pigModuleError.h"
+/* ★ #3475: このモジュール専用のエラー生成子 (共有ヘッダを持たないので
+ *   ここで定義する)。文言は "[TAG] d3/op: message" になる。 */
+PIG_DEFINE_MODULE_ERR(d3a_err, "d3")
+
 
 CLASS_TINYSTATE(d3/c++/d3aNfaces,pig/c++/ptsCalcBody)
 
@@ -61,7 +66,7 @@ d3aNfaces_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<d3Mesh> in = ( na > 0 ) ? sPtr<d3Mesh>::d_cast((*args)[0]) : sPtr<d3Mesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nfaces: needs a d3 mesh"))));
+		result = d3a_err(thNEW(stdString,("nfaces: needs a d3 mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->nf()));

@@ -41,6 +41,7 @@
 #include	"pig/c++/ptsMediator.h"           /* 通信抽象 (#3406, docs/mediator_design.md) */
 #include	"pig/c++/pigExecBackend.h"        /* 起動方式→Mediator 生成 (具体クラス名を隠す・Phase1-3) */
 #include	"pig/c++/pigModuleRegistry.h"     /* K4: カーネル別キャッシュキーソルト */
+#include	"pig/c++/pigOpEntry.h"           /* ★ #3508: 記述子の out (AK_CACHE / AK_INLINE) */
 #include	"pig/c++/pigModule.h"             /* rev4 B-2: descriptor.codec_tags (継続の型リスト構築) */
 #include	"pig/c++/ptsMediatorPacket.h"     /* Internal 経路の pigData 直渡しパケット (4.3) */
 #include	"ts2/c++/ts2Parallel.h"
@@ -199,6 +200,13 @@ protected:
 	int			inflightClaimed; /* ★ #3419: 自分が in-flight 台帳へ登録した (FIN で外す) */
 	int			gateCredited;    /* ワーカーゲートの credit を取得済み(FIN で gate_release。取得/解放を 1:1 に保つ) */
 	int			gateSeq;         /* ★ #3419: agent の生成通し番号(INI で ptsApp から 1 度だけ貰う)。priority() の元 */
+	/* ★★ #3508 (2026-09-10): **この agent が「生きている cache 値」をいくつ増減させるか** = out - k。
+	 *   out = 自分が作る cache 値の数 (1) ・ k = cache 値になる引数の数。
+	 *   葉 (+1) は生存集合を増やすので後回し、n 項の畳み (-(n-1)) は一気に減らすので最優先。
+	 *   ★ GATE で **入場する直前に数えて置いておく** — priority() はセマフォの中 (application の
+	 *     mutex 下) から呼ばれるので、そこで compact ゲートに触れて yield するわけにいかない。
+	 *     GATE は TS_STATE なので、そこで yield しても状態が再走するだけで安全。 */
+	int			gateDelta;
 	/* ★ #3419 §16.13 (ひさ指摘 2026-08-24): **ゲートを取る位置**。
 	 * 0 = first: 「1 引数が完了 + 残りが begin」で入場 (従来)。上流の計算とストリーム読みを重ねられる
 	 *            → **外部プロセス実行 (CGAL 等) ではこれが正しい**: ディスクから読む時間を隠せる。
@@ -215,6 +223,7 @@ protected:
 	int			gateHadDelay;
 	int			forkFails;       /* fork EAGAIN の連続失敗回数(上限超でようやくエラー) */
 	int			outModule;       /* ★ この agent が起動するカーネル(#3404)。ACT_START で decide_out_module() が設定 */
+	int			extCounted;      /* ★ #3503: 子プロセスを持つ agent として数えたか */
 	/* ★ rev4 Phase B-2b: この agent の **出力型リスト** (CSV)。型ディスパッチ (decide_executor) が絞った
 	 *   単一出力型を継続スタンプに載せる。thNULL = 未設定 (未注釈 op) → 継続は outModule の全型へフォールバック。 */
 	sPtr<stdString>		outTypeList;
@@ -260,12 +269,14 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
     beginResolved   = 0;
     gateCredited    = 0;
     gateSeq         = 0;
+    gateDelta       = 1;   /* 引数の数え上げ前は「葉」と同じ扱い (+1) */
     gateWhenAll     = 0;
     gateT0          = 0;
     gateHadDelay    = 0;
     loadPid         = 0;
     forkFails       = 0;
     outModule       = MODULE_NONE;
+    extCounted      = 0;   /* ★ #3503 */
     i               = 0;
 }
 
@@ -274,14 +285,31 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
 	INSTANCE FUNCTIONS
 ********************************************/
 
-/* ★ #3419 (2026-08-23): ワーカーゲート(stdLimitSemaphore)の待ち行列を並べる優先度。
- * 小さいほど先。生成通し番号の**負値**を返すので、後発 agent ほど先に入場する = LIFO 近似。
- * gateSeq==0 (app 無しの単体テスト) は 0 を返し、全員同値 → 到着順のまま(挙動不変)。
+/* ★ #3419 (2026-08-23) / ★★ #3508 (2026-09-10): ワーカーゲート(stdLimitSemaphore)の待ち行列を
+ * 並べる優先度。**小さいほど先**。
+ *
+ *   GATE_ORDER=delta (既定) … gateDelta = out - k。**その agent が生きている cache 値をいくつ
+ *                              増減させるか**そのもの。葉 (+1) は後回し、畳み (-(n-1)) が最優先。
+ *                              値を返す op (volume 等) は out=0 なので -k になる。
+ *                              同点 (葉どうし・二項どうし) は **セマフォ側の insNeq(0) で LIFO**。
+ *   GATE_ORDER=lifo         … 生成通し番号の負値 = 後発ほど先 (深さ優先の *代理指標*)。対照用。
+ *   GATE_ORDER=fifo         … そもそも priority() が参照されない (末尾追加経路)。
+ *
+ * ★ delta を主キーにしたのは、lifo が狙っている量そのものではないため: 共有部分式のある DAG や
+ *   幅の広い n 項では「どちらを先に食えば解放されるか」を生成順が語らないし、#3500 以降
+ *   gateSeq は木の深さではなく **ソースの記述順**を追っている。
+ * ⚠ 兄弟枝の順序づけ (union(長い木, 短い木) でどちらの枝を先に掘るか) は delta でも決まらない。
+ *   それには部分木の必要ピーク (Sethi-Ullman) が要るが、**節点の局所情報で決まらない**ので
+ *   採らない (ひさ方針 2026-09-10)。入場順で取れるのはここまで、と切っている。
+ *
+ * gateSeq==0 (app 無しの単体テスト) は lifo でも 0 を返し、全員同値 → 到着順のまま(挙動不変)。
  * ⚠ この値は **ゲートが enablePriority=1 のときだけ**使われる。他に priority() を見る生きた経路は
  *   tinyState には無い (tsGC の priority キューは exe() に呼び出し元が無く未使用)。 */
 int
 pigfAgent_::priority(sPtr<tinyState> caller)
 {
+	if ( ptsApp.is_notNull() && ptsApp->gate_order() == PIG_GATE_ORDER_DELTA )
+		return gateDelta;
 	return -gateSeq;
 }
 
@@ -297,12 +325,15 @@ pigfAgent_::compute_arg_hash()
 	const char *opn = ( op != thNULL ) ? op->get_str() : "";
 	for (const char *p = opn; *p; ++p) { h ^= (unsigned char)*p; h *= prime; }
 	/* ★ #3404 / K4: カーネルをキャッシュキーに弁別として混ぜる。同一 op でも異カーネルは byte 内容が
-	 *   異なる(取り違えると誤り)ため。混ぜ値 (salt) は **モジュールレジストリが持つ** — 基準カーネル
-	 *   (cgal) は salt 無しで従来キーを byte 不変に保ち、非基準 (manifold="\x01MFM") だけ混ぜる。
-	 *   これで pigfAgent から MODULE_MANIFOLD の名指しが消える (.so 化 Phase1・byte 完全互換)。 */
+	 *   異なる(取り違えると誤り)ため。混ぜ値 (salt) は **モジュールレジストリが持つ**。
+	 *   ★ #3466 (2026-08-31): ソルトは記述子の申告ではなく「モジュール名 + その .so の指紋」。
+	 *     **例外は無く全モジュールが必ず持つ** (旧実装では cgal/demo/pipe_proximity の 3 本が
+	 *     ソルト無しで同一キャッシュ空間を共有していた)。
+	 *   ★ キーに現れるのは **解決後の outModule** であって、式にどう書かれたかではない。
+	 *     `"cgal"::box` と `box` は同じモジュールに解決されれば同じキーになる (#3467)。 */
 	{
 		const char *salt = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
-		    ? ptsApp->module_registry->hash_salt(outModule) : 0;
+		    ? ptsApp->module_registry->cache_salt(outModule) : 0;
 		if ( salt != 0 )
 			for (const char *p = salt; *p; ++p) { h ^= (unsigned char)*p; h *= prime; }
 	}
@@ -623,6 +654,38 @@ TS_STATE(ACT_pigfAgent_GATE)
 		if ( pig_is_delayed(args[i]) )
 			(void) args[i]->cdr()->car();   /* 子の begin を待つ(未 begin なら yield 再走) */
 
+	/* ★★ #3508: 入場順のキー = **生きている cache 値の増減** を、枠を取る *直前* に数えて置く。
+	 *   k = cache 値になる引数の数。
+	 *     ・継続引数 (delayed) … 必ず cache 値を作るので **無条件に 1**。
+	 *       ⚠ ここで is_cache() を呼んではいけない — compact ゲートで子の完了までブロックする。
+	 *     ・非継続引数        … 既に解決済み (HIT / 単位元 {} / エラー) なので is_cache() で
+	 *                            「実体化された cache 値」と「インライン値 (スカラー・{})」を弁別する。
+	 *   out は 1 とする。⚠ 結果を cache に置かない agent (out=0) は今は区別していない。
+	 *   ★ ここは TS_STATE なので、万一 compact で yield しても GATE が再走するだけで安全
+	 *     (priority() の中では同じことができない = だから前もって数える)。 */
+	{
+		int k = 0;
+		for ( i = 0 ; i < args.length() ; i++ ) {
+			if ( pig_is_delayed(args[i]) )      k++;
+			else if ( args[i]->is_cache() )     k++;
+		}
+		/* ★ out = 自分が作る cache 値の数 (0 or 1)。**記述子の out がそれを言っている** —
+		 *   AK_CACHE なら blob (幾何) ・ AK_INLINE なら値 (体積・面数・ref)。値を返す op は
+		 *   生存集合を増やさないので out=0 で、引数を 1 つ食う volume は -1 = 二項 op と
+		 *   同じ優先度になる (鎖を退役させる向き)。
+		 *   ★ outModule は ACT_START の decide_out_module() で確定済み。op が記述子に無い
+		 *     (OPS dispatch を持たない demo / pipe_proximity 等) 場合は 1 に倒す = 従来と同じ。 */
+		int out = 1;
+		{
+			sPtr<stdString> on = agent_op_name();
+			if ( on != thNULL && ptsApp.is_notNull() && ptsApp->module_registry != thNULL ) {
+				const pigOpEntry *e = ptsApp->module_registry->op_entry(outModule, on->get_str());
+				if ( e != 0 ) out = ( e->out == AK_CACHE ) ? 1 : 0;
+			}
+		}
+		gateDelta = out - k;
+	}
+
 	/* ★ メモリ watermark による入場制限は当面無効(fork 同様デッドロック源)。IF は ptsApplication に残置。 */
 
 	/* 入場(セマフォ取得)。満杯なら gate_get() が yield → release で起こされて GATE 再走。全子 admitted の
@@ -635,9 +698,9 @@ TS_STATE(ACT_pigfAgent_GATE)
 	 * seq=生成通し番号 / order=fifo|lifo。lifo なら seq が降順寄りに並ぶはず。 */
 	if ( ptsApp.is_notNull() && ptsApp->cfg_int("GATE_TRACE") != 0 ) {   /* ★ #3419 §17.3 */
 		sPtr<stdString> on = agent_op_name();
-		::fprintf(stderr, "[gate] enter seq=%d op=%s live=%d order=%s\n",
-		          gateSeq, ( on != thNULL ) ? on->get_str() : "?",
-		          ptsApp->gate_live(), ptsApp->gate_order_lifo() ? "lifo" : "fifo");
+		::fprintf(stderr, "[gate] enter seq=%d delta=%d op=%s live=%d order=%s\n",
+		          gateSeq, gateDelta, ( on != thNULL ) ? on->get_str() : "?",
+		          ptsApp->gate_live(), ptsApp->gate_order_name());
 	}
 	/* ★ #3419 §12.8: 入場したので稼働数を更新し、L_AGENT をゲートへ反映する。 */
 	{
@@ -680,6 +743,10 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 			med = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 			    ? ptsApp->module_registry->backends.make("thread", ifThis, kname)   /* 具体クラス名を隠す (Phase1-3) */
 			    : sPtr<ptsMediator>(thNULL);
+			if ( med.is_notNull() && ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
+				med->set_grace_ms(ptsApp->module_registry->grace_ms(outModule));   /* ★ #3503 */
+				med->set_panic_ms(ptsApp->module_registry->panic_ms(outModule));
+			}
 			if ( med.is_notNull() && med->enable() == 0 ) {
 				if ( ptsApp.is_notNull() ) ptsApp->cache_miss();   /* MISS 計上 (fork 経路と同じ) */
 				return ACT_pigfAgent_HELLO;   /* enable が積んだ TSE_ASSERT 待ち → rDO なし */
@@ -703,7 +770,20 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 		 * decide_out_module() で既に確定済み。opts が無ければ thNULL のまま (enable の既定と同じ)。 */
 		sPtr<pigData> modOpts = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 		    ? ptsApp->module_registry->opts_for(outModule) : sPtr<pigData>(thNULL);
+		/* ★ #3503: 撤収の猶予をここで解決して mediator へ渡す。実効値 (env > module() >
+		 * 記述子) を知っているのは registry で、outModule を知っているのはこの agent。
+		 * mediator はどちらも知らないので、突き合わせはここでやる。 */
+		if ( med.is_notNull() && ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
+			med->set_grace_ms(ptsApp->module_registry->grace_ms(outModule));
+			/* ★ 実行方式で使う口が変わるので **両方渡す** — 同じモジュールでも process なら
+			 *   grace_ms、in-proc なら panic_ms を使う (ひさ指摘 2026-09-07)。 */
+			med->set_panic_ms(ptsApp->module_registry->panic_ms(outModule));
+		}
 		launchFail = ( med == thNULL || med->enable(modOpts) != 0 );
+		/* ★ #3503: 子プロセスを持つ agent として登録 (起動に失敗しても teardown まで
+		 *   子を持ちうるので、enable の成否に関わらず数える)。 */
+		if ( med.is_notNull() && med->is_external() && ptsApp != thNULL && ! extCounted )
+			{ extCounted = 1; ptsApp->ext_agent_add(); }
 		/* ★ med = thNULL にしない (2026-08-11): 起動に失敗した med も destroy → TSE_RETURN を
 		 * 返して畳まれるので、FIN_pigfAgent_MEDWAIT がそれを待って回収する。 */
 		if ( launchFail && med.is_notNull() ) med->destroy();   /* 失敗オブジェクト破棄 */
@@ -1207,6 +1287,11 @@ TS_STATE(FIN_pigfAgent_MEDWAIT)
 			ptsApp->gate_release();
 			gateCredited = 0;
 		}
+		/* ★ #3503: **子プロセスを持つ agent** の数から抜ける。planner の in-proc panic は
+		 *   これが 0 になってから撃つ (でないと生きている子が迷子になる)。
+		 *   ⚠ 判別に agent_pid() を使わない — fork 完了前は 0 なので起動窓の External が
+		 *     in-proc に見える。mediator が構築時から持つ is_external() を見る。 */
+		if ( extCounted ) { extCounted = 0; if ( ptsApp != thNULL ) ptsApp->ext_agent_del(); }
 		ptsApp->agent_leave(ifThis);   /* 生存数 --。0 でプランナーを起こす */
 	}
 	/* ★ §9: 終了時点で手放す。pigfAgent は liveAgents (dedup 台帳) に参照され続け program

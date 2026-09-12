@@ -72,20 +72,21 @@ ocaFillet_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("fillet: needs an OCCT shape"))));
+		result = oca_err(thNEW(stdString,("fillet: needs an OCCT shape")));
 		return;
 	}
 	double r = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
 	if ( r < 0.0 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("fillet: radius must be >= 0"))));
+		result = oca_err(thNEW(stdString,("fillet: radius must be >= 0")));
 		return;
 	}
 		/* ★ 理由の受け皿は **この compute のローカル** (モジュール大域の static を置かない・
 	 * in-proc では複数 op が同居しうるため。ひさ指示 2026-08-26)。 */
 	char why[512];
 	why[0] = '\0';
-out = in->op_fillet(r, why, (int)sizeof why);
+out = in->op_fillet(r, why, (int)sizeof why, &brk_);
 	if ( ! out.is_notNull() ) {
+		if ( (result = oc_abort_err(brk_, "fillet")) != thNULL ) return;   /* ★ #3498 */
 		/* ★ OCCT が例外で失敗した場合はその理由を載せる (ocShape の oc_guard が捕まえている)。
 		 * 例外でなく IsDone()==false の場合は理由が無いので従来の文言。 */
 		char b[600];
@@ -94,7 +95,7 @@ out = in->op_fillet(r, why, (int)sizeof why);
 			::snprintf(b, sizeof b, "fillet: OCCT failed: %s", why);
 			msg = b;
 		}
-		result = thNEW(pigDataError,(thNEW(stdString,(msg))));
+		result = oca_err(thNEW(stdString,(msg)));
 	}
 }
 

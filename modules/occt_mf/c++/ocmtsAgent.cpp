@@ -28,6 +28,7 @@
 #include	"oc/c++/ocShape.h"
 #include	"mf/c++/mfMesh.h"
 #include	"ocm/c++/ocmTriangulate.h"
+#include	"ocm/c++/ocmPolygonize.h"
 #include	"_ts2/c++/ocmtsAgent_.h"
 
 CLASS_TINYSTATE(ocm/c++/ocmtsAgent,pig/c++/ptsGenericAgent)
@@ -48,6 +49,9 @@ static const pigOpEntry OPS[] = {
 	 *     (openvdb_mf の voxelize/isosurface が dx/iso を取るのと同じ)。
 	 *   ★ 出力型は mf-mesh3d = **本物の mfMesh**。名前だけ借りた別クラスではない。 */
 	{ "triangulate", TRI_IN, 2, AK_CACHE, OPWIRE(ocmTriangulate, ocGeom), 0, "(" OC_TYPE ")->mf-mesh3d" },
+	/* ★ #3472: triangulate の **2D 版**。曲線の輪郭を折れ線へ落とす。
+	 *   ★★ cast ではない — 粒度 (defl) が要るため (docs §型変換の規約)。 */
+	{ "polygonize",  TRI_IN, 2, AK_CACHE, OPWIRE(ocmPolygonize, ocGeom), 0, "(" OC2_TYPE ")->mf-cross2d" },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -119,9 +123,10 @@ extern const srava_module_descriptor ocmtsAgent_descriptor = {
 	 *   入力 (BREP) と出力 (MFM3) の **両方の codec を自分で申告する**。
 	 *   実体はどちらも相手側の本物のクラス (ocmCacheCodec.cpp 参照)。 */
 	.provides      = occt_mf_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
+	.cache_version = 1,
 	/* ★ **両側の型を申告する**。新しい型は作っていない — 実体は libsrava_oc / libsrava_mf の
 	 *   本物のクラス (ocShape / mfMesh) なので、in-proc でも d_cast が通る。 */
-	.hash_salt     = "\x01" "OCM",   /* キャッシュキー弁別 */
 	.initialize    = 0,   /* 無し (ocShape::ensure_init は op の入口で呼ぶ) */
 	.configure     = 0,   /* module() の opts は消費しない */
 };

@@ -13,7 +13,7 @@
  *
  * cache 形式 (D_META 4CC "NEF3" / catalog §5.2 の repr_type=2 NEF_SNC 枠):
  *   本体は **CGAL の SNC シリアライズそのもの** ("Selective Nef Complex" テキスト)。
- *   [u32 len][len バイト] のフレーミングで D_CHUNK に載せる。
+ *   [u32 blocklen][block] … [u32 0] のブロック分割フレーミングで D_CHUNK に載せる (#3507)。
  *   ★EPECK でも**厳密に往復する**ことを実測で確認済み (2026-08-16):
  *     - 箱の補集合 (非有界) が非有界のまま復元され、原本と exact に等しい
  *     - 交線の頂点が汚い有理数になる 2 球 union でも symmetric difference が空・体積 17 桁一致
@@ -27,6 +27,7 @@
  *   cgaMeshCodec で境界を読んで SNC を組み直す (cg が作った mesh を Nef として消費できる)。
  */
 #include	"pig/c++/pigData.h"
+#include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<CGAL/Exact_predicates_exact_constructions_kernel.h>
 #include	<CGAL/Surface_mesh.h>
@@ -36,7 +37,7 @@
 /* ★ #3433: このソースは **2 つのモジュール**をビルドする (ひさ方針・混在使用は無いが A/B したい)。
  *     NF_WIRE_SNC    → nef_snc.so    : cache は常に SNC (Nef 本来の表現)
  *     NF_WIRE_HYBRID → nef_hybrid.so : 有界かつ 2-多様体なら厳密境界・それ以外は SNC
- *   ★型名・4CC・module 名・hash_salt を**全て分ける**。@pigTypeRegistry@ は「型名 1 エントリに
+ *   ★型名・4CC・module 名を**全て分ける**。@pigTypeRegistry@ は「型名 1 エントリに
  *   tag 1 つ」= 型↔タグ 1:1 が構造上の不変条件なので、同じ型名で 2 つの 4CC は持てない
  *   (両方ロードすると後から登録した方で上書きされ、先のタグが引けなくなる)。
  *   salt も分けないと、同じ式のキャッシュキーが両モジュールで一致して別形式の cache を取り違える。
@@ -45,13 +46,11 @@
 #  define NF_MODULE_NAME "nef_snc"
 #  define NF_TYPE        "nf-mesh3d"
 #  define NF_TAG         "NEF3"
-#  define NF_SALT        "\x01" "NEF"
 #  define NF_OTHER_TAG   "NEFB"   /* もう一方 (hybrid) の 4CC — reader は両方受ける */
 #elif defined(NF_WIRE_HYBRID)
 #  define NF_MODULE_NAME "nef_hybrid"
 #  define NF_TYPE        "nfb-mesh3d"
 #  define NF_TAG         "NEFB"
-#  define NF_SALT        "\x01" "NFB"
 #  define NF_OTHER_TAG   "NEF3"   /* もう一方 (snc) の 4CC — reader は両方受ける */
 #else
 #  error "define NF_WIRE_SNC or NF_WIRE_HYBRID"
@@ -62,9 +61,55 @@
  *   ★これは **cgal.so / manifold.so とも共有する安定契約**。値を変えたら 3 モジュールを揃えること
  *   (cgMesh3D::decode_nef3 / mfMesh::decode_nef3 が同じ定数を inline 再現している)。 */
 enum {
-	NF_FORM_SNC      = 0,   /* [u32 len][SNC テキスト]  — Nef 本来の表現 (非有界/低次元も運べる) */
-	NF_FORM_BOUNDARY = 1    /* cgaMeshCodec の厳密境界   — cg の "MESH" と同一フレーミング */
+	NF_FORM_SNC      = 0,   /* [u32 blocklen][block]…[u32 0] の SNC テキスト (#3507)
+	                         *   — Nef 本来の表現 (非有界/低次元も運べる)。
+	                         *   ★ 旧形式は先頭に全長を置く [u32 len][SNC] だったが、それは
+	                         *     書き手に全文を一度作らせる = 一時領域を強制していた。
+	                         *     ブロック化で一時領域は固定 1 MiB・総量の上限も消えた。 */
+	NF_FORM_BOUNDARY = 1,   /* cgaMeshCodec の厳密境界   — cg の "MESH" と同一フレーミング */
+	/* ★ #3478: [SNC のブロック列][厳密境界] — SNC が先で、その後ろに境界を **足した**形。
+	 *   ★★ #3499 (2026-09-07): **この形式を使うのは nef_hybrid だけ**になった。nef_snc が
+	 *     これを使っていた理由 (下記) は、付録のために **encode ごとに to_mesh() が走る**
+	 *     という実時間の代償に見合わなかったので撤回した。nef_snc は常に NF_FORM_SNC を書き、
+	 *     他カーネルへ渡す口は橋モジュール nef_cg.so / nef_mf.so が持つ (cast のときだけ払う)。
+	 *     hybrid にとってこの形式は今も必要 — 「2-多様体でない値でも境界を併記する」ための
+	 *     もので、そちらは to_mesh() を元から毎回呼んでいるので追加の代償が無い。
+	 *   以下は #3478 当時の設計理由 (hybrid にはそのまま当てはまる):
+	 *
+	 *   なぜ足すのか: cast("mf-mesh3d", x) は設計上 **目標型を産出できるモジュール (manifold) へ
+	 *   振られ、異カーネル 4CC を読むのは行き先の reader** という分担になっている
+	 *   ("op sig がディスパッチの唯一の真実")。ところが SNC のパースには CGAL が要り、
+	 *   manifold.so は CGAL 非依存 (GPL 非汚染) を設計として守っているので、行き先に
+	 *   reader を足すことができない。⇒ **産出側が読める形を供給する**しかない。
+	 *
+	 *   なぜ SNC が先か: 後続の境界を読み飛ばすには終わりが分かる必要がある。SNC は
+	 *   ブロック列の終端 [u32 0] で自己記述しているが、境界形式は終わりを自己記述しない。
+	 *   順序を逆にすると **nef 自身が自分の SNC に到達できなくなる**。
+	 *
+	 *   ★ 2026-09-06: **nef_hybrid もこの形式を使う**ようになった。あちらが SNC で書くのは
+	 *   「有界でも 2-多様体でもない値」ではなく「**境界表現を取れない値**」であるべきで、
+	 *   両者は一致しない — @to_mesh@ は 2-多様体でなくても marked volume ごとの全シェルから
+	 *   境界を作れる (@volume@ / @export@ が通っているのはこの経路)。以前は is_simple() で
+	 *   切っていたため、**境界を持てる値まで読めない形で書かれていた**
+	 *   (3 球の XOR は 4 つの塊が稜で接するので is_simple()=false)。
+	 *   ⚠ hybrid が境界 **だけ** で書けるのは 2-多様体のときに限る。境界だけを書き戻すと
+	 *     内部の仕切り面が消え、@convex_decomposition@ の結果が 1 塊に化ける
+	 *     (点集合は同じでも @nparts@ / @part@ の答えが変わる = 値が変わる)。
+	 *     ⇒ 2-多様体でない値は SNC を本体・境界を付録として **両方**書く。 */
+	NF_FORM_SNC_BND  = 2
 };
+
+/* ★ #3499: 幾何クラスは **libsrava_nf_<変種>.so に 1 つだけ**あり、nef_<変種>.so と橋モジュール
+ *   (nef_cg.so / nef_mf.so) がその実体を共有する。ところが nef_*.so は HIDDEN でビルドされる
+ *   (同一ソースの 2 変種で記述子シンボルが衝突するため) ので、放っておくと **モジュール側の TU が
+ *   vtable/typeinfo の hidden な複製を持ち**、共有ライブラリの実体と別物になって
+ *   `d_cast` が null を返す (macOS の nef 38 本落ちと同じ機序・#3433)。
+ *   ⇒ 幾何クラスだけは **-fvisibility=hidden を明示的に打ち消す**。 */
+#if defined(_WIN32) || defined(__CYGWIN__)
+#  define NF_PUBLIC
+#else
+#  define NF_PUBLIC	__attribute__((visibility("default")))
+#endif
 
 /* codec の Sink/Source 抽象 (cgChunkSink/mfChunkSink と同シグネチャ)。 */
 struct nfChunkSink   { virtual void chunk(const uint8_t *data, int n) = 0; virtual ~nfChunkSink()   {} };
@@ -73,7 +118,7 @@ struct nfChunkSource { virtual void pull (uint8_t *dst, int n)        = 0;
                        virtual ~nfChunkSource() {} };
 
 /* ---- 抽象基底: reader/writer が扱う多態ハンドル (今は 3D のみ・2D は将来) ---- */
-class nfGeom : public pigDataWireTyped {
+class NF_PUBLIC nfGeom : public pigDataWireTyped {
 public:
 	nfGeom(sPtr<pigInfo> i = thNULL) : pigDataWireTyped(i) {}
 	virtual const char* meta_tag()  = 0;   /* D_META 4 バイトタグ "NEF3" */
@@ -93,16 +138,17 @@ public:
 };
 
 /* ---- 3D Nef 多面体 ---- */
-class nfMesh : public nfGeom {
+class NF_PUBLIC nfMesh : public nfGeom {
 public:
 	typedef CGAL::Exact_predicates_exact_constructions_kernel	K;
 	typedef K::Point_3						Point_3;
 	typedef CGAL::Surface_mesh<Point_3>				Mesh;
 	typedef CGAL::Nef_polyhedron_3<K>				Nef;
 
-	nfMesh(sPtr<pigInfo> i = thNULL) : nfGeom(i), boundaryInput_(0), mfm3Input_(0), buildErr_(0) {}
+	nfMesh(sPtr<pigInfo> i = thNULL)
+	    : nfGeom(i), boundaryInput_(0), buildErr_(0), mfm3Input_(0), lastErr_(0) {}
 	nfMesh(const Nef &n, sPtr<pigInfo> i = thNULL)
-	    : nfGeom(i), n_(n), boundaryInput_(0), mfm3Input_(0), buildErr_(0) {}
+	    : nfGeom(i), n_(n), boundaryInput_(0), buildErr_(0), mfm3Input_(0), lastErr_(0) {}
 
 	/* reader が "MESH" タグで作ったときに立てる: decode は SNC でなく厳密境界として読む。 */
 	void set_boundary_input() { boundaryInput_ = 1; }
@@ -137,6 +183,20 @@ public:
 	sPtr<nfMesh> op_difference  (sPtr<nfMesh> o);
 	sPtr<nfMesh> op_complement  ();          /* ★Nef 固有: 結果は非有界になりうる */
 
+	/* ---- アフィン変換 (行優先 double[12] = 3x4。cgMesh3D::apply_affine と同じ規約) ----
+	 * 引数の解釈と行列の組み立ては common/affine.h (カーネル非依存)。ここは適用だけ。
+	 * ★ **Nef のまま** Aff_transformation_3 で変換する (型維持・境界表現へ戻さない)。
+	 *   非有界な Nef も変換できる (CGAL が infimaximal box 側を面倒みる)。
+	 * ⚠ 反射 (det<0) の向き補正は **CGAL の Nef_polyhedron_3::transform が中でやる**。
+	 *   cgMesh3D のように reverse_face_orientations を後から当てる必要は無い
+	 *   (実測 2026-09-05: [0,3]x[0,1]^2 を x 鏡像 → 体積 3 のまま -x 側に移り、
+	 *    後段の union / difference も正しい = 補集合に化けていない)。
+	 *   ★素の頂点書き換えではこうならない — Nef は面の向きを **球面地図の巡回順**で
+	 *   持っており、向きを反転する写像では巡回順も裏返す必要があるため。
+	 * ⚠ 回転の cos/sin は double の近似。EPECK なのは「近似された行列を厳密に適用する」
+	 *   ところまでで、回転そのものが厳密になるわけではない。 */
+	sPtr<nfMesh> apply_affine(const double e[12]);
+
 	/* ---- Minkowski 和 A ⊕ B (#3440) ----
 	 * ★Nef 固有。offset はこの特殊形 (球との和) なので、これがプリミティブ。
 	 *   凸どうしなら頂点対の和の凸包で済むが、凹があると **両者を凸分解して m×n ペア**の和を
@@ -159,6 +219,21 @@ public:
 	 *   この Nef は非有界。@is_simple()@ は「境界が 2-多様体か」であって**有界性ではない**
 	 *   (箱の補集合は非有界だが is_simple() は真で、境界だけ書き出すと体積 8 の箱に化ける)。 */
 	bool is_bounded() const;
+
+	/* ---- 素性を訊く op (#3487) ----------------------------------------------
+	 * ★ **境界表現へ落として測る** (to_mesh)。SNC のまま測れるのは体積くらいで、
+	 *   bbox / 重心 / 表面積 / 自己交差は境界が要る。volume / export と同じ経路。
+	 * ⚠ 非有界 (complement の結果など) と非 2-多様体は to_mesh が失敗する。そのときは
+	 *   0 を返し、**呼び側が明示エラーにする** (黙って 0 や原点を返さない)。
+	 *   ただし valid だけは違う: to_mesh の失敗そのものが「妥当でない」の答えなので 0 を返す。
+	 * ★ valid の定義は 7 カーネル共通で ① 空でない ∧ ② 閉じている ∧ ③ 自己交差が無い。
+	 *   nef では ② が to_mesh の成功 (有界かつ 2-多様体) に、③ が CGAL の厳密述語
+	 *   does_self_intersect に対応する。⚠ **Nef 構築は面どうしの交差を検査しない**ので、
+	 *   自己交差した境界はそのまま SNC に入っている (#3445) — ③ は本当に要る。 */
+	int    op_bbox(double mn[3], double mx[3]);
+	int    op_centroid(double c[3]);
+	int    op_area(double *out);
+	int    op_valid();
 
 	/* ★ 境界メッシュから Nef を作れなかった (自己交差など Nef の前提を満たさない入力)。
 	 *   立てておいて **呼び側が明示エラー** にする。黙って空集合を返さない。 */
@@ -204,6 +279,9 @@ public:
 	/* ---- 境界表現への変換 (volume / export / cache 書き出しの時だけ) ----
 	 * 非有界 (complement の結果など) / 非 2-多様体は false。呼び側がエラーにする。 */
 	bool to_mesh(Mesh &out);
+	/* ★ 直前の to_mesh の失敗理由 (静的文字列)。まだ失敗していなければ null。
+	 *   呼び側 (export など) がそのままエラー文に載せる。 */
+	const char *last_error() const { return lastErr_; }
 	/* Surface_mesh から Nef を作る (leaf op / decode 共通)。 */
 	void set_from_mesh(Mesh &m);
 
@@ -215,6 +293,23 @@ private:
 	int	boundaryInput_;
 	int	buildErr_;
 	int	mfm3Input_;
+	/* ★ #3504: to_mesh が false を返した理由 (静的文字列・null = まだ失敗していない)。
+	 *   write_to → export の失敗はこれまで理由を 1 つの定型文に丸めていたので、
+	 *   「非有界」と「書き出しが空を吐いた」が区別できなかった。 */
+	const char *lastErr_;
 };
+
+/* ★ #3504: to_mesh が失敗した理由を 1 行にする。理由を残していない経路のために既定文を持つ。
+ *   ⚠ 各 op のエラー文に **原因を決め打ちで書かない** こと。以前は全部が「非有界」と
+ *     名指ししていたので、書き出しが空を吐く別の失敗まで「非有界」と嘘をついていた。 */
+inline const char* nf_why(sPtr<nfMesh> m)
+{
+	const char *w = m.is_notNull() ? m->last_error() : 0;
+	return w ? w : "unbounded or non-manifold";
+}
+
+/* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
+ *   素の nfa_err(...) を使うとモジュール名が付かない。 */
+PIG_DEFINE_MODULE_ERR(nfa_err, NF_MODULE_NAME)
 
 #endif

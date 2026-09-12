@@ -1,7 +1,7 @@
 /*
  * modules/nef/manifest.cpp — nef.so の唯一の C エクスポート (#3433 P1)。
  * 記述子本体 (make_agent + OPS) は nftsAgent.cpp が持つ (単一ソース)。ここは公開点だけ。
- * 型登録・hash_salt は記述子 (types/type_tags/hash_salt) から
+ * 型登録は記述子 (provides) から
  * pigModuleRegistry::register_descriptor が行う (#3427)。
  */
 #include	"pig/c++/pigModule.h"

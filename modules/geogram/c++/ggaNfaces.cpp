@@ -62,7 +62,7 @@ ggaNfaces_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ggMesh> in = ( na > 0 ) ? sPtr<ggMesh>::d_cast((*args)[0]) : sPtr<ggMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("nfaces: needs a geogram mesh"))));
+		result = gga_err(thNEW(stdString,("nfaces: needs a geogram mesh")));
 		return;
 	}
 	result = thNEW(pigDataInteger,((INTEGER64)in->nfaces()));

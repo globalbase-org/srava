@@ -69,7 +69,7 @@ mfaPolygon_::compute()
 	sPtr<pigDataArray> pts = ( na > 0 ) ? (*args)[0]->obt_array() : sPtr<pigDataArray>();
 	int np = pts.is_notNull() ? pts->length() : 0;
 	if ( np < 3 ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("polygon: needs >= 3 points [[x,y],...]"))));
+		result = mfa_err(thNEW(stdString,("polygon: needs >= 3 points [[x,y],...]")));
 		return;
 	}
 	std::vector<double> xy;
@@ -78,7 +78,7 @@ mfaPolygon_::compute()
 		/* 要素は obt_array() で取る (配列は要素を eager 解決しないので素の d_cast だと in-proc で null)。 */
 		sPtr<pigDataArray> p = pts->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! p.is_notNull() || p->length() < 2 ) {
-			result = thNEW(pigDataError,(thNEW(stdString,("polygon: each point must be [x,y]"))));
+			result = mfa_err(thNEW(stdString,("polygon: each point must be [x,y]")));
 			return;
 		}
 		xy.push_back(p->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt());

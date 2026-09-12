@@ -21,6 +21,7 @@
 #include	"vd/c++/vdGrid.h"
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"ts2/c++/stdString.h"
+#include	<string>
 #include	"_ts2/c++/vdaOffset_.h"
 
 #include	<openvdb/tools/LevelSetFilter.h>
@@ -81,23 +82,33 @@ vdaOffset_::compute()
 {
 	/* ★ #3441: op 内並列 (TBB) は **op あたり**の予算で走らせる。予算未指定なら素通し。
 	 *   ⚠ 包み忘れるとその op だけ無制限になるので、compute() 単位で一律に包む。 */
-	vd_in_arena([&]{
+	std::string vdwhy;
+	/* ★ #3474 続き: 例外境界。openvdb が投げると受け手が無く、ワーカースレッド
+	 *   由来なら agent ごと死ぬ (vdArena.h の vd_arena_guard 参照)。 */
+	if ( ! vd_arena_guard("offset", [&]{
+
 	vdGrid::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
 	if ( ! in.is_notNull() || ! in->grid() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("offset: needs an openvdb grid"))));
+		result = vda_err(thNEW(stdString,("offset: needs an openvdb grid")));
 		return;
 	}
 	double d = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
 	/* 第 3 引数 (subdiv) は**無視する**。メッシュ系の 3D offset が近似球との Minkowski 和で
 	 * 実装されているためのパラメータで、距離場には近似球が無い (等値面を動かすだけ)。
-	 * パーサが常に 3 引数へ正規化するので受け取りはするが、使わないのが正しい。 */
+	 * ★ #3474 続き (2026-09-05): 記述子で nreq=2 と申告してあるので **省略してよい**
+	 * (以前はパーサが常に 3 引数へ正規化していた)。渡されても使わないのが正しい。 */
 
 	openvdb::FloatGrid::Ptr g = in->grid()->deepCopy();   /* 入力は DAG で共有されうる = 壊さない */
 	if ( d != 0.0 ) {
-		openvdb::tools::LevelSetFilter<openvdb::FloatGrid> f(*g);
+		/* ★ #3498: LevelSetFilter は ctor で interrupter を取り、内部の LevelSetTracker が
+		 *   要所 (2 箇所) で引く。中断されると **途中までしか動いていない格子**が残るので、
+		 *   下で旗を見て捨てる。 */
+		vdBreakScope br(&brk_);
+		openvdb::tools::LevelSetFilter<openvdb::FloatGrid> f(*g, br.ptr());
 		f.offset((float)(-d));   /* ★ srava は d>0 で膨張・OpenVDB は phi に足すと収縮 */
+		if ( (result = vd_abort_err(brk_, "offset")) != thNULL ) return;
 	}
 	out = thNEW(vdGrid,());
 	out->set_grid(g);
@@ -111,7 +122,8 @@ vdaOffset_::compute()
 	 *   ★ この種の「収束しない誤差」は **真値を持たない比較では気づけない** (カーネルどうしが
 	 *   同じ向きに外していると一致してしまう)。 */
 	out->set_normalized(false);
-	});
+	}, vdwhy) )
+		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }
 
 sPtr<pigData>

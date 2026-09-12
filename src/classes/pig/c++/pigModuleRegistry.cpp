@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <climits>
+#include <cstdio>       /* ★ #3466: ソルトの組み立て (snprintf) */
 
 /* pigRefCacheCodec.cpp: 組込モジュール "pig" の記述子 (D_REF codec・カーネル非依存・pig 層)。 */
 extern const srava_module_descriptor *pig_builtin_module_descriptor(void);
@@ -125,6 +126,8 @@ pigModuleRegistry::ensure_ovr(int id)
   if ((size_t)id >= execOvr_v.size()) execOvr_v.resize(id + 1, -1);
   if ((size_t)id >= seq_v.size())     seq_v.resize(id + 1, 0);
   if ((size_t)id >= arityOvr_v.size()) arityOvr_v.resize(id + 1, 0);   /* 0 = 未設定 */
+  if ((size_t)id >= graceOvr_v.size()) graceOvr_v.resize(id + 1, INT_MIN);   /* ★ #3503 未設定 */
+  if ((size_t)id >= panicOvr_v.size()) panicOvr_v.resize(id + 1, INT_MIN);   /* ★ #3503 未設定 */
   if ((size_t)id >= optsOvr_v.size())  optsOvr_v.resize(id + 1);        /* thNULL = 未設定 */
 }
 
@@ -137,6 +140,24 @@ pigModuleRegistry::register_descriptor(const srava_module_descriptor *d)
   descs_v[(size_t)id] = d;
   if ((size_t)id >= descPath_v.size()) descPath_v.resize(id + 1);
   descPath_v[(size_t)id] = loadingPath_;   /* この登録の出所 (.so パス)。組込登録なら空 */
+  /* ★ #3466 (ABI v18): キャッシュキー弁別ソルトをここで 1 回だけ組み立てる。
+   *   "\x01" + 名前 + "\x01" + "v" + cache_version。
+   *   ★ 版番号は **記述子が申告し、計算を変えたら手で上げる** (info.txt の SRAVA_CACHE_FORMAT と
+   *     同じ運用)。.so の size/mtime は使わない — 結果ハッシュがビルドのたびに変わると、
+   *     ビルドするだけで全キャッシュが外れるため。
+   *   ★ 後勝ちで記述子を上書きしたときはソルトも組み直す (同名で別ファイルを指した場合は
+   *     load_file が拒否するので、ここに来るのは同じファイルの再登録か組込の上書きだけ)。 */
+  if ((size_t)id >= salt_v.size()) salt_v.resize(id + 1);
+  {
+    char ver[32];
+    int cv = ( d->cache_version > 0 ) ? d->cache_version : 1;   /* 0 = 未設定 = 1 */
+    ::snprintf(ver, sizeof ver, "v%d", cv);
+    std::string t("\x01");
+    t += d->name;
+    t += '\x01';
+    t += ver;
+    salt_v[(size_t)id] = t;
+  }
   ensure_ovr(id);
   seq_v[(size_t)id] = ++seqN_;             /* ロード順 (後勝ちの tie-break) */
 
@@ -161,7 +182,7 @@ pigModuleRegistry::register_descriptor(const srava_module_descriptor *d)
    *   cg-mesh3d↔MFM3 を焼き込む」は **全行から導出**した場合の話で、writer 行に限れば起きない。
    *   → 派生テーブル types_v は廃止。型軸クエリは記述子の codecs を直読みする。 */
 
-  /* ★ #3439 ④: ソルトも複製しない。hash_salt() が記述子を直読みする。 */
+  /* ★ #3466: ソルトは記述子ではなくここで組み立てる (上の salt_v)。cache_salt() が返す。 */
 }
 
 const srava_module_descriptor *
@@ -297,6 +318,53 @@ pigModuleRegistry::set_exec_default(int module_id, int exec)
   execOvr_v[(size_t)module_id] = exec;
 }
 
+/* ★ #3503: 実効 grace_ms。env > module() > 記述子。
+ * ⚠ env を最優先にしてあるのは **救済**のため — grace=-1 のモジュールが止まらない op に
+ *   入ってハングしたとき、再ビルドせずに抜ける手が要る。測定で 0 に固定する用途も兼ねる。 */
+int
+pigModuleRegistry::grace_ms(int module_id) const
+{
+  const char *e = ::getenv("SRAVA_AGENT_GRACE_MS");
+  if (e != 0 && *e != '\0') return ::atoi(e);
+  if (module_id >= 0 && (size_t)module_id < graceOvr_v.size()
+      && graceOvr_v[(size_t)module_id] != INT_MIN)
+    return graceOvr_v[(size_t)module_id];         /* module() 上書き */
+  const srava_module_descriptor* d = descriptor(module_id);
+  return d ? d->grace_ms : 0;                     /* 未指定 = 0 = 即 kill */
+}
+
+void
+pigModuleRegistry::set_grace_ms(int module_id, int ms)
+{
+  if (module_id < 0) return;
+  ensure_ovr(module_id);
+  graceOvr_v[(size_t)module_id] = ms;
+}
+
+/* ★ #3503: in-proc の abort 猶予。grace_ms と同じ優先順 (env > module() > 記述子)。
+ * ⚠ 既定は 0 = 無効。in-proc のハングは利用者が回復できる (居残る agent が無いので planner を
+ *   kill すれば終わる) 一方、abort はセッション全体を確実に失うので、宣言したモジュールだけが
+ *   撃たれるようにしてある。 */
+int
+pigModuleRegistry::panic_ms(int module_id) const
+{
+  const char *e = ::getenv("SRAVA_INPROC_PANIC_MS");
+  if (e != 0 && *e != '\0') return ::atoi(e);
+  if (module_id >= 0 && (size_t)module_id < panicOvr_v.size()
+      && panicOvr_v[(size_t)module_id] != INT_MIN)
+    return panicOvr_v[(size_t)module_id];         /* module() 上書き */
+  const srava_module_descriptor* d = descriptor(module_id);
+  return d ? d->panic_ms : 0;                     /* 未指定 = 0 = 無効 */
+}
+
+void
+pigModuleRegistry::set_panic_ms(int module_id, int ms)
+{
+  if (module_id < 0) return;
+  ensure_ovr(module_id);
+  panicOvr_v[(size_t)module_id] = ms;
+}
+
 /* ★ モジュール専用の大域データ (ひさ設計 2026-08-26)。registry は **中身を知らない**
  * (stdObject のまま預かるだけ)。モジュールが自分の派生型へ d_cast して使う。 */
 void
@@ -422,13 +490,18 @@ pigModuleRegistry::default_module_name() const
   return bestId < 0 ? "" : name_of_id(bestId);
 }
 
-/* ★ #3439 ④: 派生テーブル salts_v を廃止し記述子を直読み。無効モジュールは 0 (= 基準カーネル扱い)
- *   だが、無効なモジュールへ op が振られること自体が無いので実際には参照されない。 */
+/* ★ #3466 (ABI v17): 記述子の hash_salt を撤廃し、register_descriptor が組み立てた
+ *   「モジュール名 + .so 指紋」を返す。**例外は無い** — 旧実装で cgal / demo / pipe_proximity の
+ *   3 本が 0 (ソルト無し) を申告して同一キャッシュ空間を共有していたのが解消される
+ *   (衝突していなかったのは op 名の接頭辞のおかげで、保証ではなく偶然だった)。
+ *   ⚠ is_enabled は見ない。無効なモジュールへ op が振られること自体が無く、id が生きている限り
+ *     ソルトは同じでなければならない (off→on でキーが変わると warm が落ちる)。 */
 const char *
-pigModuleRegistry::hash_salt(int module_id) const
+pigModuleRegistry::cache_salt(int module_id) const
 {
-  const srava_module_descriptor *d = descriptor(module_id);
-  return (d != 0 && d->hash_salt != 0 && d->hash_salt[0] != '\0') ? d->hash_salt : 0;
+  if (module_id < 0 || (size_t)module_id >= salt_v.size()) return 0;
+  const std::string &t = salt_v[(size_t)module_id];
+  return t.empty() ? 0 : t.c_str();
 }
 
 /* ★ #3439 ④: in-proc 実行体の生成子も記述子走査へ (旧 pigAgentRegistry)。
@@ -684,7 +757,7 @@ pigModuleRegistry::resolve_single_or_named(const char *module) const
  *     よって used_v が 0 = そのモジュール由来の生存オブジェクトは存在し得ない。
  *     ★ types_readable_from_tag が作る create_for_meta のプローブは関数内で解放されるので残らない。
  *
- *   記述子・ops・codecs・wires・hash_salt はすべて .so の中にあるので、dlclose の前に
+ *   記述子・ops・codecs・wires はすべて .so の中にあるので、dlclose の前に
  *   descs_v からも外す。id と名前は残す (再ロードで同じ id を使う)。 */
 void
 pigModuleRegistry::mark_used(int module_id)

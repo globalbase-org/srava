@@ -210,10 +210,18 @@ TS_STATE(ACT_ptsGenericAgent_WAIT)
 		}
 		case C_ARG_END: {
 			const pigOpEntry& e = agent_ops()[opIdx];
-			if ( ( e.variadic ? argv.length() < e.nin : argv.length() != e.nin ) ) {
+			/* ★ #3474 続き: **必須の個数**は nreq (0 = 全部必須 = 従来どおり)。nreq..nin の
+			 *   省略形は通し、既定値は計算本体の compute() が入れる
+			 *   (planner 側 pigfModuleAgent::arg_kind_violation と同じ規則)。 */
+			int req = ( e.nreq > 0 ) ? e.nreq : e.nin;
+			if ( ( e.variadic ? argv.length() < e.nin : argv.length() < req ) ) {
 				char b[160];
-				::snprintf(b, sizeof b, "%s: expected %d argument(s), got %d",
-				           e.op, e.nin, argv.length());
+				if ( req == e.nin )
+					::snprintf(b, sizeof b, "%s: expected %d argument(s), got %d",
+					           e.op, e.nin, argv.length());
+				else
+					::snprintf(b, sizeof b, "%s: expected %d to %d argument(s), got %d",
+					           e.op, req, e.nin, argv.length());
 				err = thNEW(pigDataError,(b));
 				return rDO|ACT_ptsGenericAgent_ERROR;
 			}
@@ -273,11 +281,22 @@ TS_STATE(ACT_ptsGenericAgent_STARTCALC)   /* 全入力が揃った → 計算本
 			 * in-proc/process 同一経路 (process は canonical reader が既に自型へ整えている・in-proc は
 			 * in-memory body を bypass して file 変換)。 */
 			/* 可変長 op (union(a,b,c,…)) の尾部は **最後の配線を繰り返す**。 */
-			const pigWireClass* wf = 0;
+			/* ★ #3469 (ABI v19): 1 スロットは **候補列**。前から順に試し、最初に材料化できた
+			 *   ものを使う。export_vox のようにメッシュとボリューム格子を混ぜて受ける op が
+			 *   「このスロットはこのクラス 1 つ」では表現できないため。
+			 *   ⚠ 候補が 1 個なら従来と完全に同じ挙動 (get_body を 1 回呼ぶだけ)。 */
+			const pigWireClass* const* slot = 0;
 			if ( wr != 0 && wr->nwant > 0 )
-				wf = wr->want[ ( nCache < wr->nwant ) ? nCache : ( wr->nwant - 1 ) ];
+				slot = wr->want[ ( nCache < wr->nwant ) ? nCache : ( wr->nwant - 1 ) ];
 			++nCache;
-			cargs[i] = ic->get_body(wf);
+			if ( slot == 0 || slot[0] == 0 ) {
+				cargs[i] = ic->get_body(0);
+			} else {
+				for ( int k = 0 ; slot[k] != 0 ; ++k ) {
+					cargs[i] = ic->get_body(slot[k]);
+					if ( cargs[i] != thNULL ) break;
+				}
+			}
 			if ( cargs[i] == thNULL ) {
 				/* ★ #3433: 「cache race」と決めつけない。get_body が null になる主因は
 				 *   (a) この形式を欲しい型へ変換できる codec が無い
@@ -285,12 +304,22 @@ TS_STATE(ACT_ptsGenericAgent_STARTCALC)   /* 全入力が揃った → 計算本
 				 *   (c) 本当に cache が壊れている/競合、の 3 つ。入力の自己記述 (describe) と
 				 *   欲しい型を並べて切り分けられるようにする。 */
 				sPtr<stdString> what = ic->describe();
-				char b[320];
-				::snprintf(b, sizeof b,
-				    "%s: input %d: cannot materialize %s as the type this operand is wired to "
-				    "(no codec accepts this format / the value cannot be represented in that type / "
-				    "the producing module stores it in a form the target module cannot parse)",
-				    oe.op, i + 1, what->get_str());
+				/* ★ #3479: 拒否した本人 (モジュールの decode) が書いた理由。あるなら
+				 *   3 択の推測を並べる必要はない — 3 つのうちどれだったかが分かっている。
+				 *   無い場合だけ従来の 3 択文に落ちる (理由を書いていない reader 経路)。 */
+				sPtr<stdString> why = ic->load_error();
+				char b[512];
+				if ( why.is_notNull() )
+					::snprintf(b, sizeof b,
+					    "%s: input %d: cannot materialize %s as the type this operand is "
+					    "wired to: %s",
+					    oe.op, i + 1, what->get_str(), why->get_str());
+				else
+					::snprintf(b, sizeof b,
+					    "%s: input %d: cannot materialize %s as the type this operand is wired to "
+					    "(no codec accepts this format / the value cannot be represented in that type / "
+					    "the producing module stores it in a form the target module cannot parse)",
+					    oe.op, i + 1, what->get_str());
 				err = thNEW(pigDataError,(b));
 				return rDO|ACT_ptsGenericAgent_ERROR;
 			}

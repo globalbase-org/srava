@@ -77,7 +77,7 @@ cgaSection_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<cgMesh> in = ( na > 0 ) ? sPtr<cgMesh>::d_cast((*args)[0]) : sPtr<cgMesh>();
 	if ( ! in.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,("section: missing mesh"))));
+		result = cga_err(thNEW(stdString,("section: missing mesh")));
 		return;
 	}
 	double P[3], N[3];
@@ -91,8 +91,8 @@ cgaSection_::compute()
 	int coplanar = 0;
 	mesh = in->op_section(P, N, mode, &coplanar);   /* 多態: 3D=厳密カット / 2D=null(エラー) */
 	if ( ! mesh.is_notNull() ) {
-		result = thNEW(pigDataError,(thNEW(stdString,(
-		    "section: needs a 3D mesh and a non-degenerate normal"))));
+		result = cga_err(thNEW(stdString,(
+		    "section: needs a 3D mesh and a non-degenerate normal")));
 		return;
 	}
 	/* ★ 3 要素配列仕様(ひさ設計 2026-08-15)の要素判定。パーサが section(m,P,N) を

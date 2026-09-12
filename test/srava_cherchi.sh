@@ -167,11 +167,14 @@ guard)
 	rm -rf "$D-q" ;;
 mfcross)
 	# mf が作った mesh ("MFM3") を ch が読み、混成ブールが純 mf と同値になること。
-	# ★ mf 側のオペランドは **tube** で作る: cherchi は tube を持たないので、cherchi が
-	#   priority 99 でも tube の routing は manifold へ行く。
+	# ★ mf 側のオペランドは **tube** で作る。
+	# ⚠ 2026-09-05: tube を **cherchi 自身も持つ**ようになったので、priority が高いと
+	#   tube が cherchi で走り、この検査が見たい「別カーネルが作った値を読む」状況で
+	#   なくなる (値は一致するので **落ちずに意味だけ失われる**)。生成元を名指しして固定する。
+
 	# ★ 箱は **一般の位置**へずらす: tube の端の蓋 (x=0 の平面) と box の面が同一平面で接すると
 	#   上流の退化条件を踏み、混成と純 mf で値が割れる。
-	TUBE='tube([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
+	TUBE='"manifold"::tube([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
 	BOX='translate(box(1,1,1),[0.5,0.25,0.25])'
 	rm -rf "$D-c" "$D-d"
 	MIX=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="$MF $CH
@@ -200,6 +203,31 @@ cgcross)
 	[ "$VIA" = "$PURE" ] || { echo "FAIL: cg 経由 [$VIA] が純 ch [$PURE] と一致しない"; exit 1; }
 	rm -rf "$D-g" "$D-h"
 	echo "CHERCHI-CGCROSS-OK sphere=[$VIA]" ;;
+threads)
+	# ★ #3481: op 内並列を task_arena で絞れること。
+	#   ⚠ *絞れたか* はここでは見ない — task_arena はスレッドプールを縮めないので、
+	#     効果は CPU 時間 (avg_cores) でしか判らず、ctest の中では機体の混み具合に
+	#     左右されて安定しない。ここで固定するのは **絞っても答えが変わらないこと** と
+	#     **threads の指定が受理されること** (記述子の .configure が配線されている)。
+	rm -rf "$D-t"
+	EXPR='var a = box(2,2,2); var b = translate(box(2,2,2),[1,1,1]);
+	      print("U", volume(a ||| b)); print("I", volume(a &&& b)); print("D", volume(a --- b));'
+	for T in 1 2 0 ; do
+		OUT=$(SRAVA_CACHE_DIR="$D-t$T" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,threads:$T});
+		      $EXPR" "$SRAVA" 2>&1)
+		U=$(echo "$OUT" | sed -n 's/^U //p')
+		I=$(echo "$OUT" | sed -n 's/^I //p')
+		S=$(echo "$OUT" | sed -n 's/^D //p')
+		[ "$(near "$U" 15 1e-9)" = 1 ] || { echo "FAIL: threads:$T の union が $U (期待 15)"; echo "$OUT"; exit 1; }
+		[ "$(near "$I" 1  1e-9)" = 1 ] || { echo "FAIL: threads:$T の intersection が $I (期待 1)"; echo "$OUT"; exit 1; }
+		[ "$(near "$S" 7  1e-9)" = 1 ] || { echo "FAIL: threads:$T の difference が $S (期待 7)"; echo "$OUT"; exit 1; }
+		rm -rf "$D-t$T"
+	done
+	# 記述子が configure を持つこと (配線が外れたら threads: が黙って無視されるので、ここで見る)。
+	INFO=$(SRAVA_MODULE_PATH="$(dirname "$SRAVA")" "$SRAVA" --module-info cherchi 2>&1)
+	echo "$INFO" | grep -q "configure=yes" || {
+		echo "FAIL: 記述子が configure を持っていない (threads: が黙って無視される)"; echo "$INFO"; exit 1; }
+	echo "CHERCHI-THREADS-OK threads=1/2/0 で値が不変・configure=yes" ;;
 *)
 	echo "unknown mode: $MODE"; exit 1 ;;
 esac
