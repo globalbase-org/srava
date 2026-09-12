@@ -20,7 +20,6 @@
 #include "pipe_proximity_adapter.h"
 
 #include <vector>
-#include <functional>
 #include <cstring>
 #include <cstdio>   /* snprintf (エラー文言) */
 #include	"pig/c++/pigModuleError.h"
@@ -244,32 +243,8 @@ static sPtr<pigData> contact_record(const PPContact& c, bool withBody) {
 	return rec;
 }
 
-/* ★ #3502 続き: 中断で打ち切ったならエラー、そうでなければ thNULL。
- * ⚠ 検出 / サンプルは **途中までの列**を返す。「接触が少なかった」「点が少なかった」という
- *   普通の結果と見分けがつかないので、必ずここを通して弾く (計測で踏んだのと同じ形)。 */
-static sPtr<pigData> pp_abort_err(bool cancelled, const char *op) {
-	if ( ! cancelled ) return sPtr<pigData>();
-	char m[160];
-	::snprintf(m, sizeof m, "%s: aborted (interrupted)", op ? op : "pipe_proximity");
-	return sPtr<pigData>(ppa_err(thNEW(stdString,(m))));
-}
-
-/* ★ #3502: pigBreak → アダプタ境界の述語。境界は plain 型のみの約束なので、
- *   pigBreak そのものではなく「訊かれたら答える関数」に包んで渡す。
- *   ⚠ 反復の境界でしか呼ばれないので、std::function の間接呼び出しの費用は問題にならない。 */
-static std::function<bool()> brk_pred(const pigBreak *brk) {
-	if ( brk == 0 ) return std::function<bool()>();
-	return [brk]{ return brk->cancelled() != 0; };
-}
-
-/* PPAdjustResult → {ctrl, iters, energy, clearViolation, feasible}。
- * ★★ #3502: 中断されていたら **エラーを返す**。途中で止めた解は iters / energy / feasible の
- *   どれを見ても「収束が浅いだけの普通の結果」と見分けがつかないので、成功として返すと
- *   set_body されてキャッシュに焼き付き、次回以降それが正しい答えとして引かれる
- *   (#3489 / #3498 と同じ形の事故)。 */
+/* PPAdjustResult → {ctrl, iters, energy, clearViolation, feasible}。 */
 static sPtr<pigData> adjust_result_hash(const PPAdjustResult& r) {
-	if ( r.cancelled )
-		return ppa_err(thNEW(stdString,("pipe_adjust: aborted (interrupted)")));
 	sPtr<pigDataArray> ctrl = thNEW(pigDataArray,());
 	for ( int i = 0 ; i < r.npts ; ++i ) {
 		sPtr<pigDataArray> p = thNEW(pigDataArray,());
@@ -288,7 +263,7 @@ static sPtr<pigData> adjust_result_hash(const PPAdjustResult& r) {
 }
 
 static sPtr<pigData>
-compute_proximity(const char *op, sArray<sPtr<pigData> >& args, const pigBreak *brk)
+compute_proximity(const char *op, sArray<sPtr<pigData> >& args)
 {
 	(void)op;
 	if ( args.length() < 1 )
@@ -319,10 +294,7 @@ compute_proximity(const char *op, sArray<sPtr<pigData> >& args, const pigBreak *
 		reportGap = num(args[2]);
 
 	/* 4) 検出(アダプタ TU 経由) ---- */
-	bool cx = false;
-	std::vector<PPContact> contacts = pipe_proximity_run(flat, npts, r0, m, radial_sr, reportGap,
-	                                                     cS0, cS1, cR, brk_pred(brk), &cx);
-	{ sPtr<pigData> e2 = pp_abort_err(cx, "pipe_proximity"); if ( e2 != thNULL ) return e2; }
+	std::vector<PPContact> contacts = pipe_proximity_run(flat, npts, r0, m, radial_sr, reportGap, cS0, cS1, cR);
 
 	/* 5) PPContact → 配列レコード(単一チェーンは body 番号なし) ---- */
 	sPtr<pigDataArray> out = thNEW(pigDataArray,());
@@ -342,7 +314,7 @@ compute_proximity(const char *op, sArray<sPtr<pigData> >& args, const pigBreak *
  *     ctrl = 調整後の制御点(入力と同じ並び)。そのまま tube / pipe_proximity に渡せる。
  */
 static sPtr<pigData>
-compute_adjust(sArray<sPtr<pigData> >& args, const pigBreak *brk)
+compute_adjust(sArray<sPtr<pigData> >& args)
 {
 	int npts = 0;
 	std::vector<double> flat = parse_ctrl(args.length() >= 1 ? args[0] : sPtr<pigData>(), &npts);
@@ -369,7 +341,6 @@ compute_adjust(sArray<sPtr<pigData> >& args, const pigBreak *brk)
 	sPtr<pigData> pe = check_pins(P, npts, "pipe_adjust");
 	if ( pe != thNULL ) return pe;
 
-	P.cancelled = brk_pred(brk);   /* ★ #3502 */
 	PPAdjustResult r = pipe_adjust_run(flat, npts, r0, m, radial_sr, P, cS0, cS1, cR);
 	return adjust_result_hash(r);
 }
@@ -398,7 +369,7 @@ parse_bodies(sPtr<pigData> a, const char *opname, sPtr<pigData> *e) {
  *   返り = [[gap, pA, pB, normal, sA, sB, rA, rB, bodyA, bodyB], ...]  (body 番号つき)
  */
 static sPtr<pigData>
-compute_scene_proximity(sArray<sPtr<pigData> >& args, const pigBreak *brk)
+compute_scene_proximity(sArray<sPtr<pigData> >& args)
 {
 	if ( args.length() < 1 ) return err("pipe_scene_proximity: needs bodies");
 	sPtr<pigData> e;
@@ -406,9 +377,7 @@ compute_scene_proximity(sArray<sPtr<pigData> >& args, const pigBreak *brk)
 	if ( e != thNULL ) return e;
 
 	double reportGap = ( args.length() >= 2 && args[1] != thNULL ) ? num(args[1]) : 1e9;
-	bool cx = false;
-	std::vector<PPContact> contacts = pipe_scene_proximity_run(bodies, reportGap, brk_pred(brk), &cx);
-	{ sPtr<pigData> e2 = pp_abort_err(cx, "pipe_scene_proximity"); if ( e2 != thNULL ) return e2; }
+	std::vector<PPContact> contacts = pipe_scene_proximity_run(bodies, reportGap);
 
 	sPtr<pigDataArray> out = thNEW(pigDataArray,());
 	for ( size_t i = 0 ; i < contacts.size() ; ++i )
@@ -423,7 +392,7 @@ compute_scene_proximity(sArray<sPtr<pigData> >& args, const pigBreak *brk)
  *   返り = {"ctrl", "iters", "energy", "clearViolation", "feasible"}  (可動 body の調整後 ctrl)
  */
 static sPtr<pigData>
-compute_scene_adjust(sArray<sPtr<pigData> >& args, const pigBreak *brk)
+compute_scene_adjust(sArray<sPtr<pigData> >& args)
 {
 	if ( args.length() < 2 ) return err("pipe_scene_adjust: needs bodies and movableIdx");
 	sPtr<pigData> e;
@@ -437,7 +406,6 @@ compute_scene_adjust(sArray<sPtr<pigData> >& args, const pigBreak *brk)
 	PPAdjustParams P = parse_params(args.length() >= 3 ? args[2] : sPtr<pigData>());
 	sPtr<pigData> pe = check_pins(P, bodies[movableIdx].npts, "pipe_scene_adjust");
 	if ( pe != thNULL ) return pe;
-	P.cancelled = brk_pred(brk);   /* ★ #3502 */
 	PPAdjustResult r = pipe_scene_adjust_run(bodies, movableIdx, P);
 	return adjust_result_hash(r);
 }
@@ -450,7 +418,7 @@ compute_scene_adjust(sArray<sPtr<pigData> >& args, const pigBreak *brk)
  *   返り = [[ [x,y,z], r ], ...]  → そのまま tube(res, segs) に渡せる。
  */
 static sPtr<pigData>
-compute_sample(sArray<sPtr<pigData> >& args, const pigBreak *brk)
+compute_sample(sArray<sPtr<pigData> >& args)
 {
 	int npts = 0;
 	std::vector<double> flat = parse_ctrl(args.length() >= 1 ? args[0] : sPtr<pigData>(), &npts);
@@ -461,10 +429,7 @@ compute_sample(sArray<sPtr<pigData> >& args, const pigBreak *brk)
 	parse_radius(args.length() >= 2 ? args[1] : sPtr<pigData>(), &r0, &m, &radial_sr, &cS0, &cS1, &cR);
 	double pitch = ( args.length() >= 3 && args[2] != thNULL ) ? num(args[2]) : 0.0;
 
-	bool cx = false;
-	std::vector<PPSample> ss = pipe_sample_run(flat, npts, r0, m, radial_sr, pitch,
-	                                           cS0, cS1, cR, brk_pred(brk), &cx);
-	{ sPtr<pigData> e2 = pp_abort_err(cx, "pipe_sample"); if ( e2 != thNULL ) return e2; }
+	std::vector<PPSample> ss = pipe_sample_run(flat, npts, r0, m, radial_sr, pitch, cS0, cS1, cR);
 
 	sPtr<pigDataArray> out = thNEW(pigDataArray,());
 	for ( size_t i = 0 ; i < ss.size() ; ++i ) {
@@ -476,24 +441,13 @@ compute_sample(sArray<sPtr<pigData> >& args, const pigBreak *brk)
 	return out;
 }
 
-/* op で分岐(同一計算本体が検出/調整/シーン/サンプルの各 op を serve)。
- * ★ #3502: 中断できるのは **反復ソルバを回す 2 op だけ** (pipe_adjust / pipe_scene_adjust)。
- *   検出 (proximity) とサンプルは反復を持たないので渡す先が無い。 */
-sPtr<pigData>
-pp_compute_brk(const char *op, sArray<sPtr<pigData> >& args, const pigBreak *brk)
-{
-	if ( op && ::strcmp(op, "pipe_adjust") == 0 )            return compute_adjust(args, brk);
-	if ( op && ::strcmp(op, "pipe_scene_proximity") == 0 )   return compute_scene_proximity(args, brk);
-	if ( op && ::strcmp(op, "pipe_scene_adjust") == 0 )      return compute_scene_adjust(args, brk);
-	if ( op && ::strcmp(op, "pipe_sample") == 0 )            return compute_sample(args, brk);
-	return compute_proximity(op, args, brk);
-}
-
-/* ★ process 版の入口。@c pigplugin::serve が **関数ポインタ**で取るので引数を増やせない
- *   (既定引数では型が変わってしまう)。中断なしで委譲する。
- *   ⚠ process 実行では #3417 の @c DM_CONT_KILL が agent ごと殺すので、これで困らない。 */
+/* op で分岐(同一計算本体が検出/調整/シーン/サンプルの各 op を serve)。 */
 sPtr<pigData>
 pp_compute(const char *op, sArray<sPtr<pigData> >& args)
 {
-	return pp_compute_brk(op, args, 0);
+	if ( op && ::strcmp(op, "pipe_adjust") == 0 )            return compute_adjust(args);
+	if ( op && ::strcmp(op, "pipe_scene_proximity") == 0 )   return compute_scene_proximity(args);
+	if ( op && ::strcmp(op, "pipe_scene_adjust") == 0 )      return compute_scene_adjust(args);
+	if ( op && ::strcmp(op, "pipe_sample") == 0 )            return compute_sample(args);
+	return compute_proximity(op, args);
 }

@@ -84,9 +84,8 @@ ocaFillet_::compute()
 	 * in-proc では複数 op が同居しうるため。ひさ指示 2026-08-26)。 */
 	char why[512];
 	why[0] = '\0';
-out = in->op_fillet(r, why, (int)sizeof why, &brk_);
+out = in->op_fillet(r, why, (int)sizeof why);
 	if ( ! out.is_notNull() ) {
-		if ( (result = oc_abort_err(brk_, "fillet")) != thNULL ) return;   /* ★ #3498 */
 		/* ★ OCCT が例外で失敗した場合はその理由を載せる (ocShape の oc_guard が捕まえている)。
 		 * 例外でなく IsDone()==false の場合は理由が無いので従来の文言。 */
 		char b[600];

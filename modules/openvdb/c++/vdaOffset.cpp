@@ -102,13 +102,8 @@ vdaOffset_::compute()
 
 	openvdb::FloatGrid::Ptr g = in->grid()->deepCopy();   /* 入力は DAG で共有されうる = 壊さない */
 	if ( d != 0.0 ) {
-		/* ★ #3498: LevelSetFilter は ctor で interrupter を取り、内部の LevelSetTracker が
-		 *   要所 (2 箇所) で引く。中断されると **途中までしか動いていない格子**が残るので、
-		 *   下で旗を見て捨てる。 */
-		vdBreakScope br(&brk_);
-		openvdb::tools::LevelSetFilter<openvdb::FloatGrid> f(*g, br.ptr());
+		openvdb::tools::LevelSetFilter<openvdb::FloatGrid> f(*g);
 		f.offset((float)(-d));   /* ★ srava は d>0 で膨張・OpenVDB は phi に足すと収縮 */
-		if ( (result = vd_abort_err(brk_, "offset")) != thNULL ) return;
 	}
 	out = thNEW(vdGrid,());
 	out->set_grid(g);

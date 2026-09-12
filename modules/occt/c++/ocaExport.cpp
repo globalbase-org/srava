@@ -95,9 +95,7 @@ ocaExport_::compute()
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
-	if ( ! mIn->write_to(p, unitS->get_str(), &brk_) ) {   /* ★ #3503 続き */
-		/* ★ 中断も「書けなかった」として返ってくるので、先に旗を見る。 */
-		if ( (result = oc_abort_err(brk_, "export")) != thNULL ) return;
+	if ( ! mIn->write_to(p, unitS->get_str()) ) {
 		char b[256];
 #ifdef SRAVA_OCCT_STEP
 		::snprintf(b, sizeof b, "export: cannot write %s (occt supports step/stp/brep)", p);

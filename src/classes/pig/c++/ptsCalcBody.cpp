@@ -25,7 +25,6 @@
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigData.h"
-#include	"pig/c++/pigBreak.h"   /* #3498: 中断の旗 */
 #include	"ts2/c++/stdEvent.h"
 #include	"_ts2/c++/ptsCalcBody_.h"
 
@@ -51,18 +50,8 @@ public:
 	 * override して「result があればそれ(エラー)、無ければ mesh/cross/geom(本文)」を返す。
 	 * 保存(Writer 起動)は agent が出力 pigDataCache の set_body 経由で行う。 */
 	virtual sPtr<pigData>	get_result();
-
-	/* ★ #3498: 中断の旗を立てる。**public に置くこと** — protected だと tscpp2 が
-	 * interface 側に override を生成せず、glue が impl->tinyState_::destroy() を
-	 * **修飾付き(非仮想)** で呼ぶため、エラーも警告も出ないまま素通りする
-	 * (pigfAgent::priority が同じ罠を踏んだ)。 */
-	virtual void	destroy(int delayFlag=0);
 protected:
 	sPtr<pigData>		result;
-	/* ★ #3498: 走行中の op へ「もう要らない」を伝える旗。派生の compute() が
-	 * ライブラリの中断機構へ **これを渡す** (occt=Message_ProgressIndicator /
-	 * openvdb=InterruptT / manifold=ExecutionContext)。詳細は pigBreak.h。 */
-	pigBreak		brk_;
 	virtual void	compute();
 	TS_DEFARGS
 };
@@ -73,7 +62,6 @@ TS_BEGIN_INTERFACE
 #include	"ts2/c++/sRptr.h"
 #include	"ts2/c++/sArray.h"
 #include	"ts2/c++/stdString.h"
-#include	"pig/c++/pigBreak.h"
 class ptsObject;
 class pigData;
 class stdString;
@@ -94,25 +82,6 @@ sPtr<pigData>
 ptsCalcBody_::get_result()
 {
 	return result;
-}
-
-/* ★ #3498: 中断の入口。**全モジュール共通**でここ 1 箇所。
- *
- * ptsGenericAgent は撤収時に calc->destroy() を撃つ (#3417 でそう配線した)。旧来それは
- * 「calc が畳まれる」だけで、*走行中の compute() には何も届かなかった* — tinyState の
- * 状態遷移は計算が返ってくるまで進まないので、実質「計算が終わるのを待つ」のと同じだった。
- * ここで旗を立てておくと、compute() がライブラリへ渡した中断機構が次のポーリング点で
- * それを見て、ライブラリ側から計算を畳んでくれる。
- *
- * ⚠ **必ず基底を呼ぶ** (ひさ 2026-09-06)。ここで止めると tinyState の終了シーケンスが
- *   始まらず、撤収そのものがハングする。
- * ⚠ 旗は立てるだけで、compute() を待たない。待つのは従来どおり ptsGenericAgent の
- *   ACT_CALC (「子へ destroy を送り TSE_RETURN が戻るのを待ち続ける」) の仕事。 */
-void
-ptsCalcBody_::destroy(int delayFlag)
-{
-	brk_.cancel();
-	TS_BASECLASS::destroy(delayFlag);
 }
 
 /* 基底は no-op(派生 cgaBox 等が override)。 */

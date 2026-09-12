@@ -85,13 +85,6 @@ public:
 	int			agent_count();              /* 現在の生存数 */
 	void			set_agentError(sPtr<pigData> e);  /* エラー集約(先勝ち)+ 全 agent を起こす */
 	sPtr<pigData>		get_agentError();           /* 集約済みエラー(無ければ thNULL) */
-	/* ★ #3417 (2026-09-06): 生存中の全 agent へ **destroy を撃つ**。
-	 *   set_agentError の wake-all と対になる操作で、あちらが「起こして自分で畳ませる」のに対し
-	 *   こちらは「畳めと要求する」。撤収が始まったのに countAgent が下がらないとき
-	 *   (planner の WAITAGENTS) に使う。
-	 *   ⚠ destroy() は冪等なので二度撃っても害は無いが、既に is_destroyed() のものは飛ばす
-	 *     (set_agentError の走査と同じ流儀)。 */
-	void			destroy_agents();
 	/* ★ agent のエラーを **記録だけ**する (2026-08-26・ひさ提案)。
 	 * set_agentError は「最初の 1 件」しか保たない (先勝ち) ので、**落ちた本人の理由が
 	 * 傍観者の汎用エラーに負けて消える**ことがあった。async の continue-and-collect と同じく
@@ -147,23 +140,6 @@ public:
 	 * in-proc は planner に含まれるので pid=0 は無視する。 */
 	void			load_pid_add(uint32_t pid);
 	void			load_pid_del(uint32_t pid);
-
-	/* ★★ #3503 (ひさ設計 2026-09-07): **in-proc 居座りの panic は planner が撃つ**。
-	 *
-	 * in-proc の実行体が destroy に応じないと、その mediator は永久に TSE_RETURN を待つ。
-	 * 殺せる子プロセスが無いので抜ける道は abort しか無いが、⚠ **mediator が自分で
-	 * abort してはいけない** — in-proc と process は同居するので、そのとき生きている
-	 * agent プロセスが全部迷子になる (子は setpgid で別プロセスグループに居るので
-	 * 端末のシグナルも届かない = #3417 が潰した居残りに戻る)。
-	 *
-	 * ⇒ mediator は **PE_PANIC のエラーを set_agentError で上げるだけ** (撤収の指標を
-	 *   get_agentError() 1 本にした #3417 の流儀に乗る)。planner (WAITAGENTS) が
-	 *   その種別を見分け、**子プロセスを持つ agent が 0** になってから撃つ。
-	 * ⚠ 権威は load 制御の pid 表ではない (あちらは #3419 の集計用で、起動失敗や pid 登録前の
-	 *   窓を表していない)。pigfAgent が med->is_external() を見て数える。 */
-	void			ext_agent_add();
-	void			ext_agent_del();
-	int			ext_agent_count();
 	/* ★ #3419 §14.9: in-proc agent は planner と同一アドレス空間で RSS では区別できないので
 	 * **数える** (契機は ptsMediatorInternal の enable/teardown)。 */
 	void			load_inproc_add();
@@ -250,7 +226,6 @@ protected:
 	int			gateLifo;      /* ★ ゲート待ち行列を priority 順にしたか (fifo 以外なら 1) */
 	int			gateOrder;     /* ★★ #3508: PIG_GATE_ORDER_* (fifo / lifo / delta) */
 	sArray<uint32_t>	loadPids;     /* ★ #3419: 稼働中の agent プロセス pid */
-	int			extAgentN;    /* ★ #3503: 子プロセスを持つ agent の数 */
 	unsigned		loadN;        /* 稼働中 agent 数 (§12.8: 種別で分けない) */
 	unsigned		loadPeak;     /* ★ その走行での同時 agent 数の最大 (サマリ用) */
 	unsigned		loadInproc;   /* ★ #3419 §14.9: うち in-proc で走っている数 */
@@ -317,7 +292,6 @@ ptsApplication_::ptsApplication_(TS_ARGS0)
     loadN = 0;
     loadPeak = 0;
     loadInproc = 0;
-    extAgentN  = 0;   /* ★ #3503 */
     gateSem = thNEW(stdLimitSemaphore,(cap));   /* limit=cap(固定)・count=生存 agent 数。待ち行列内蔵。 */
     /* ---- ★ #3419 (2026-08-23): ゲートの**入場順序**。既定は従来どおり先着順(FIFO)。
      *   SRAVA_GATE_ORDER=lifo で待ち行列を priority() 順にする(tinyState #3449 の enablePriority)。
@@ -588,21 +562,6 @@ ptsApplication_::set_agentError(sPtr<pigData> e)
 	int first = ( agentError == thNULL );
 	if ( first )                   /* 先勝ち(最初のエラーを保持) */
 		agentError = e;
-	/* ★★ #3503: **PE_PANIC だけは先勝ちを覆す**。
-	 *
-	 * panic は必ず *撤収の途中*で起きる (in-proc の実行体が destroy に応じないと分かるのは
-	 * 撤収を始めた後だから)。⇒ その時点で agentError には既に撤収の理由
-	 * ("interrupted by SIGINT" 等) が入っており、先勝ちのままだと **panic が捨てられて
-	 * planner が永久に待つ**。実際そうなっていた (#3503 の実装中に踏んだ)。
-	 *
-	 * ⚠ 上書きしてよいのは「利用者に見せる理由」ではなく **終わり方が変わる**から。
-	 *   通常の撤収は「全 agent が畳まれたら CLEANUP」で終わるが、panic は
-	 *   「子プロセスを持つ agent が 0 になったら abort」で終わる。行き先が違う以上、
-	 *   最初の理由を保持したままでは planner が分岐を選べない。
-	 * ⚠ panic どうしの上書きはしない (2 本目が固まっても理由は変わらない)。 */
-	if ( ! first && e != thNULL && e->is_panic()
-	  && ( agentError == thNULL || ! agentError->is_panic() ) )
-		agentError = e;
 	wakeup();                      /* プランナー(=自分)を起こす */
 	if ( first ) {
 		/* 生存中の全 agent を起こす。各 agent は待ち状態頭の SHOULD_ABORT で撤収(agent kill+FIN)。
@@ -616,14 +575,6 @@ ptsApplication_::set_agentError(sPtr<pigData> e)
 /* agent のエラーを記録だけする (起こさない・撤収トリガにしない)。
  * ★ 同一文言は畳む: 撤収で多数の agent が同じ "aborted" を出すので、そのまま溜めると
  *   末尾の列挙が同じ行で埋まる。★ 上限も置く (壊れ方が「大量出力」にならないように)。 */
-void
-ptsApplication_::destroy_agents()
-{
-	for ( int i = 0 ; i < liveAgents.length() ; ++i )
-		if ( liveAgents[i].is_notNull() && ! liveAgents[i]->is_destroyed() )
-			liveAgents[i]->destroy();
-}
-
 void
 ptsApplication_::record_agentError(sPtr<pigData> e)
 {
@@ -884,29 +835,6 @@ ptsApplication_::load_inproc_del()
 {
 	if ( loadInproc > 0 ) loadInproc--;
 	if ( load_control != thNULL ) load_control->set_inproc(loadInproc);
-}
-
-
-/* ★ #3503: **子プロセスを持つ** agent の生死 (pigfAgent が med->is_external() を見て呼ぶ)。
- * planner の in-proc panic はこれが 0 になってから撃つ。 */
-void
-ptsApplication_::ext_agent_add()
-{
-	extAgentN++;
-}
-
-void
-ptsApplication_::ext_agent_del()
-{
-	if ( extAgentN > 0 ) extAgentN--;
-	/* 最後の 1 つが畳まれたら planner を起こす — panic 待ちの WAITAGENTS がそれで進む。 */
-	if ( extAgentN == 0 ) wakeup();
-}
-
-int
-ptsApplication_::ext_agent_count()
-{
-	return extAgentN;
 }
 
 void

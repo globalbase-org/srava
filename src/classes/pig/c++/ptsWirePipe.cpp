@@ -51,17 +51,6 @@
 /* write_record の release 用に pico state を 1 つ増やす(psINI=0, psDO=1 の次)。 */
 enum { psDO2 = psDO + 1 };
 
-/* ★ #3417 (2026-09-06): 相手が消えた (read の EOF) を親へ知らせる。
- *   ⚠ **W_END と別の type** にする。W_END は「もう送るものは無い」= 正常で、planner は
- *     要求と同時に必ず送る。撤収の合図に使うと正常実行が壊れる (pigwire.h の W_EOF 参照)。
- *   ⚠ payload は無い。読み手は type だけを見る。 */
-#define WP_POST_EOF()	\
-	do {	\
-		if ( parent.is_notNull() )	\
-			parent->eventHandler(thNEW(stdEvent,	\
-				(TSE_PACKET, ifThis, thNEW(ptsWirePacket,(W_EOF, 0, (const uint8_t*)0, 0)))));	\
-	} while (0)
-
 CLASS_TINYSTATE(pig/c++/ptsWirePipe,pig/c++/ptsObject)
 
 #if 0
@@ -325,9 +314,6 @@ TS_STATE(ACT_ptsWirePipe_HDR)
 		/* ★ ここへ来るのは **異常** だけ (§7.1)。正常な相手の終端は W_END 番兵で来る。
 		 * 番兵を見ずに EOF(0) を踏んだ = 相手が黙って閉じた/落ちた。read error(<0) と同じく
 		 * errCode を立てて即 FIN する (正常終了 errCode=0 と区別できるようにする)。 */
-		/* ★ #3417: FIN する前に **相手の消失を親へ知らせる**。自分の FIN (TSE_RETURN) だけでは
-		 *   「正常に終わった」と区別が付かず、計算中の実行体に中断が届かなかった。 */
-		WP_POST_EOF();
 		errCode = -1;
 		return rDO|FIN_START;
 	}
@@ -361,23 +347,7 @@ TS_STATE(ACT_ptsWirePipe_DRAIN)   /* 受信終端後: 自分の送信終端 (wen
 {
 	if ( sentEnd )
 		return rDO|FIN_START;   /* 送受信とも終端 → 正常終了 */
-	/* ★★ #3417 (2026-09-06): **ここでも相手の消失を見張る**。
-	 *
-	 *   従来この状態は sentEnd だけを見て `return 0` で座っており、**読み側を一切見ていなかった**。
-	 *   agent は要求 (C_ARG_END + W_END) を受け取った時点でここへ来るので、
-	 *   **計算中はずっと DRAIN に居る**。その間に planner が撤収して stdin を閉じても、
-	 *   読む者が居ないので EOF が誰にも観測されなかった。
-	 *   実測 (2026-09-06): planner が t=470.686 に wfd を閉じたのに、
-	 *   agent 側 pipe は t=468.393 の DRAIN のまま 38 秒沈黙し、計算完了まで気づかなかった。
-	 *
-	 *   ⚠ read_c は EAGAIN で yield する。wend() の wakeup で状態が頭から再走するので、
-	 *     sentEnd の判定が先に来る = 送信終端が済めば読みを待たずに抜けられる。
-	 *   ⚠ 番兵の後にレコードが来るのは規約違反 (相手はもう送らないと宣言している)。
-	 *     読めてしまった場合も異常として扱う。 */
-	int r = rio->read_c(rhdr, WIRE_RECHDR_SIZE);
-	WP_POST_EOF();                   /* r==0 の EOF も、規約違反の受信も「相手が壊れた」 */
-	errCode = -1;
-	return rDO|FIN_START;
+	return 0;                       /* wend() の wakeup で再走する */
 }
 
 TS_STATE(FIN_START)

@@ -71,9 +71,5 @@ ocaValid_::compute()
 		result = oca_err(thNEW(stdString,("valid: needs an OCCT shape")));
 		return;
 	}
-	int v = in->op_valid(&brk_);
-	/* ★ #3498: 中断された検査は 0 (= 妥当でない) を返してくる。それを答えとして通すと
-	 *   「Ctrl+C を押したら形が壊れていることになった」になるので、先に中断を見る。 */
-	if ( (result = oc_abort_err(brk_, "valid")) != thNULL ) return;
-	result = thNEW(pigDataInteger,((INTEGER64)v));
+	result = thNEW(pigDataInteger,((INTEGER64)in->op_valid()));
 }

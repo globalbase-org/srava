@@ -76,16 +76,6 @@ struct srava_module_descriptor {
                                      // module(so,{arity:k}) で上書き可。capability (op ごと・正しさ) と
                                      // policy (モジュールごと・つまみ) の分離がこの設計の核
 
-    // --- 撤収の猶予 (v23 / v24・#3503) ---
-    int               grace_ms;      // **プロセス実行**で中断要求 (EOF) に応じないときの猶予。
-                                     //   0 = 即 kill (既定) / >0 = この ms 待って kill (推奨 500) /
-                                     //  -1 = タイマを張らない (**必ず自分で畳まれる**と宣言した
-                                     //       モジュールだけ)。in-proc には kill 経路が無いので無効
-    int               panic_ms;      // **in-proc** で居座ったとき planner を abort するまでの猶予。
-                                     //  <=0 = 無効 (既定) / >0 = この ms 待って abort。
-                                     //  grace_ms と **対**: 同じモジュールでも process なら grace_ms、
-                                     //  in-proc なら panic_ms を使う
-
     // --- フック (0 可) ---
     void (*initialize)(void);        // §7。**そのモジュールの最初の agent が起きるときに 1 回だけ**。
                                      // TBB の global_control のような「プロセスに 1 度だけ」を置く。
@@ -802,19 +792,9 @@ extern const srava_module_descriptor helatsAgent_descriptor = {
     .provides      = 0,       // 値のみ (幾何型を持たない)
     .cache_version = 1,       // ★ 計算を変えたら手で上げる
     .arity         = 0,       // 0 = 未指定 = 二項
-    .grace_ms      = 0,       // 中断に応じない場合は即 kill (既定)
-    .panic_ms      = 0,       // in-proc の abort は無効 (既定)
     .initialize    = 0,
     .configure     = 0,
 };
-// ★ grace_ms / panic_ms の選び方 (#3503)。**未指定 = 0 = 安全側**なので書き忘れは事故にならないが、
-//    重い op を持つモジュールは中断要求を配線したうえで値を決めること。
-//    - `-1` を名乗れるのは **全 op の全経路**が中断要求を見るモジュールだけ。止まらない経路が
-//      1 つでもあると Ctrl+C で永久ハングする。「op を配線した」ではなく「その op の全経路を
-//      配線した」で判断する (#3502 は主経路だけ配線して後段が残っていた)
-//    - `>0` なら申告が間違っていても代償は遅延だけで、正しさは失われない。迷ったらこちら
-//    - ⚠ 2 つを **同じ値にしない**。猶予切れで失うものが違う — process は agent 1 つだが、
-//      in-proc は **planner ごと落ちてセッション全体**を失う
 // ⚠ **自己登録は書かない**。かつて .so 側の静的初期化が register_agent / register_type /
 //    register_hash_salt でグローバルへ書き込んでいたが (#3427 で撤去)、.so は「誰のレジストリか」を
 //    知らないためプロセス全体の可変 static に書く形にしかならなかった。いまは登録経路が

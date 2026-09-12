@@ -10,7 +10,6 @@
 #include "pipe/proximity.hpp"
 #include "pipe/scene.hpp"
 #include <vector>
-#include <functional>
 
 namespace pipe {
 
@@ -59,12 +58,6 @@ struct CtrlParams {
     int    cdParallel = 0;
     // スレッド上限。0=自動(コア数-2) / 1=直列(スレッド不使用)。cdParallel=0 でも各点の 6 試行を並列化(結果は直列と一致)。
     int    cdThreads  = 0;
-    // ★ #3502: 走行中の中断。ホストが「もう要らない」を答える述語を渡す（空 = 中断しない）。
-    //   反復の境界でだけ呼ばれる（DOF ごとではない）ので、実装は安価でなくてよいが
-    //   **スレッド安全であること**（cdParallel=1 のときワーカーと同じ時間帯に呼ばれうる）。
-    //   ⚠ このライブラリはホスト非依存に保つ約束なので、ここに置くのは述語だけ。
-    //     旗の実体（srava なら pigBreak）は知らない。
-    std::function<bool()> cancelled;
     Params det;              // 検出パラメータ（reportGap は内部で dMin 以上へ）
     // 拡張ラグランジュ（クリアランス gap>=dMin を厳密化）
     int    alOuter  = 1;     // 外ループ回数。1=純ペナルティ（従来）、>1 で乗数更新
@@ -80,11 +73,6 @@ struct CtrlResult {
     bool        constraintsFeasible = true; // 硬拘束（固定＋硬ピン）が両立したか
     double      pinResidual = 0.0;          // 硬拘束の残差ノルム（>tol で実行不能）
     double      maxClearViolation = 0.0;    // max(0, dMin - gap)（拡張ラグランジュで →0）
-    // ★★ #3502: 中断で打ち切ったか。**呼び手はこれを見て結果を捨てること**。
-    //   途中で止めた解は iters / energy / constraintsFeasible のどれを見ても
-    //   「収束が浅いだけの普通の結果」と見分けがつかない。成功として扱うと保存され、
-    //   次回以降それが正しい答えとして引かれる。
-    bool        cancelled = false;
 };
 
 // エネルギー部品（公開：テスト・可視化用）

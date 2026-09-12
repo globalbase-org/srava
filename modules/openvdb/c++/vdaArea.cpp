@@ -76,10 +76,7 @@ vdaArea_::compute()
 		result = vda_err(thNEW(stdString,("area: needs an openvdb grid")));
 		return;
 	}
-	double a = in->op_area(&brk_);
-	/* ★★ #3498: 中断時は途中までの総和。vdaVolume.cpp の同じ箇所の理由を参照。 */
-	if ( (result = vd_abort_err(brk_, "area")) != thNULL ) return;
-	result = thNEW(pigDataFloat,(a));
+	result = thNEW(pigDataFloat,(in->op_area()));
 	}, vdwhy) )
 		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

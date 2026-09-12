@@ -810,9 +810,6 @@ chmod +x model.sra
 
 - **終了コード**: **正常終了は常に `0`**(POSIX)。明示したいときは予約変数 **`EXIT_CODE`**(→ [§9](#組み込み変数-exit_code))
   または **`exit` 文**(→ §2)で上書きする。**エラー終了は `1`・シグナル終了は `128+signum`** が優先(こちらが `EXIT_CODE` を上書く)。
-  ★ **Ctrl+C(SIGINT・`130`)では、計算中の agent へ中断要求が送られてから終了する**(#3417)。
-  応じない agent の扱い(待つ ms / kill / in-proc の abort)は `SRAVA_AGENT_GRACE_MS` /
-  `SRAVA_INPROC_PANIC_MS`(→ [§9.1](#その他の環境変数))と `module(so,{grace,panic})` で決まる。
 - エラーは `ERROR[ファイル名,行番号] メッセージ` 形式で **stderr** に出る。例:
   `ERROR[model.sra,3] volume: 2D has no volume (use area)` / `ERROR[model.sra,2] parse error`。
   行番号はパース時に各ノードへ刻む(`pigInfo`)。agent が計算したエラー(次元不一致など)も、
@@ -1008,8 +1005,6 @@ MALLOC_ARENA_MAX=1 srava model.sra
 | `SRAVA_DIRECT_EXEC` | agent 起動方式。既定(未設定/`0` 以外)は `'#'` 直接 `execvp`(sh 孫を挟まずプロセス半減・teardown が実 agent に直達)、`=0` で従来の `sh -c` に戻す(race 切り分け用)。⚠ **Windows では `=0` は使えない** — `ts2System` の MinGW 実装は `'#'` 始まり(CreateProcess 直起動)**のみ**対応で、それ以外は `-6` を返す。srava も `_WIN32` では無条件に `'#'` を付ける。**切り分け用の逃げ道が Windows では塞がっている**ことに注意 |
 | `SRAVA_MODULE_PATH` | モジュール(`.so`)の**追加**探索パス(`:` 区切り)。既定探索路(実行体同居 dir → install SYSDIR → `~/.config/srava/modules`)に足す。→ [モジュールリファレンス](srava_module_reference.html) |
 | `SRAVA_PATH` | `include` の探索パス(`:` 区切り)。取り込み元 dir の次に探す(§5 の include を参照) |
-| `SRAVA_AGENT_GRACE_MS` | **プロセス実行**の agent が中断要求(EOF)に応じないときの猶予 ms。`0`=即 kill / `>0`=待って kill / `-1`=タイマを張らない。優先順は **env > `module(so,{grace:N})` > 記述子**。⚠ env を最優先にしてあるのは**救済**のため — `grace:-1` を名乗るモジュールが止まらない op に入ってハングしたとき、再ビルドせずに抜ける手が要る |
-| `SRAVA_INPROC_PANIC_MS` | **in-proc** で居座ったとき planner を abort するまでの猶予 ms。`0`(既定)=無効 / `>0`=待って abort。優先順は同上。⚠ **既定を無効にしてある**のは代償が違うため — in-proc のハングは planner を kill すれば終わる(居残る agent が無い)が、abort は**セッション全体を確実に失う** |
 | `PIG_MAX_WORKERS` | **撤去** (2026-08-30)。ワーカーゲートの上限は §9.0.1 の `LOAD_CPU` / `LOAD_AGENT` 一本に集約した。設定しても**無視される**。以前は「静的な天井」として `LOAD_AGENT` (目標値の固定) とは別物・小さい方が効く、と書いていたが、★実装では小さい方が効いておらず (ロード制御が天井を上書きしていた)、さらに旧名が起動 250ms 後に握り潰されていた。**2 つあった上限の口を 1 つにして両方の欠陥を解消した**。移行: `PIG_MAX_WORKERS=N` → **`SRAVA_LOAD_CPU=0 SRAVA_LOAD_AGENT=N`** |
 | `PIG_MEM_MARGIN_MB` | (**現状無効・インタフェースのみ残置**) 空きメモリがこの MB を切ったら新規 agent 起動を保留する OOM 保険の設定値。既定 1024・`0` で無効・空きは `/proc/meminfo`(Linux のみ)。**ただし現在この入場制限は呼び出しを外してあり効かない**(メモリ容量チェックもデッドロック要因になり得るため当面無効化。env のパースと判定関数 `gate_mem_wait()` は将来の整理用に残置)。実効の入場制御は §9.0.1 のワーカーゲート(`LOAD_CPU` / `LOAD_AGENT`)のみ |
 | `PIG_MAX_FILES` | srava が起動時に自前で上げる open-files(RLIMIT_NOFILE)ソフト上限の目標。既定 16384。シェルの低い既定(macOS は 256)に縛られず多数 agent を並列に回すため。ハード上限/カーネル上限(`kern.maxfilesperproc`)を超える分は段階的に下げて設定 |
@@ -1156,7 +1151,6 @@ srava は幾何演算を**外部 agent プロセス**(または in-proc スレ�
 |------|------|
 | `module("manifold.so", {priority:99})` | **priority を上書き** → **既定の幾何カーネルを切替**(priority 最大が既定・★**同値の勝敗は不定**)。ベンチで同一 `.sra` を無改変で両カーネルへ振るのはこれ |
 | `module("so", {exec_default:"process"})` | 実行方式を上書き。**重い op をプロセス実行**(`"thread"`=in-proc スレッド)。CGAL は常に process、Manifold は既定 in-proc |
-| `module("so", {grace:N})` / `{panic:N}` | 中断要求に応じないときの猶予を上書き(ms)。`grace` は**プロセス実行**の kill まで、`panic` は **in-proc** の abort まで。★ **実行方式で使う口が変わる**ので、両方で走りうるモジュールは両方を持たせる。記述子の申告値は `srava --module-info` の `grace=` / `panic=` 行に出る |
 | `module("so")` / `module("so", {})` | **ロードする**(既にロード済みなら記述子の上書きだけ)。★`module` は**ロード順を変えない**(記述子の上書き op であって、ロードとは別物) |
 | `module("so", "off")` | **アンロードする**(`dlclose`)。以後 `module("so", {})` で読み直せる |
 

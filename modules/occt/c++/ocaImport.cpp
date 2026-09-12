@@ -73,11 +73,8 @@ ocaImport_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<stdString> path = ( na > 0 ) ? (*args)[0]->get_str()
 	                                  : sPtr<stdString>(thNEW(stdString,("")));
-	out = ocShape::read_file(path->get_str(), &brk_);   /* ★ #3503 続き */
+	out = ocShape::read_file(path->get_str());
 	if ( ! out.is_notNull() ) {
-		/* ★ 中断されると NbShapes()==0 になり「読めなかった」と見分けがつかない。
-		 *   幾何のせいにする前に旗を見る。 */
-		if ( (result = oc_abort_err(brk_, "import")) != thNULL ) return;
 		/* ★ 部分的に読めた形を黙って返さない。読めなければ明示エラー。 */
 		sPtr<stdString> msg = thNEW(stdString,("import: cannot read as B-rep (occt supports step/stp/brep) "));
 		result = oca_err(msg->add(path));

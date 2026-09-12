@@ -17,12 +17,9 @@
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
-#include	"pig/c++/pigBreak.h"     /* #3498: 中断 (mfGeom::force_eval の但し書きを読むこと) */
 #include	"manifold/manifold.h"
 #include	"manifold/cross_section.h"
 #include	<stdint.h>
-#include	<stdio.h>    /* mf_eval_err の snprintf */
-#include	<string.h>   /* 同 strcmp */
 
 /* codec の Sink/Source 抽象(cgChunkSink/Source と同シグネチャ・CGAL 非依存。将来 cg と共有可)。
  * writer/reader が adapter で実装し、encode/decode が chunk()/pull() 越しに D_CHUNK を直接読み書く。 */
@@ -54,31 +51,6 @@ protected:
 	int  decodeErr_ = 0;
 	const char* decodeWhy_ = 0;
 public:
-	/* ★★ #3498: **遅延 CSG 木をここで評価する**。成功なら 1・中断/破綻なら 0 (+ *why)。
-	 *
-	 * ★ なぜ要るのか — manifold は他の 2 つと **構造が違う**:
-	 *   ① 中断の口が @c ExecutionContext::Cancel() という *こちらから撃つ* 関数しかない
-	 *      (occt / openvdb は「向こうがこちらの旗を見に来る」)。押し出しは pigBreakHook が担う。
-	 *   ② ★**中断を観測できるのは @c Status() だけ**。@c Volume / @c GetMeshGL / @c BoundingBox は
-	 *      評価を強制するが **ctx を一切見ない** (manifold.h の WithContext のコメントに明記)。
-	 *   ③ そして srava では、遅延 CSG 木を実際に評価していたのは **@c encode()**
-	 *      (@c GetMeshGL64) だった — つまり compute() が返った *後*、キャッシュ書き出しの途中。
-	 *      そこは calc が既に畳まれた後なので、中断のしようがない。
-	 *
-	 *   ⇒ **評価点を compute() の中へ引き出す**のがこの関数。#3417 の元 TODO はこれを指していた。
-	 *
-	 * ⚠⚠ これは **測定に影響する変更**。総仕事量は変わらない (評価は 1 回で、木のノードが
-	 *   結果を cache_ に持つので encode 側は再利用するだけ) が、*どの段で計上されるか* が
-	 *   compute へ移る。cold/warm の内訳を測っているベンチはここで数字の内訳が動く。
-	 *   ⇒ bench へ持って行く前に前後を測ること (#3498 の「測定への影響」)。
-	 *
-	 * ⚠ 中断の粒度は **sub-boolean ごと** (common.h)。= *1 個の巨大なブールは止まらない*。
-	 *   n 項の BatchBoolean や木は途中で止まる。
-	 * ⚠ 中断は Manifold にとって **永続的** — 一度 Cancelled になった木は作り直すまで
-	 *   Cancelled のまま。だから中断したら結果を捨ててエラーを返すのが唯一正しい扱いで、
-	 *   「もう一度評価してみる」は無意味 (ctx の cancel も sticky)。 */
-	virtual int force_eval(const pigBreak *brk, const char **why) = 0;
-
 	virtual bool write_to(const char *path, const char *unit) = 0;
 	/* アフィン変換(行優先 double[12]・3D 規約)。2D(mfCross)は XY 2x2 + XY 平行移動だけ使う。 */
 	virtual sPtr<mfGeom> apply_affine(const double e[12]) = 0;
@@ -148,8 +120,6 @@ public:
 	int    op_bbox(double mn[3], double mx[3]);      /* 軸平行 AABB。返り=3 */
 	int    op_centroid(double out[3]);               /* 体積重心(発散定理・GetMeshGL64)。返り=3 */
 
-	virtual int force_eval(const pigBreak *brk, const char **why);   /* ★ #3498 (基底の但し書き参照) */
-
 	virtual bool write_to(const char *path, const char *unit);   /* STL(binary)/OFF(ascii) */
 
 	/* ---- primitive(mf agent の生成 op が使う。cga* の意味論に合わせる)---- */
@@ -206,11 +176,6 @@ public:
 	/* ---- アフィン変換(2D: e[12] の XY 2x2 + XY 平行移動を使う)→ 新 mfCross ---- */
 	virtual sPtr<mfGeom> apply_affine(const double e[12]);
 
-	/* ★ #3498: 2D。CrossSection には ExecutionContext を取る口が **無い**ので、
-	 *   ここでできるのは「入る前に旗が立っていたら走らない」だけ。中断の粒度は op 単位になる。
-	 *   ⚠ 「2D も中断できる」と読まないこと。 */
-	virtual int force_eval(const pigBreak *brk, const char **why);
-
 	virtual bool write_to(const char *path, const char *unit);   /* 2D 出力は当面未対応(false) */
 
 	/* ---- primitive(cga* の 2D 意味論に合わせる)---- */
@@ -239,34 +204,5 @@ sPtr<mfGeom> mf_bool_from_args(sArray<sPtr<pigData> > *args, const char *kind, c
 /* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
  *   素の mfa_err(...) を使うとモジュール名が付かない。 */
 PIG_DEFINE_MODULE_ERR(mfa_err, MF_MODULE_NAME)
-
-/* ★★ #3498: 呼び出し側の定型 — compute() の最後で **遅延木をここで評価する**。
- *   成功なら thNULL・中断/破綻ならエラー値 (呼び手は result へ入れて return するだけ)。
- *
- * ★ **どの op がこれを呼ぶか** — manifold が結果を *遅延* させる op だけ:
- *     union / intersection / difference   (演算子 + ^ - と BatchBoolean)
- *     combine                             (Compose)
- *     translate / rotate / scale / mirror / transform   (Manifold::Transform)
- *   これ以外 (box / sphere / extrude / import / tube …) は **その場で評価済みの葉**を作るので、
- *   呼んでも Status() が即返るだけ = 呼ぶ意味が無い。⚠ ただし「呼んでも害は無い」ので、
- *   遅延する op が将来増えたらそこにも足すこと。判断の根拠は manifold.h の WithContext の
- *   コメント (Deferred ops の一覧) で、**上流の実装詳細**なので版が上がったら読み直す。
- *
- * ⚠ 中断されたら **結果を捨ててエラーを返す**。manifold の中断は木にとって永続的なので、
- *   途中まで評価された木を返すと以後ずっと Cancelled のまま引きずる。加えて、中断を
- *   成功として返すとキャッシュに焼き付いて次回以降 *正しい答えとして引かれる* (#3489 の形)。 */
-static inline sPtr<pigData>
-mf_eval_err(sPtr<mfGeom> g, const pigBreak &brk, const char *op)
-{
-	if ( ! g.is_notNull() ) return sPtr<pigData>();   /* 既に失敗している = 呼び手が扱う */
-	const char *why = 0;
-	if ( g->force_eval(&brk, &why) ) return sPtr<pigData>();
-	char m[192];
-	if ( why != 0 && ::strcmp(why, "cancelled") == 0 )
-		::snprintf(m, sizeof m, "%s: aborted (interrupted)", op);
-	else
-		::snprintf(m, sizeof m, "%s: %s", op, why ? why : "manifold evaluation failed");
-	return sPtr<pigData>(mfa_err(m));
-}
 
 #endif /* MF_MESH_H */

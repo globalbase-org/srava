@@ -119,9 +119,8 @@ SRAVA_MODULE_ALL=1 srava foo.sra   # 環境変数でも同じことができる
 
 ```
 $ srava --module-info occt_mf
-occt_mf  (abi=24 prio=0 /usr/local/lib/srava/modules/occt_mf.so)
+occt_mf  (abi=21 prio=0 /usr/local/lib/srava/modules/occt_mf.so)
     exec_caps=process(0x2)  exec_default=process  make_agent=yes
-    grace=0(kill at once)  panic=off
     arity=0  cache_version=1  import=-  export=-  initialize=no  configure=no
     cache_salt=|occt_mf|v1
     ops (2):

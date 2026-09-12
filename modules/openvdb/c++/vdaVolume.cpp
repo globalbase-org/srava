@@ -74,11 +74,7 @@ vdaVolume_::compute()
 		result = vda_err(thNEW(stdString,("volume: needs an openvdb grid")));
 		return;
 	}
-	double v = in->volume(&brk_);
-	/* ★★ #3498: 計測は **途中までの総和**を返してくる。見た目が普通の数値なので、
-	 *   通すと中断が「小さめの正しい答え」として焼き付く (#3489 と同じ形の事故)。 */
-	if ( (result = vd_abort_err(brk_, "volume")) != thNULL ) return;
-	result = thNEW(pigDataFloat,(v));
+	result = thNEW(pigDataFloat,(in->volume()));
 	}, vdwhy) )
 		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

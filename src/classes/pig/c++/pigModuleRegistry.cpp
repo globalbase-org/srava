@@ -126,8 +126,6 @@ pigModuleRegistry::ensure_ovr(int id)
   if ((size_t)id >= execOvr_v.size()) execOvr_v.resize(id + 1, -1);
   if ((size_t)id >= seq_v.size())     seq_v.resize(id + 1, 0);
   if ((size_t)id >= arityOvr_v.size()) arityOvr_v.resize(id + 1, 0);   /* 0 = 未設定 */
-  if ((size_t)id >= graceOvr_v.size()) graceOvr_v.resize(id + 1, INT_MIN);   /* ★ #3503 未設定 */
-  if ((size_t)id >= panicOvr_v.size()) panicOvr_v.resize(id + 1, INT_MIN);   /* ★ #3503 未設定 */
   if ((size_t)id >= optsOvr_v.size())  optsOvr_v.resize(id + 1);        /* thNULL = 未設定 */
 }
 
@@ -316,53 +314,6 @@ pigModuleRegistry::set_exec_default(int module_id, int exec)
   if (module_id < 0) return;
   ensure_ovr(module_id);
   execOvr_v[(size_t)module_id] = exec;
-}
-
-/* ★ #3503: 実効 grace_ms。env > module() > 記述子。
- * ⚠ env を最優先にしてあるのは **救済**のため — grace=-1 のモジュールが止まらない op に
- *   入ってハングしたとき、再ビルドせずに抜ける手が要る。測定で 0 に固定する用途も兼ねる。 */
-int
-pigModuleRegistry::grace_ms(int module_id) const
-{
-  const char *e = ::getenv("SRAVA_AGENT_GRACE_MS");
-  if (e != 0 && *e != '\0') return ::atoi(e);
-  if (module_id >= 0 && (size_t)module_id < graceOvr_v.size()
-      && graceOvr_v[(size_t)module_id] != INT_MIN)
-    return graceOvr_v[(size_t)module_id];         /* module() 上書き */
-  const srava_module_descriptor* d = descriptor(module_id);
-  return d ? d->grace_ms : 0;                     /* 未指定 = 0 = 即 kill */
-}
-
-void
-pigModuleRegistry::set_grace_ms(int module_id, int ms)
-{
-  if (module_id < 0) return;
-  ensure_ovr(module_id);
-  graceOvr_v[(size_t)module_id] = ms;
-}
-
-/* ★ #3503: in-proc の abort 猶予。grace_ms と同じ優先順 (env > module() > 記述子)。
- * ⚠ 既定は 0 = 無効。in-proc のハングは利用者が回復できる (居残る agent が無いので planner を
- *   kill すれば終わる) 一方、abort はセッション全体を確実に失うので、宣言したモジュールだけが
- *   撃たれるようにしてある。 */
-int
-pigModuleRegistry::panic_ms(int module_id) const
-{
-  const char *e = ::getenv("SRAVA_INPROC_PANIC_MS");
-  if (e != 0 && *e != '\0') return ::atoi(e);
-  if (module_id >= 0 && (size_t)module_id < panicOvr_v.size()
-      && panicOvr_v[(size_t)module_id] != INT_MIN)
-    return panicOvr_v[(size_t)module_id];         /* module() 上書き */
-  const srava_module_descriptor* d = descriptor(module_id);
-  return d ? d->panic_ms : 0;                     /* 未指定 = 0 = 無効 */
-}
-
-void
-pigModuleRegistry::set_panic_ms(int module_id, int ms)
-{
-  if (module_id < 0) return;
-  ensure_ovr(module_id);
-  panicOvr_v[(size_t)module_id] = ms;
 }
 
 /* ★ モジュール専用の大域データ (ひさ設計 2026-08-26)。registry は **中身を知らない**

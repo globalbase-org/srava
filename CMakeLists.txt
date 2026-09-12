@@ -1148,16 +1148,12 @@ target_sources(srava PRIVATE
 #   EXEC_PROCESS 専用 = 2 個目の in-proc thread カーネル境界 (⑤・保留中) を踏まない。
 #   スクリプト側は `module("demo.so",{priority:99})` で demo を既定カーネルにする (opt-in)。
 # ------------------------------------------------------------------
-# ★ #3417 (2026-09-06): demaCompute (ptsCalcBody 派生) を追加。実行体は待ち状態のまま
-#   イベントを受け続け、計算は calc の専用 thread で回す — ppatsAgent + ppaCompute と同じ形。
 tinystate_codegen(demo_ts_codegen
-  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/dematsAgent.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/demaCompute.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/dematsAgent.cpp)
 # ★ INSTALL を付けない = 配布物には入れない (第3モジュールの実証用でテスト専用)。
 srava_add_module(demo_module
   OUTPUT   demo
   SOURCES  modules/demo/dematsAgent.cpp
-           modules/demo/demaCompute.cpp
            modules/demo/demo_compute.cpp
            modules/demo/manifest.cpp
   DEPENDS  pigts_codegen demo_ts_codegen
@@ -1166,34 +1162,6 @@ srava_add_module(demo_module
 # demo.so が dlopen でき記述子 (make_agent 付き) が読めることを検証 (RTLD_NOW 全解決)。
 add_test(NAME srava_module_demo_so
   COMMAND srava_module_probe $<TARGET_FILE:demo_module>)
-
-# ---- ★ #3503: in-proc の居座り panic。d4 (in-proc テストモジュール) の d4_wedge が
-#   中断要求を無視するので、実カーネルでは作れない「in-proc なのに居座る」を再現できる。
-#     off = 既定では panic しない (居座る)
-#     on  = panic するが **子プロセスを迷子にしない** (demo=process 専用と同時に走らせる)
-#   ⚠ RUN_SERIAL — 生きている agent プロセスを数えるので、並行するテストの agent が混ざると誤判定する。
-foreach(_pm off on)
-  add_test(NAME srava_inproc_panic_${_pm}
-    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_inproc_panic.sh $<TARGET_FILE:srava> ${_pm})
-  set_tests_properties(srava_inproc_panic_${_pm} PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/inproc-panic;SRAVA_MODULE_PATH=${CMAKE_BINARY_DIR}"
-    PASS_REGULAR_EXPRESSION "INPROC-PANIC-.*-OK"
-    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|core dumped"
-    RUN_SERIAL TRUE
-    TIMEOUT 120)
-endforeach()
-
-# ★ #3417 (2026-09-06): 撤収 (Ctrl+C 等) の回帰。demo_spin で「計算中の agent」を作り、
-#   SIGINT で短時間に畳まれること・agent が残らないこと・終了コードが 130 になることを見る。
-#   ⚠ demo モジュールが要る (遅い op を持つのは demo だけ。実カーネルには触らない)。
-add_test(NAME srava_teardown_sigint
-  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_teardown.sh $<TARGET_FILE:srava> sigint)
-set_tests_properties(srava_teardown_sigint PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/tdcache-sigint"
-  PASS_REGULAR_EXPRESSION "TEARDOWN-SIGINT-OK"
-  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
-  RUN_SERIAL TRUE
-  TIMEOUT 120)
 set_tests_properties(srava_module_demo_so PROPERTIES
   PASS_REGULAR_EXPRESSION "MODULE_OK name=demo .*make_agent=yes")
 
@@ -1292,7 +1260,6 @@ tinystate_codegen(d4_ts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aMerge.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aNfaces.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aNverts.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aWedge.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4atsAgent.cpp)
 # ★ INSTALL を付けない = テスト専用モジュール (配布物には入れない)。
 srava_add_module(d4_module
@@ -1306,7 +1273,6 @@ srava_add_module(d4_module
     modules/d4/d4aMerge.cpp
     modules/d4/d4aNfaces.cpp
     modules/d4/d4aNverts.cpp
-    modules/d4/d4aWedge.cpp
     modules/d4/d4atsAgent.cpp
     modules/d4/manifest.cpp
   DEPENDS  pigts_codegen d4_ts_codegen
@@ -3471,24 +3437,6 @@ if(SRAVA_MODULE_PIPEPROX)
   #   プロセス起動コストではなく純粋な計算速度差。
   #   ⇒ TIMEOUT は**素で足りていなかったぶんを実態に合わせた**ものであって、
   #     詰まりを TIMEOUT で逃がしているのではない。
-  # ---- ★ #3502: 走行中の中断の単体回帰。
-  #   ★ ここは **vendor だけ**を叩く (pigBreak も tinyState も出てこない) — ライブラリを
-  #     ホスト非依存に保ったこと自体が検査項目。srava 側の橋 (pigBreak → 述語) は
-  #     end-to-end で確かめてある (SIGINT で、走り切るのを待つ場合の数百分の 1 の時間で畳まれる)。
-  # ★★ 2026-09-12 (統合・Linux): 並行部分は **別 TU**。libstdc++ の C++20 版 <atomic> が
-  #   <unistd.h> を引き、その ::pipe(int[2]) が vendor の namespace pipe と衝突するため
-  #   (include の順では直らない・macOS の libc++ では起きない)。理由の全文は
-  #   test/pipeprox_break_thread.h の冒頭。
-  add_executable(test_pipeprox_break test/pipeprox_break_test.cpp
-                                     test/pipeprox_break_thread.cpp)
-  target_include_directories(test_pipeprox_break PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
-  target_link_libraries(test_pipeprox_break PRIVATE pipeprox Threads::Threads)
-  add_test(NAME pipeprox_break COMMAND test_pipeprox_break)
-  set_tests_properties(pipeprox_break PROPERTIES
-    PASS_REGULAR_EXPRESSION "PP-BREAK-OK"
-    FAIL_REGULAR_EXPRESSION "FAIL|PP-BREAK-FAIL|Segmentation|Aborted"
-    TIMEOUT 300)
-
   add_test(NAME srava_pipeprox_vendored_test COMMAND pipeprox_test_pipe)
   set_tests_properties(srava_pipeprox_vendored_test PROPERTIES
     FAIL_REGULAR_EXPRESSION "FAIL:" TIMEOUT 180)
@@ -3627,7 +3575,9 @@ if(SRAVA_MODULE_PIPEPROX)
 
   # ★ Plan A: install は pipe_proximity.so を探索路 (lib/srava/modules) へ置く方式へ (kernel と同じ)。
   #   旧 process バイナリ + .plugin manifest 自動生成は廃止。
-  install(TARGETS pipe_proximity_module LIBRARY DESTINATION lib/srava/modules)
+  #   ⚠ install 規則をここに**書かない** — srava_add_module(... INSTALL) が既に同じ宛先へ出している。
+  #     二重に書くと install ログに "Installing" と "Up-to-date" が 2 行出る (冪等なので実害はないが、
+  #     ログを数えて検算するときに 1 本ぶんずれる)。2026-09-12 に mac から指摘されて撤去した。
 endif()
 
 # ------------------------------------------------------------------
@@ -3813,20 +3763,6 @@ if(SRAVA_MODULE_MANIFOLD)
   target_include_directories(srava_mf PUBLIC ${SRAVA_GEN})
   add_dependencies(srava_mf pigts_codegen mf_ts_codegen gen_srava_parser)
   install(TARGETS srava_mf LIBRARY DESTINATION lib)
-
-  # ---- ★ #3498: Manifold の中断機構がライブラリ層で効くことの単体回帰。
-  #   occt_break / openvdb_break の姉妹。manifold は中断の口が Cancel() (こちらから撃つ) なので、
-  #   **pigBreak の押し出し口 (pigBreakHook) が別スレッドから撃てること**そのものが検査対象。
-  #   ⚠ 「評価点を compute() へ移しても総仕事量は増えない」もここで見ている (項目 4)。
-  add_executable(test_manifold_break test/manifold_break_test.cpp)
-  target_link_libraries(test_manifold_break PRIVATE srava_mf manifold::manifold)
-  target_include_directories(test_manifold_break PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/h)
-  add_test(NAME manifold_break COMMAND test_manifold_break)
-  set_tests_properties(manifold_break PROPERTIES
-    PASS_REGULAR_EXPRESSION "MF-BREAK-OK"
-    FAIL_REGULAR_EXPRESSION "FAIL|MF-BREAK-FAIL|Segmentation|Aborted"
-    TIMEOUT 300)
 
   # op だけを .so に残す (幾何クラスは srava_mf 側)
   list(REMOVE_ITEM MF_KERNEL_SRC ${MF_GEOM_SRC})
@@ -4723,21 +4659,8 @@ if(SRAVA_MODULE_OPENVDB)
   target_compile_definitions(srava_vd PRIVATE SRAVA_VALUE_ONLY)
   target_include_directories(srava_vd PUBLIC
     ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/h)
-
   add_dependencies(srava_vd pigts_codegen vd_ts_codegen gen_srava_parser)
   install(TARGETS srava_vd LIBRARY DESTINATION lib)
-
-  # ---- ★ #3498: OpenVDB の中断機構がライブラリ層で効くことの単体回帰。
-  #   occt_break と同じ理由でここに要る (planner 経由の SIGINT は #3417 の kill が先に効く)。
-  #   ★ 「止まらない」側 (csgUnion) も一緒に固定してある — 上流が中断点を足したら赤くなり、
-  #     vdBreak.h の表と #3498 の記述を直す合図になる。
-  add_executable(test_openvdb_break test/openvdb_break_test.cpp)
-  target_link_libraries(test_openvdb_break PRIVATE srava_vd)
-  add_test(NAME openvdb_break COMMAND test_openvdb_break)
-  set_tests_properties(openvdb_break PROPERTIES
-    PASS_REGULAR_EXPRESSION "VDB-BREAK-OK"
-    FAIL_REGULAR_EXPRESSION "FAIL|VDB-BREAK-FAIL|Segmentation|Aborted"
-    TIMEOUT 300)
 
   srava_add_module(openvdb_module
     OUTPUT   openvdb
@@ -5134,21 +5057,6 @@ if(SRAVA_MODULE_OCCT)
       PASS_REGULAR_EXPRESSION "MODULE_OK name=occt_mf .*make_agent=yes")
   endif()
 
-  # ---- ★ #3498: OCCT の中断機構がライブラリ層で効くことの単体回帰。
-  #   planner 経由の SIGINT (srava_teardown_sigint) では **配線が無くても通ってしまう** —
-  #   occt は EXEC_PROCESS 専用なので #3417 の DM_CONT_KILL が agent ごと殺すため。
-  #   ここでは srava_oc を直接叩き、*算法が自分で戻ってくる*ことを見る。
-  #   ⚠ 時間を見る検査なので閾値は「素の所要に対する比」。TIMEOUT は素の所要の数倍を見込む。
-  add_executable(test_occt_break test/occt_break_test.cpp)
-  target_link_libraries(test_occt_break PRIVATE srava_oc)
-  find_package(Threads REQUIRED)
-  target_link_libraries(test_occt_break PRIVATE Threads::Threads)
-  add_test(NAME occt_break COMMAND test_occt_break)
-  set_tests_properties(occt_break PROPERTIES
-    PASS_REGULAR_EXPRESSION "OCCT-BREAK-OK"
-    FAIL_REGULAR_EXPRESSION "FAIL|OCCT-BREAK-FAIL|Segmentation|Aborted"
-    TIMEOUT 300)
-
   add_test(NAME srava_module_occt_so COMMAND srava_module_probe $<TARGET_FILE:occt_module>)
   set_tests_properties(srava_module_occt_so PROPERTIES
     PASS_REGULAR_EXPRESSION "MODULE_OK name=occt .*make_agent=yes")
@@ -5168,12 +5076,6 @@ if(SRAVA_MODULE_OCCT)
   #   ★ contact = #3490 (2026-09-06)。境界だけで接する立体の融合が空洞を埋めないこと。
   if(SRAVA_MODULE_MANIFOLD)
     list(APPEND _oc_modes tri)
-  endif()
-  # ★ lossy = #3501 (2026-09-07)。BOPAlgo が黙って材料を落とす融合が明示エラーになること
-  #   (かつ、正しい結果を誤検出で潰していないこと)。判定は「occt >= cgal」という
-  #   カーネル間の不変条件なので **cgal が要る** (occt の球は厳密・cgal は内接多面体)。
-  if(SRAVA_MODULE_CGAL)
-    list(APPEND _oc_modes lossy)
   endif()
   foreach(_m IN LISTS _oc_modes)
     add_test(NAME srava_occt_${_m}

@@ -139,17 +139,11 @@ vcaVoxelize_::compute()
 	 *   interiorTest を渡して直す。理由と実測は vd/c++/vdMeshVoxelize.h の冒頭。 */
 	long fellBack = 0;
 	openvdb::FloatGrid::Ptr g =
-	    vd_mesh_to_levelset(points, tris, *xform, (float)openvdb::LEVEL_SET_HALF_WIDTH,
-	                        &fellBack, &brk_);   /* ★ #3498 */
+	    vd_mesh_to_levelset(points, tris, *xform, (float)openvdb::LEVEL_SET_HALF_WIDTH, &fellBack);
 	if ( ! g ) {
-		if ( (result = vd_abort_err(brk_, "voxelize")) != thNULL ) return;   /* ★ #3498 */
 		result = vca_err(thNEW(stdString,("voxelize: meshToLevelSet failed")));
 		return;
 	}
-	/* ★ #3498: meshToVolume は中断されると **途中までの格子**を返すことがある (null とは
-	 *   限らない)。半分だけボクセル化された形をキャッシュへ焼き付けないよう、null でなくても
-	 *   旗を見る。 */
-	if ( (result = vd_abort_err(brk_, "voxelize")) != thNULL ) return;
 	if ( fellBack > 0 )   /* 閉じた向きの揃った曲面ではない = 従来経路で作った (空洞は埋まる) */
 		::fprintf(stderr, "[voxelize] WARN: %ld column(s) with non-zero winding sum "
 		                  "(input is not a closed, consistently oriented surface); "

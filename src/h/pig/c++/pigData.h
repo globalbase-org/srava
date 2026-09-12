@@ -107,8 +107,6 @@ public:
   /* 致命エラーか (planner が in-flight agent を即撤収するか drain するかの判断)。
    * is_error と対の多態述語 (pigDataError が override)。 */
   virtual int is_fatal() { return 0; }
-  /* ★ #3503: in-proc の実行体が destroy に応じない要求 (PE_PANIC)。基底は偽。 */
-  virtual int is_panic() { return 0; }
   /* エラーの **生メッセージ** (前置なし)。ワイヤ/表示の整形をしない素の本文で、pigDataError が
    * override して msg を返す。既定は get_str()。d_cast を使わず多態で取るための述語対
    * (is_cache と同じ流儀。#3406 / 2026-07-30 メモ L651: Mediator が符号化に使う)。
@@ -277,12 +275,7 @@ public:
 enum pigErrClass {
   PE_NORMAL  = 0,   /* 既定。幾何の失敗等 -> drain (走り出した計算は完走させる)      */
   PE_FATAL   = 1,   /* 確定的なプログラム/型エラー -> in-flight agent を即撤収  [FATAL]   */
-  PE_DERIVED = 2,   /* 前段のエラーの写し (プレースホルダ)。集約しない          [DERIVED] */
-  /* ★ #3503: in-proc の実行体が destroy に応じない。**planner が abort する要求**で、
-   * 幾何の失敗ではない。撤収そのものは PE_FATAL と同じく即時だが、行き着く先が違う —
-   * 子プロセスを持つ agent が 0 になった時点で planner が abort する (ptsMediatorInternal /
-   * cgptsPlanner の WAITAGENTS)。⚠ 殺せるスレッドが無いので、これ以外に抜ける道が無い。 */
-  PE_PANIC   = 3
+  PE_DERIVED = 2    /* 前段のエラーの写し (プレースホルダ)。集約しない          [DERIVED] */
 };
 
 /* 属性タグの文字列。★ 属性を **文言に載せる**のは wire を跨げる唯一の手段だから
@@ -309,11 +302,7 @@ public:
   /* ★ 「前段の fatal の写し」は PE_DERIVED なので **偽**を返す。撤収は原因側が既に起動して
    *   いるので、写し側が重ねて起動する必要はない (set_agentError の wake-all を二重に撃たない
    *   という既存の作法と一致する)。 */
-  /* ★ #3503: PE_PANIC も **待つ意味が無い**点では PE_FATAL と同じなので真を返す
-   *   (in-flight agent の即撤収に乗せる)。行き着く先だけが違う — planner が
-   *   子プロセスを持つ agent の消滅を待って abort する。 */
-  virtual int is_fatal() { return cls_ == PE_FATAL || cls_ == PE_PANIC; }
-  virtual int is_panic() { return cls_ == PE_PANIC; }
+  virtual int is_fatal() { return cls_ == PE_FATAL; }
   int err_class() { return cls_; }
   virtual sPtr<stdString> get_str();
   sPtr<stdString> message() { return msg; }

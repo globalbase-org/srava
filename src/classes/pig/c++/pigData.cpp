@@ -1413,23 +1413,6 @@ void pigDataOperatorModule::_start() {
       /* ★ #3436 P4: arity = N' (このモジュールが 1 ノードあたり受け取りたい最大項数・policy)。
        *   2 以上の**有限整数**のみ (「上限なし」は取らない。できるだけ多くやりたければ大きい整数を書く)。
        *   実際の項数は k = min(N', op の sig が申告する N, 群の執行者が許す最大)。 */
-      /* ★ #3503: grace = 撤収の猶予 (ミリ秒)。0=即 kill / >0=猶予つき / -1=graceful のみ。
-       *   ⚠ -1 は「**全 op・全経路が中断要求を見る**」と宣言すること。止まらない経路が
-       *     1 つでもあると Ctrl+C で永久ハングする (process なら居残り・in-proc なら planner ごと)。
-       *     迷ったら >0 — 申告が間違っていても代償は遅延だけで済む。 */
-      sPtr<pigData> gr = opts->get_ix(thNEW(pigDataString, ("grace")));
-      if (gr.is_notNull() && !gr->is_error()) {
-        int g = (int)gr->get_int();
-        if (g < -1) { result = thNEW(pigDataError,
-            ("module: grace must be -1 (graceful only), 0 (kill at once) or a positive number of milliseconds", info)); return; }
-        reg->set_grace_ms(id, g);
-      }
-      /* ★ #3503: panic = in-proc で居座ったときに planner を abort するまでの猶予 (ミリ秒)。
-       *   <=0 = 無効 (既定) / >0 = その時間。grace と対だが **同じ値にしない**のが普通 —
-       *   process の猶予切れは agent 1 つ、in-proc の abort は **セッション全体**を失う。 */
-      sPtr<pigData> pn = opts->get_ix(thNEW(pigDataString, ("panic")));
-      if (pn.is_notNull() && !pn->is_error())
-        reg->set_panic_ms(id, (int)pn->get_int());
       sPtr<pigData> ar = opts->get_ix(thNEW(pigDataString, ("arity")));
       if (ar.is_notNull() && !ar->is_error()) {
         int k = (int)ar->get_int();

@@ -121,20 +121,6 @@ print_module_detail(const srava_module_descriptor *d, const char *cache_salt)
 		         : ( d->exec_default & EXEC_PROCESS ) ? "process" : "-",
 		         d->make_agent ? "yes" : "no");
 	}
-	/* ★ #3503: 撤収の猶予。**記述子の申告値**を出す (module(so,{grace/panic}) や env での
-	 *   上書きはここに現れない — この表示は「その .so が何と言っているか」であって
-	 *   実行時の実効値ではない。実効値は registry が env > module() > 記述子 で解決する)。
-	 *     grace: 0=即kill / >0=その ms だけ待って kill / -1=graceful のみ (kill しない)
-	 *     panic: 0=無効 / >0=in-proc で居座ったとき planner を abort するまでの ms */
-	{
-		char g[32], pn[32];
-		if ( d->grace_ms < 0 ) ::snprintf(g,  sizeof g,  "graceful-only");
-		else if ( d->grace_ms == 0 ) ::snprintf(g, sizeof g, "0(kill at once)");
-		else ::snprintf(g,  sizeof g,  "%dms", d->grace_ms);
-		if ( d->panic_ms > 0 ) ::snprintf(pn, sizeof pn, "%dms", d->panic_ms);
-		else ::snprintf(pn, sizeof pn, "off");
-		::printf("    grace=%s  panic=%s\n", g, pn);
-	}
 	::printf("    arity=%d  cache_version=%d  import=%s  export=%s  initialize=%s  configure=%s\n",
 	         d->arity, ( d->cache_version > 0 ) ? d->cache_version : 1,
 	         ( d->import_exts && d->import_exts[0] ) ? d->import_exts : "-",

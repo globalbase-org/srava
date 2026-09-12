@@ -73,12 +73,7 @@ mfaUnion_::compute()
 		char b[128];
 		::snprintf(b, sizeof b, "union: %s", msg ? msg : "boolean failed");
 		result = mfa_err(thNEW(stdString,(b)));
-		return;
 	}
-	/* ★★ #3498: 遅延 CSG 木を **ここで** 評価する。旧来これは encode() (GetMeshGL64) で
-	 *   起きており、compute() が返った後だったので中断が届かなかった。詳細は
-	 *   mfMesh.h の mfGeom::force_eval と mf_eval_err。 */
-	if ( (result = mf_eval_err(geom, brk_, "union")) != thNULL ) geom = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

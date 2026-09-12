@@ -207,15 +207,6 @@ public:
 	 * set_priority は「今ロードした扱い」= 後勝ちの tie-break も更新する。 */
 	void        set_priority(int module_id, int p);
 	void        set_exec_default(int module_id, int exec);
-	/* ★ #3503: 実効 grace_ms。優先順は env SRAVA_AGENT_GRACE_MS > module(so,{grace}) > 記述子。
-	 *   env を最優先にしてあるのは **救済**のため — grace=-1 のモジュールがハングしたときに
-	 *   再ビルドせず抜けられる必要がある (と、測定で 0 に固定したいため)。 */
-	int         grace_ms(int module_id) const;
-	void        set_grace_ms(int module_id, int ms);
-	/* ★ #3503: 実効 panic_ms (in-proc の abort 猶予)。grace_ms と同じ優先順
-	 *   (env SRAVA_INPROC_PANIC_MS > module(so,{panic}) > 記述子)。 */
-	int         panic_ms(int module_id) const;
-	void        set_panic_ms(int module_id, int ms);
 	/* ★ #3436 P4: module id の実効 **N'** (1 ノードあたり受け取りたい最大項数・policy)。
 	 *   module(so,{arity:k}) の上書き優先 → 記述子の arity → **既定 2**。docs/sig_grammar_design.md §5.4。 */
 	int         arity(int module_id) const;
@@ -326,8 +317,6 @@ private:
 	std::vector<sPtr<stdObject> > data_v;
 	int                       configuringId_;   /* configure 呼び出し中のモジュール id (他は -1) */
 	std::vector<int>          arityOvr_v;   /* ★ #3436 P4: module(so,{arity:k}) の上書き (0=未設定) */
-	std::vector<int>          graceOvr_v;   /* ★ #3503: module(so,{grace:N}) の上書き (INT_MIN=未設定) */
-	std::vector<int>          panicOvr_v;   /* ★ #3503: module(so,{panic:N}) の上書き (INT_MIN=未設定) */
 	std::vector<sPtr<pigData> > optsOvr_v;  /* ★ #3441: module(so,{opts}) のハッシュ全体 (疎・未設定=thNULL) */
 	std::vector<long>         seq_v;
 	long                      seqN_;

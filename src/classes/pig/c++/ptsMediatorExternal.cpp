@@ -42,7 +42,6 @@
 #include	"pig/c++/ptsErrSink.h"   /* agent stderr をテキストへ溜める (efd の受け皿) */
 #include	"ts2/c++/ts2IO.h"
 #include	"ts2/c++/stdEvent.h"
-#include	"ts2/c++/stdInterval.h"   /* #3503: 撤収の猶予タイマ */
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ptsMediatorExternal_.h"
 
@@ -77,13 +76,6 @@ public:
 	virtual sPtr<stdEvent>	filter(sPtr<stdEvent> ev);
 	virtual int	pl_write_arg(int idx, sPtr<pigData> d);
 	virtual int	pl_write_end(sPtr<pigDataCache> outCache);
-	/* ⚠⚠ **public に置くこと**。protected だと tscpp2 が interface 側に override を
-	 *   生成せず、glue が基底を **修飾付き (非仮想)** で呼ぶため、エラーも警告も出ないまま
-	 *   基底の no-op が走り続ける (pigfAgent::priority が踏んだのと同じ罠。#3503 で再度踏んだ —
-	 *   猶予が一切効かず gms=0 のままだった)。 */
-	virtual int	is_external();          /* ★ #3503: 1 (子プロセスを持つ) */
-	virtual void	set_grace_ms(int ms);   /* ★ #3503 (基底の但し書き参照) */
-
 protected:
 	/* 破棄列。**界面ではない** (§2.1/§3.2: 外からの終了要求は destroy() に統一) — 自分の
 	 * FIN からだけ呼ぶ。 */
@@ -127,10 +119,6 @@ protected:
 	int			childStatus;   /* 子 agent の waitpid 生 status (終了していれば) */
 	int			agentReturnFlag;  /* ★ 子プロセス (ts2System) が終了して TSE_RETURN を返したか */
 	int			retPid;
-	/* ★ #3503: 撤収の猶予。0 = まだ EOF を撃っていない / 1 = 撃って待っている。
-	 *   タイマが切れる (または子が自分で終わる) までは kill を撃たない。 */
-	int			graceArmed;
-	int			graceMs;    /* ★ #3503: pigfAgent が起動時に渡す実効値 */
 	/* ★ #3441: enable(env) で渡された opts。pipe が確立するまで(fork は非同期)保持し、
 	 * enable_body() の末尾で 1 回だけ流す。 */
 	sPtr<pigData>		pendingEnv;
@@ -169,8 +157,6 @@ ptsMediatorExternal_::ptsMediatorExternal_(TS_ARGS0)
         : ptsMediator_(parent),
 	  parent(tinyState_::parent)
 {
-    graceArmed = 0;   /* ★ #3503 */
-    graceMs    = 0;
     TS_CPARGS0
     retPid = 0;
     endSent = 0;
@@ -423,19 +409,6 @@ ptsMediatorExternal_::pl_write_end(sPtr<pigDataCache> outCache)
 	return 0;
 }
 
-/* ★ #3503: pigfAgent が起動直後に 1 回だけ渡す。実効値の解決は registry の仕事。 */
-int
-ptsMediatorExternal_::is_external()
-{
-	return 1;
-}
-
-void
-ptsMediatorExternal_::set_grace_ms(int ms)
-{
-	graceMs = ms;
-}
-
 void
 ptsMediatorExternal_::teardown()
 {
@@ -447,10 +420,7 @@ ptsMediatorExternal_::teardown()
 		 * とき**に TSE_RETURN (msg_int = waitpid の生 status) を返す。ここで手放すと受け手が
 		 * 居なくなり、子の回収を待たずに parent へ「終わった」と返してしまう (planner が先に消えても
 		 * 重い agent は計算を続ける)。回収は FIN_AGENTWAIT が待つ。 */
-		/* ★ #3417 (2026-09-06): モードを DM_CONT_KILL に揃える。異常経路では ACT_START が
-		 *   既に撃っているので二度目 (destroy は冪等)。正常経路ではここが唯一の呼び出しだが、
-		 *   その時点で agent は自分で終了済み = 空振りするだけ。 */
-		agent->destroy(DM_CONT_KILL);
+		agent->destroy();
 	}
 	if ( retPid > 0 && ptsApp != thNULL ) ptsApp->load_pid_del((uint32_t)retPid);   /* ★ #3419 T4-b */
 	if ( pipe.is_notNull() ) { pipe->destroy(); pipe = thNULL; }
@@ -492,11 +462,6 @@ ptsMediatorExternal_::post_packet(int type, sPtr<pigData> d)
 void
 ptsMediatorExternal_::handle_packet(sPtr<ptsWirePacket> pkt)
 {
-	/* ★ #3417 (2026-09-06): W_EOF は **agent プロセス側のための通知**なので planner は無視する。
-	 *   こちらが wfd を閉じた結果として自分の pipe にも立つことがあるが、撤収は既に
-	 *   自分で始めている (is_destroyed) ので用が無い。 */
-	if ( pkt.is_notNull() && (int)pkt->type == W_EOF )
-		return;
 	if ( pkt == thNULL )
 		return;
 	int n = pkt->payload.length();
@@ -622,59 +587,9 @@ TS_STATE(ACT_RUN)
 	 * キャッシュを書き切れるようにするため (ひさ回答 2026-08-05)。 */
 	if ( is_destroyed() ) {
 		if ( pipe.is_notNull() ) {
-			/* ★★ #3503 (2026-09-07): **猶予つきの撤収**。
-			 *
-			 * 旧: EOF と SIGKILL を *この 1 回の呼び出しの中で連続して* 撃っていた。
-			 *   ts2System::filter() は destroy 後の最初のイベントで即座に SIGKILL を撃つので、
-			 *   両者はマイクロ秒差。⇒ **agent が自分で畳まれる余地が事実上ゼロ**だった。
-			 *   #3498 で 3 カーネルを配線しても end-to-end で差が出なかったのはこれが理由。
-			 *   ⚠ ファイル冒頭の「即座に殺さないのは書きかけのキャッシュを書き切れるように
-			 *     するため (ひさ回答 2026-08-05)」という意図も、これで失われていた。
-			 *
-			 * 新: EOF を撃ったら grace_ms だけ待つ。子が自分で終われば stdout が閉じて
-			 *   pipe が FIN し、この状態には戻ってこない (= kill は撃たれない)。
-			 *   待っても終わらなければタイマで戻ってきて kill する。
-			 *   grace_ms は「モジュールが自分で畳まれるのに要る時間」の申告
-			 *   (記述子 / module(so,{grace}) / env SRAVA_AGENT_GRACE_MS)。
-			 * ⚠ 連打によるエスカレーションではない (#3417 の否定は *キー入力* 駆動の話)。
-			 *   ここは時間で進む。destroy は冪等なので 2 度目の Ctrl+C は何も変えない。 */
-			const int gms = graceMs;
-			if ( gms != 0 && graceArmed == 0 ) {
-				graceArmed = 1;
-				if ( wfd.is_notNull() ) { wfd->destroy(); wfd = thNULL; }   /* EOF だけ先に */
-				if ( gms > 0 ) stdInterval::wait(ifThis, (INTEGER64)gms * 1000, TSE_TIMER);
-				/* ⚠ gms < 0 (= -1) はタイマを張らない。「必ず自分で畳まれる」と宣言した
-				 *   モジュールだけが名乗れる。止まらない経路が 1 つでもあると永久に待つ。 */
-				return 0;
-			}
-			if ( gms > 0 && graceArmed == 1 && ev != thNULL && ev->type != TSE_TIMER )
-				return 0;   /* 猶予中。タイマ以外のイベントでは kill しない */
-			if ( gms < 0 ) return 0;   /* graceful のみ: kill は撃たない */
 			if ( wfd.is_notNull() ) { wfd->destroy(); wfd = thNULL; }
-			/* ★★ #3417 6.2 (2026-09-06): ここで **子プロセスを確実に殺す**。
-			 *
-			 *   旧: pipe->destroy() だけ。しかし ptsWirePipe は is_destroyed() を **1 箇所も
-			 *   見ておらず** (grep で 0 件)、ACT_HDR の rio->read_c() に居座り続ける。
-			 *   FIN → TSE_RETURN に届くのは「相手が W_END を送る」か「read が EOF を踏む」= 
-			 *   **agent プロセスが終了して stdout を閉じたとき**だけ。
-			 *   ⇒ 計算に入り込んだ agent では TSE_RETURN が来ず、FIN_START に到達せず、
-			 *     teardown() の agent->destroy() が **一度も呼ばれなかった**。
-			 *     「planner を殺した後 agent が居残る」の直接の原因。
-			 *
-			 *   新: agent->destroy(DM_CONT_KILL) を撃つ。SIGKILL でプロセスが死ぬと
-			 *   OS が stdout を閉じるので **rio が EOF を踏み、pipe が自然に FIN する**。
-			 *   pipe の TSE_RETURN も ts2System の TSE_RETURN (waitpid) も揃うので、
-			 *   既存の待ち (下の pipe==thNULL 判定 / FIN_AGENTWAIT) がそのまま解ける。
-			 *   ⇒ **ptsWirePipe には一切手を入れなくてよい** (ひさ設計 2026-09-06)。
-			 *
-			 *   ⚠ pipe->destroy() は不要になった。畳むのは teardown() が行う。
-			 *   ⚠ wfd の EOF は先に送ってある。EOF だけで素直に終わる agent (待機中のもの) は
-			 *     kill が届く前に自分で畳まれる。
-			 *   ⚠ 連打によるエスカレーションは **しない** (is_destroyed() は冪等で 2 度目の
-			 *     destroy が伝わらず、キーボードのチャッタリングで graceful のつもりが kill に
-			 *     化ける — ひさ判断 2026-09-06)。撃つ手は常にこの 1 種類。 */
-			if ( agent.is_notNull() ) agent->destroy(DM_CONT_KILL);
-			return 0;   /* pipe の TSE_RETURN (= 子の死による EOF) を待つ */
+			pipe->destroy();
+			return 0;   /* pipe の TSE_RETURN を待つ */
 		}
 		if ( vparser.is_notNull() ) {
 			vparser->destroy();

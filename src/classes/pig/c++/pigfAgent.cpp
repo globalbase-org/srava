@@ -223,7 +223,6 @@ protected:
 	int			gateHadDelay;
 	int			forkFails;       /* fork EAGAIN の連続失敗回数(上限超でようやくエラー) */
 	int			outModule;       /* ★ この agent が起動するカーネル(#3404)。ACT_START で decide_out_module() が設定 */
-	int			extCounted;      /* ★ #3503: 子プロセスを持つ agent として数えたか */
 	/* ★ rev4 Phase B-2b: この agent の **出力型リスト** (CSV)。型ディスパッチ (decide_executor) が絞った
 	 *   単一出力型を継続スタンプに載せる。thNULL = 未設定 (未注釈 op) → 継続は outModule の全型へフォールバック。 */
 	sPtr<stdString>		outTypeList;
@@ -276,7 +275,6 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
     loadPid         = 0;
     forkFails       = 0;
     outModule       = MODULE_NONE;
-    extCounted      = 0;   /* ★ #3503 */
     i               = 0;
 }
 
@@ -743,10 +741,6 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 			med = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 			    ? ptsApp->module_registry->backends.make("thread", ifThis, kname)   /* 具体クラス名を隠す (Phase1-3) */
 			    : sPtr<ptsMediator>(thNULL);
-			if ( med.is_notNull() && ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
-				med->set_grace_ms(ptsApp->module_registry->grace_ms(outModule));   /* ★ #3503 */
-				med->set_panic_ms(ptsApp->module_registry->panic_ms(outModule));
-			}
 			if ( med.is_notNull() && med->enable() == 0 ) {
 				if ( ptsApp.is_notNull() ) ptsApp->cache_miss();   /* MISS 計上 (fork 経路と同じ) */
 				return ACT_pigfAgent_HELLO;   /* enable が積んだ TSE_ASSERT 待ち → rDO なし */
@@ -770,20 +764,7 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 		 * decide_out_module() で既に確定済み。opts が無ければ thNULL のまま (enable の既定と同じ)。 */
 		sPtr<pigData> modOpts = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 		    ? ptsApp->module_registry->opts_for(outModule) : sPtr<pigData>(thNULL);
-		/* ★ #3503: 撤収の猶予をここで解決して mediator へ渡す。実効値 (env > module() >
-		 * 記述子) を知っているのは registry で、outModule を知っているのはこの agent。
-		 * mediator はどちらも知らないので、突き合わせはここでやる。 */
-		if ( med.is_notNull() && ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
-			med->set_grace_ms(ptsApp->module_registry->grace_ms(outModule));
-			/* ★ 実行方式で使う口が変わるので **両方渡す** — 同じモジュールでも process なら
-			 *   grace_ms、in-proc なら panic_ms を使う (ひさ指摘 2026-09-07)。 */
-			med->set_panic_ms(ptsApp->module_registry->panic_ms(outModule));
-		}
 		launchFail = ( med == thNULL || med->enable(modOpts) != 0 );
-		/* ★ #3503: 子プロセスを持つ agent として登録 (起動に失敗しても teardown まで
-		 *   子を持ちうるので、enable の成否に関わらず数える)。 */
-		if ( med.is_notNull() && med->is_external() && ptsApp != thNULL && ! extCounted )
-			{ extCounted = 1; ptsApp->ext_agent_add(); }
 		/* ★ med = thNULL にしない (2026-08-11): 起動に失敗した med も destroy → TSE_RETURN を
 		 * 返して畳まれるので、FIN_pigfAgent_MEDWAIT がそれを待って回収する。 */
 		if ( launchFail && med.is_notNull() ) med->destroy();   /* 失敗オブジェクト破棄 */
@@ -1287,11 +1268,6 @@ TS_STATE(FIN_pigfAgent_MEDWAIT)
 			ptsApp->gate_release();
 			gateCredited = 0;
 		}
-		/* ★ #3503: **子プロセスを持つ agent** の数から抜ける。planner の in-proc panic は
-		 *   これが 0 になってから撃つ (でないと生きている子が迷子になる)。
-		 *   ⚠ 判別に agent_pid() を使わない — fork 完了前は 0 なので起動窓の External が
-		 *     in-proc に見える。mediator が構築時から持つ is_external() を見る。 */
-		if ( extCounted ) { extCounted = 0; if ( ptsApp != thNULL ) ptsApp->ext_agent_del(); }
 		ptsApp->agent_leave(ifThis);   /* 生存数 --。0 でプランナーを起こす */
 	}
 	/* ★ §9: 終了時点で手放す。pigfAgent は liveAgents (dedup 台帳) に参照され続け program

@@ -26,7 +26,6 @@
 #include	"d4/c++/d4aMerge.h"
 #include	"d4/c++/d4aNfaces.h"
 #include	"d4/c++/d4aNverts.h"
-#include	"d4/c++/d4aWedge.h"   /* ★ #3503 テスト用フック */
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/d4atsAgent_.h"
 
@@ -39,7 +38,6 @@ CLASS_TINYSTATE(d4/c++/d4atsAgent,pig/c++/ptsGenericAgent)
 static const pigArgKind CUBE_IN[]    = { AK_INLINE };            /* d4_cube(s) */
 static const pigArgKind MERGE_IN[]   = { AK_CACHE, AK_CACHE };   /* d4_merge(a,b) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };            /* d4_nfaces/d4_nverts(m) */
-static const pigArgKind WEDGE_IN[]   = { AK_INLINE };           /* ★ #3503 d4_wedge(sec) */
 static const pigOpEntry OPS[] = {
 	{ "d4_cube",   CUBE_IN,    1, AK_CACHE,  OPWIRE(d4aCube),   0, "->d4-mesh3d" },                 /* leaf producer */
 	{ "d4_merge",  MERGE_IN,   2, AK_CACHE,  OPWIRE(d4aMerge, d4Mesh, d4Mesh),  0, "(d4-mesh3d,d4-mesh3d)->d4-mesh3d" },
@@ -49,11 +47,6 @@ static const pigOpEntry OPS[] = {
 	 *   これが in-proc cross-module 変換 (converted 経路) を発火させる唯一の入口 (rev4 sig 化の disjoint 原則)。 */
 	{ "d4_nfaces", MEASURE_IN, 1, AK_INLINE, OPWIRE(d4aNfaces, d4Mesh), 0, "(d4-mesh3d)->value;(mf-mesh3d)->value" },
 	{ "d4_nverts", MEASURE_IN, 1, AK_INLINE, OPWIRE(d4aNverts, d4Mesh), 0, "(d4-mesh3d)->value;(mf-mesh3d)->value" },
-	/* ★★ #3503: **わざと居座る** op (テスト用フック)。中断要求を一切見ない in-proc の実行体で、
-	 *   これが無いと in-proc panic を end-to-end で検証できない (実カーネルは中断に応じるか
-	 *   process 専用かのどちらかで、「in-proc なのに居座る」を意図的に作れない)。
-	 *   ⚠ 真似しないこと — 詳細は d4aWedge.cpp の冒頭。 */
-	{ "d4_wedge",  WEDGE_IN,   1, AK_INLINE, OPWIRE(d4aWedge),  0, "->value" },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 

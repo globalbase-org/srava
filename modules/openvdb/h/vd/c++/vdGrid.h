@@ -36,7 +36,6 @@
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
-#include	"vd/c++/vdBreak.h"       /* #3498: 中断 (どの op が止まるかは vdBreak.h の表) */
 #include	<openvdb/openvdb.h>
 #include	<stdint.h>
 #include	<vector>
@@ -152,7 +151,7 @@ public:
 	 *   - メッシュ往復 (rebuild) が消えるので **速くもなった**。
 	 *   ★ 解像度に依存する近似値であることは変わらない。桁が要るなら isosurface で
 	 *     メッシュにしてから測る。これは別の話。 */
-	double volume(const pigBreak *brk = 0) const;   /* 符号つきボクセル積分 (world 単位) */
+	double volume() const;          /* 符号つきボクセル積分 (world 単位) */
 	double voxel_size() const;      /* 格子間隔 (等方前提) */
 	int    active_voxels() const;   /* 活性ボクセル数 (= 狭帯域の実サイズ) */
 
@@ -168,7 +167,7 @@ public:
 	 *   これは「別のことを答えている」のではなく「その表現では ②③ が恒真」という事実。 */
 	int    op_bbox(double mn[3], double mx[3]) const;
 	int    op_centroid(double c[3]) const;
-	double op_area(const pigBreak *brk = 0) const;
+	double op_area() const;
 	int    op_valid() const;
 
 	/* OpenVDB のグローバル初期化 (プロセスに 1 回)。全 op の入口で呼ぶ。
@@ -187,7 +186,7 @@ public:
 
 	/* ★ #3462: プリミティブ。OpenVDB 本体の生成器をそのまま使う。
 	 *   これが入るまで openvdb は leaf を作れず、mesh を manifold に作らせて voxelize していた。 */
-	static sPtr<vdGrid> make_sphere(double r, double dx, const pigBreak *brk = 0);
+	static sPtr<vdGrid> make_sphere(double r, double dx);
 	static sPtr<vdGrid> make_box(double w, double h, double d, double dx);
 
 	/* ★ #3463: 一般アフィン変換 (行優先 3x4)。translate / rotate / scale / mirror /
@@ -203,7 +202,7 @@ public:
 	 *   world 変換」に差し替え、出力を**元の格子**で用意して呼ぶ。level set の面倒
 	 *   (scale/shear で距離が保存されない件) は resampleToMatch が内部の
 	 *   doLevelSetRebuild で見てくれる。 */
-	sPtr<vdGrid> op_affine(const double e[12], const pigBreak *brk = 0);
+	sPtr<vdGrid> op_affine(const double e[12]);
 
 	/* ★ #3441 (ABI v10): module("openvdb.so",{threads:N}) の受け口。記述子の .configure に配線。
 	 *   n > 0 = op あたりの上限 / n <= 0 = 指定なし (TBB 既定へ戻す)。
@@ -222,22 +221,5 @@ private:
 /* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
  *   素の vda_err(...) を使うとモジュール名が付かない。 */
 PIG_DEFINE_MODULE_ERR(vda_err, VD_MODULE_NAME)
-
-/* ★ #3498: 中断で終わったならそのエラーを、そうでなければ thNULL。
- *
- * ⚠ **失敗を報告する前に必ずこれを見ること**。中断された算法は「作れなかった」(null) や
- *   途中までの値を返してくるので、そのまま報告すると *中断したのに格子が悪いと言う* ことになる。
- * ⚠⚠ 特に **計測 (volume / area) は途中までの総和を返す** — 見た目は普通の数値なので、
- *   これを通すと **中断が「小さめの答え」として成功扱いで焼き付く**。キャッシュに入れば
- *   次回以降それが正しい答えとして引かれる (#3489 の cache_version 上げ忘れと同じ形)。
- *   ⇒ 計測でも必ずここを通す。 */
-static inline sPtr<pigData>
-vd_abort_err(const pigBreak &b, const char *op)
-{
-	if ( ! b.cancelled() ) return sPtr<pigData>();
-	char m[160];
-	::snprintf(m, sizeof m, "%s: aborted (interrupted)", op ? op : "openvdb");
-	return sPtr<pigData>(vda_err(m));
-}
 
 #endif

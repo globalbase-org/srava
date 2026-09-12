@@ -83,8 +83,6 @@ mfaScale_::compute()
 		return;
 	}
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<mfGeom>();
-	/* ★ #3498: Manifold::Transform は **遅延**する (mfMesh.h の mf_eval_err の一覧)。 */
-	if ( (result = mf_eval_err(mesh, brk_, "scale")) != thNULL ) mesh = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

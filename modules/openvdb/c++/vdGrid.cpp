@@ -100,15 +100,11 @@ vd_data(int id, int create)
  * manifold で球を作って voxelize する従来の経路より 1 段短い。
  * ⚠ どちらも **原点中心**。他カーネルの box / sphere と揃えてある。 */
 sPtr<vdGrid>
-vdGrid::make_sphere(double r, double dx, const pigBreak *brk)
+vdGrid::make_sphere(double r, double dx)
 {
 	ensure_init();
-	/* ★ #3498: createLevelSetSphere は interrupter を取る (LevelSetSphere.h に 1 箇所)。
-	 *   ⚠ box (LevelSetPlatonic.h) には中断点が **無い**ので、そちらは渡す先が無い。 */
-	vdBreakScope br(brk);
 	openvdb::FloatGrid::Ptr g = openvdb::tools::createLevelSetSphere<openvdb::FloatGrid>(
-	    (float)r, openvdb::Vec3f(0.0f, 0.0f, 0.0f), (float)dx,
-	    (float)openvdb::LEVEL_SET_HALF_WIDTH, br.ptr());
+	    (float)r, openvdb::Vec3f(0.0f, 0.0f, 0.0f), (float)dx);
 	if ( ! g ) return sPtr<vdGrid>();
 	sPtr<vdGrid> out = thNEW(vdGrid,());
 	out->set_grid(g);
@@ -164,7 +160,7 @@ vdGrid::make_box(double w, double h, double d, double dx)
  *   非等方でも縮小でも正しく rebuild される (narrow band が薄くなる懸念は
  *   resampleToMatch が halfWidth を出力側から決め直すので吸収される)。 */
 sPtr<vdGrid>
-vdGrid::op_affine(const double e[12], const pigBreak *brk)
+vdGrid::op_affine(const double e[12])
 {
 	if ( ! g_ ) return sPtr<vdGrid>();
 	/* 目的の world 変換 M (行優先 3x4) を Mat4R へ。⚠ OpenVDB は**行ベクトル規約**
@@ -185,9 +181,7 @@ vdGrid::op_affine(const double e[12], const pigBreak *brk)
 	openvdb::FloatGrid::Ptr res = openvdb::FloatGrid::create(g_->background());
 	res->setTransform(base.copy());                    /* ★ 元の格子のまま */
 	res->setGridClass(g_->getGridClass());
-	/* ★ #3498: resampleToMatch は interrupter を取る (GridTransformer.h に 1 箇所)。 */
-	vdBreakScope br(brk);
-	openvdb::tools::resampleToMatch<openvdb::tools::BoxSampler>(*tmp, *res, br.ref());
+	openvdb::tools::resampleToMatch<openvdb::tools::BoxSampler>(*tmp, *res);
 
 	sPtr<vdGrid> out = thNEW(vdGrid,());
 	out->set_grid(res);
@@ -427,21 +421,14 @@ vd_dirac(double phi, double eps)
 
 /* volume と area を **1 回の走査**で出す。want_area が 0 なら勾配を取らない。
  * ★ 逐次に足す = 実行ごとに同じ値 (cold と warm で volume が動かないことは renorm が見張る)。 */
-/* ★ #3498: brk が非 0 なら走査中に中断を見る。中断したら *aborted に 1 を立てて途中で戻る。
- * ⚠ **途中までの総和を答えとして返さないこと**。見た目は普通の数値なので、通すと中断が
- *   「小さめの正しい答え」として焼き付く。呼び手は必ず *aborted を見て vd_abort_err を返す。 */
 static void
-vd_measure(const openvdb::FloatGrid &g, int want_area, double *vol, double *area,
-           const pigBreak *brk = 0, int *aborted = 0)
+vd_measure(const openvdb::FloatGrid &g, int want_area, double *vol, double *area)
 {
-	vdBreakPoll poll(brk);
-	if ( aborted ) *aborted = 0;
 	const double dx  = g.transform().voxelSize()[0];
 	const double eps = 1.5 * dx;   /* LevelSetMeasure と同じ半幅 (3 ボクセル幅) */
 	double sv = 0.0, sa = 0.0;
 	openvdb::FloatGrid::ConstAccessor acc = g.getConstAccessor();
 	for ( openvdb::FloatGrid::ValueAllCIter it = g.tree().cbeginValueAll() ; it ; ++it ) {
-		if ( poll.cancelled() ) { if ( aborted ) *aborted = 1; return; }
 		const double phi = (double)*it;
 		if ( ! it.isVoxelValue() ) {          /* タイル = 帯の外。符号だけ */
 			if ( phi < 0.0 ) {
@@ -489,13 +476,11 @@ vd_measure(const openvdb::FloatGrid &g, int want_area, double *vol, double *area
 }
 
 double
-vdGrid::op_area(const pigBreak *brk) const
+vdGrid::op_area() const
 {
 	if ( ! g_ || g_->activeVoxelCount() == 0 ) return 0.0;   /* 空は 0 (throw させない) */
 	double a = 0.0;
-	/* ★ #3498: 中断されたら a は途中までの総和。呼び手が vd_abort_err で弾く約束
-	 *   (ここで 0 を返して「空」に化けさせない — 0 は空という *答え* なので嘘が濃くなる)。 */
-	vd_measure(*g_, /*want_area=*/1, 0, &a, brk);
+	vd_measure(*g_, /*want_area=*/1, 0, &a);
 	return a;
 }
 
@@ -508,7 +493,7 @@ vdGrid::op_valid() const
 
 
 double
-vdGrid::volume(const pigBreak *brk) const
+vdGrid::volume() const
 {
 	if ( ! g_ ) return 0.0;
 	/* ★ #3474 続き (2026-09-05): **活性ボクセルが 1 つも無い格子 = 空集合**は体積 0。
@@ -524,7 +509,7 @@ vdGrid::volume(const pigBreak *brk) const
 	 *   ⚠ 印 (is_normalized) はもう見ない。積分は |grad| = 1 を仮定しないので分ける必要が
 	 *     無く、しかも分岐先で掛けていた levelSetRebuild こそが **空洞を埋めていた**。 */
 	double v = 0.0;
-	vd_measure(*g_, /*want_area=*/0, &v, 0, brk);   /* ★ #3498: 中断時の扱いは op_area と同じ */
+	vd_measure(*g_, /*want_area=*/0, &v, 0);
 	return v;
 }
 

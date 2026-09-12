@@ -4,7 +4,6 @@
 #include "pipe/bezier.hpp"
 #include "pipe/radius.hpp"
 #include <vector>
-#include <functional>
 
 namespace pipe {
 
@@ -34,12 +33,6 @@ struct Params {
     int    gridN      = 11;    // 粗グリッド分割（種探し）
     int    newtonIter = 40;    // 各種の精密化反復
     bool   useBVH     = true;  // broad-phase に BVH を使う（false なら総当たり）
-    // ★ #3502 続き: 走行中の中断。ホストが「もう要らない」を答える述語（空 = 中断しない）。
-    //   ⚠ 検出は収束待ちではなく **入力規模に比例する 1 回の掃引**なので、放っておいても
-    //     必ず終わる。それでも口を開けるのは、grace=-1（自分で必ず畳まれる）を名乗るには
-    //     *全経路が旗を見る*ことが要るから — 「有界だが長い」掃引で人を待たせないため。
-    //   ⚠ この述語は **ペア単位**で呼ばれる（1 ペアの narrow-phase は newtonIter=40 で有界）。
-    std::function<bool()> cancelled;
 };
 
 // 探索の統計（枝刈り効果の確認用）
@@ -50,12 +43,8 @@ struct Stats {
 
 // 1本の開いた鎖の自己接近をすべて列挙（gap 昇順）。
 // stats!=nullptr なら枝刈り統計を書き込む。
-// ★ #3502 続き: cancelledOut != nullptr かつ pr.cancelled が真を返したら、**途中で打ち切って**
-//   *cancelledOut に true を書く。⚠ そのとき返る列は **途中までの接触**で、「接触が少なかった」
-//   という普通の結果と見分けがつかない。呼び手は必ず cancelledOut を見て捨てること。
 std::vector<Contact> findSelfProximities(const Chain& ch, const RadiusFn& R,
-                                         const Params& pr, Stats* stats = nullptr,
-                                         bool* cancelledOut = nullptr);
+                                         const Params& pr, Stats* stats = nullptr);
 
 // 指定 (segA,tA),(segB,tB) における表面 gap の凍結再評価。
 // 追跡中サイトの gap 更新や勾配検証に。valid=false は定義域外。

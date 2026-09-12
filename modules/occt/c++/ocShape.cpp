@@ -37,7 +37,6 @@
 #include	<GProp_GProps.hxx>
 #include	<BRepTools.hxx>
 #include	<BRep_Builder.hxx>
-#include	<TopoDS_Compound.hxx>
 #include	<TopExp_Explorer.hxx>
 #include	<TopExp.hxx>
 #include	<TopTools_IndexedMapOfShape.hxx>
@@ -52,47 +51,12 @@
 #include	<Message.hxx>
 #include	<Message_Messenger.hxx>
 #include	<Message_PrinterOStream.hxx>
-#include	<Message_ProgressIndicator.hxx>   /* #3498: 中断の器 */
-#include	<Message_ProgressRange.hxx>
-#include	<Message_ProgressScope.hxx>
 #include	<stdlib.h>   /* getenv */
 
 #include	<stdio.h>
 #include	<string.h>
 #include	<sstream>
 #include	<string>
-
-/* ---- ★ #3498: 中断の器 (Message_ProgressIndicator) --------------------------
- * OCCT 側の作法は「算法へ Message_ProgressRange を渡す → 算法が要所で UserBreak() を引く」。
- * indicator の派生を用意するのは *こちら*。ここでは進捗表示は要らないので Show() は空。
- *
- * ⚠ Show() は **純粋仮想**なので空実装が要る (これが無いと抽象クラスのままで new できない)。
- * ⚠ UserBreak() は「並行に呼ばれうるのでスレッド安全に、かつ即座に返すこと」と
- *   Message_ProgressIndicator.hxx が明記している。⇒ atomic を 1 回読むだけにする。
- *   Show()/Position() をここから呼んではいけない (同ヘッダの指示)。
- * ⚠ UserBreak()/Show() は基底で **protected**。public に上げず override する。 */
-class ocBreakIndicator : public Message_ProgressIndicator {
-public:
-	ocBreakIndicator(const pigBreak *b) : b_(b) {}
-	DEFINE_STANDARD_RTTI_INLINE(ocBreakIndicator, Message_ProgressIndicator)
-protected:
-	virtual Standard_Boolean UserBreak() Standard_OVERRIDE
-	{ return ( b_ != 0 && b_->cancelled() ) ? Standard_True : Standard_False; }
-	virtual void Show(const Message_ProgressScope&, const Standard_Boolean) Standard_OVERRIDE {}
-private:
-	const pigBreak *b_;
-};
-
-/* 算法が走っている間ずっと indicator を生かすための入れ物。
- * ★ brk==0 なら indicator を作らない。Start(null handle) は「どの算法にも安全に渡せるが
- *   indicator には繋がっていないダミー range」を返すので、従来と同じ挙動になる。 */
-class ocBreakScope {
-public:
-	ocBreakScope(const pigBreak *b) { if ( b != 0 ) ind_ = new ocBreakIndicator(b); }
-	Message_ProgressRange range() { return Message_ProgressIndicator::Start(ind_); }
-private:
-	Handle(Message_ProgressIndicator) ind_;
-};
 
 sPtr<stdString>
 ocShape::get_str()
@@ -172,7 +136,7 @@ ocShape::op_area() const
 }
 
 int
-ocShape::op_valid(const pigBreak *brk) const
+ocShape::op_valid() const
 {
 	if ( s_.IsNull() ) return 0;                 /* ① 空でない */
 	if ( nsolids() == 0 ) return 0;
@@ -180,10 +144,9 @@ ocShape::op_valid(const pigBreak *brk) const
 	 * BOPAlgo_CheckerSI (自己交差) の両方を走らせる。★ OCCT が投げることがあるので
 	 * ここで受ける (ワーカースレッド由来だと agent ごと死ぬ)。 */
 	try {
-		ocBreakScope br(brk);   /* ★ #3498: 自己交差検査 (BOPAlgo_CheckerSI) は重くなりうる */
 		BRepAlgoAPI_Check chk(s_);
 		chk.SetRunParallel(Standard_False);
-		chk.Perform(br.range());
+		chk.Perform();
 		return chk.IsValid() ? 1 : 0;
 	} catch ( const Standard_Failure& ) {
 		return 0;
@@ -224,10 +187,7 @@ ocShape::ensure_init()
 		m->AddPrinter(new Message_PrinterOStream(lg, Standard_True, Message_Info));
 }
 
-/* 拡張子の大文字小文字を無視して比べる (".STEP" も受ける)。
- * ★ 呼び手は STEP の分岐しか無いので、SRAVA_OCCT_STEP=OFF のビルドでは丸ごと未使用になる
- *   (clang が -Wunused-function を出す)。⇒ 呼び手と同じガードで囲う。 */
-#ifdef SRAVA_OCCT_STEP
+/* 拡張子の大文字小文字を無視して比べる (".STEP" も受ける)。 */
 static bool
 oc_ieq(const char *a, const char *b)
 {
@@ -238,7 +198,6 @@ oc_ieq(const char *a, const char *b)
 	}
 	return *a == 0 && *b == 0;
 }
-#endif	/* SRAVA_OCCT_STEP */
 
 /* ---- OCCT の例外を srava のエラーへ落とす ----------------------------------
  * ★ OCCT のアルゴリズムは **例外で失敗を知らせる**ことがある。IsDone() で見える失敗
@@ -266,22 +225,6 @@ oc_note_error(char *err, int errsz, const char *type, const char *what)
 	else
 		::snprintf(err, (size_t)errsz, "%s", t);
 	for ( char *p = err ; *p ; ++p ) if ( *p == '\n' || *p == '\r' ) *p = ' ';
-}
-
-/* ★ #3501: OCCT が上げた警告を呼び手のバッファへ写す (理由を「言えるのに言わない」を作らない)。
- *   ⚠ 理由の受け皿は **呼び手のバッファ**。モジュール大域の static を置かない
- *     (in-proc では 1 プロセスに複数 op が同居するので混線する。ひさ指示 2026-08-26)。 */
-static void
-oc_note_warnings(const BRepAlgoAPI_BooleanOperation &op, char *err, int errsz)
-{
-	if ( err == 0 || errsz <= 0 ) return;
-	std::ostringstream w;
-	op.DumpWarnings(w);
-	std::string t = w.str();
-	for ( size_t i = 0 ; i < t.size() ; ++i ) if ( t[i] == '\n' || t[i] == '\r' ) t[i] = ' ';
-	::snprintf(err, (size_t)errsz,
-	    "the fused shape lost material (its bounding box is smaller than the inputs); "
-	    "OCCT reported: %s", t.empty() ? "(no detail)" : t.c_str());
 }
 
 /* 呼ぶ側の定型。f() が例外を投げたら 0 を返し、理由を err へ書く。 */
@@ -316,99 +259,32 @@ oc_wrap(const TopoDS_Shape &s)
 	return out;
 }
 
-/* ---- ★★ #3501: union が **黙って材料を落とす**のを捕まえる ----------------------
- * OCCT の BOPAlgo は、融合できなかった配置で @c IsDone() を真・@c HasErrors() を偽に
- * したまま @c BOPAlgo_AlertUnableToOrientTheShape を *警告*として上げ、**材料を大量に
- * 落とした形をそのまま返す**ことがある。実測 (球 320 個の union・OCCT 7.9.3):
- *
- *     fuse a=146.773935 b=190.113890 ->  4.188658   IsDone=1 err=0 warn=1
- *     fuse a=107.388403 b= 59.848040 -> -0.000132   IsDone=1 err=0 warn=1
- *
- *   体積 190 が 4.19 (球 1 個ぶん) に落ち、負になった回すらある。利用者には普通の数値として
- *   返り、キャッシュに焼き付いて次回以降も「正しい答え」として引かれていた。
- *
- * ★ 検出は **bbox の包含**で行う。a∪b は a も b も含むので、結果の bbox は両者の bbox の和を
- *   含まなければならない — これは *トレランスに依存しない* union の定義そのもの。
- *
- * ⚠ **警告そのものを失敗の指標にしてはいけない**。実測では警告 37 件のうち破綻は 6 件で、
- *   31 件は正しい結果だった。警告で弾くと正しい結果を大量に捨てる。
- * ⚠ 体積の不変条件 (V(a∪b) >= max) より **bbox のほうが厳しい**。実測で体積検査が見逃した
- *   損傷 (57.66 + 58.56 -> 59.85) を bbox は捕まえており、その出力は次の fuse で -0.000132 に
- *   化けていた。
- * ★ **警告が出たときだけ**呼ぶ (呼び手を参照)。警告は 6〜12% でしか出ないので、測定対象
- *   カーネルにほぼ負荷を足さない。実測でも「警告なしで壊れた例」は 0 件だった。
- * ⚠ intersection / difference には入れない — 結果が入力に *含まれる*側なので「空に潰れた」を
- *   不変条件で正常と区別できない (空集合は正当な答え)。下界を持つのは union だけ。
- *
- * 戻り 0 = 材料を落としている (呼び手はエラーにする)。 */
-static int
-oc_union_bbox_ok(const TopoDS_Shape &a, const TopoDS_Shape &b, const TopoDS_Shape &r)
-{
-	if ( r.IsNull() ) return 0;
-	Bnd_Box ba, bb, brr;
-	/* ★ useTriangulation=false は op_bbox と同じ理由 (曲面そのものから求める)。 */
-	BRepBndLib::Add(a, ba, Standard_False);
-	BRepBndLib::Add(b, bb, Standard_False);
-	BRepBndLib::Add(r, brr, Standard_False);
-	if ( ba.IsVoid() || bb.IsVoid() ) return 1;   /* 入力が空なら比べる下界が無い */
-	if ( brr.IsVoid() ) return 0;                 /* 入力があるのに結果が空 = 落ちている */
-	ba.SetGap(0.0); bb.SetGap(0.0); brr.SetGap(0.0);
-	double ax1,ay1,az1,ax2,ay2,az2, bx1,by1,bz1,bx2,by2,bz2, rx1,ry1,rz1,rx2,ry2,rz2;
-	ba.Get(ax1,ay1,az1,ax2,ay2,az2);
-	bb.Get(bx1,by1,bz1,bx2,by2,bz2);
-	brr.Get(rx1,ry1,rz1,rx2,ry2,rz2);
-	const double lo[3] = { (ax1<bx1?ax1:bx1), (ay1<by1?ay1:by1), (az1<bz1?az1:bz1) };
-	const double hi[3] = { (ax2>bx2?ax2:bx2), (ay2>by2?ay2:by2), (az2>bz2?az2:bz2) };
-	const double r1[3] = { rx1, ry1, rz1 }, r2[3] = { rx2, ry2, rz2 };
-	/* ★ 許容は箱の大きさに対する相対 — 絶対値だと寸法の桁で意味が変わる。狙いは
-	 *   「材料が丸ごと落ちた」の検出であって、トレランス程度のずれを咎めることではない。 */
-	double span = 0.0;
-	for ( int k = 0 ; k < 3 ; ++k ) { const double d = hi[k] - lo[k]; if ( d > span ) span = d; }
-	const double tol = ( span > 0.0 ) ? span * 1e-6 : 1e-9;
-	for ( int k = 0 ; k < 3 ; ++k )
-		if ( r1[k] > lo[k] + tol || r2[k] < hi[k] - tol ) return 0;
-	return 1;
-}
-
 sPtr<ocShape>
-ocShape::op_union(sPtr<ocShape> b, char *err, int errsz, const pigBreak *brk)
+ocShape::op_union(sPtr<ocShape> b, char *err, int errsz)
 {
 	if ( b == thNULL || s_.IsNull() || b->shape().IsNull() ) return sPtr<ocShape>();
 	TopoDS_Shape r;
-	int lost = 0;
-	ocBreakScope br(brk);   /* ★ #3498: 中断機構 (brk==0 ならダミー range) */
-	if ( ! oc_guard([&]{ BRepAlgoAPI_Fuse op(s_, b->shape(), br.range());
-		if ( ! op.IsDone() ) return;
-		/* ★ #3501: **警告が出たときだけ** bbox を見る (常時だと測定対象カーネルに
-		 *   無用な負荷が乗る。実測で警告なしの破綻は 0 件)。 */
-		if ( op.HasWarnings() && ! oc_union_bbox_ok(s_, b->shape(), op.Shape()) ) {
-			lost = 1;
-			oc_note_warnings(op, err, errsz);
-			return;
-		}
-		r = op.Shape(); }, err, errsz) ) return sPtr<ocShape>();
-	if ( lost ) return sPtr<ocShape>();
-	return oc_wrap(r);
-}
-
-sPtr<ocShape>
-ocShape::op_intersection(sPtr<ocShape> b, char *err, int errsz, const pigBreak *brk)
-{
-	if ( b == thNULL || s_.IsNull() || b->shape().IsNull() ) return sPtr<ocShape>();
-	TopoDS_Shape r;
-	ocBreakScope br(brk);   /* ★ #3498: 中断機構 (brk==0 ならダミー range) */
-	if ( ! oc_guard([&]{ BRepAlgoAPI_Common op(s_, b->shape(), br.range());
+	if ( ! oc_guard([&]{ BRepAlgoAPI_Fuse op(s_, b->shape());
 		if ( op.IsDone() ) r = op.Shape(); }, err, errsz) ) return sPtr<ocShape>();
 	return oc_wrap(r);
 }
 
 sPtr<ocShape>
-ocShape::op_difference(sPtr<ocShape> b, char *err, int errsz, const pigBreak *brk)
+ocShape::op_intersection(sPtr<ocShape> b, char *err, int errsz)
 {
 	if ( b == thNULL || s_.IsNull() || b->shape().IsNull() ) return sPtr<ocShape>();
 	TopoDS_Shape r;
-	ocBreakScope br(brk);   /* ★ #3498: 中断機構 (brk==0 ならダミー range) */
-	if ( ! oc_guard([&]{ BRepAlgoAPI_Cut op(s_, b->shape(), br.range());
+	if ( ! oc_guard([&]{ BRepAlgoAPI_Common op(s_, b->shape());
+		if ( op.IsDone() ) r = op.Shape(); }, err, errsz) ) return sPtr<ocShape>();
+	return oc_wrap(r);
+}
+
+sPtr<ocShape>
+ocShape::op_difference(sPtr<ocShape> b, char *err, int errsz)
+{
+	if ( b == thNULL || s_.IsNull() || b->shape().IsNull() ) return sPtr<ocShape>();
+	TopoDS_Shape r;
+	if ( ! oc_guard([&]{ BRepAlgoAPI_Cut op(s_, b->shape());
 		if ( op.IsDone() ) r = op.Shape(); }, err, errsz) ) return sPtr<ocShape>();
 	return oc_wrap(r);
 }
@@ -420,8 +296,7 @@ ocShape::op_difference(sPtr<ocShape> b, char *err, int errsz, const pigBreak *br
  *   intersection 同上                                → 全部の Common
  *   difference   同上                                → ops[0] から残り全部を引く (= 左 fold) */
 sPtr<ocShape>
-ocShape::op_bool_nary(sArray<sPtr<ocShape> >& ops, const char *kind, char *err, int errsz,
-                      const pigBreak *brk)
+ocShape::op_bool_nary(sArray<sPtr<ocShape> >& ops, const char *kind, char *err, int errsz)
 {
 	int n = ops.length();
 	if ( n < 2 || kind == 0 ) return sPtr<ocShape>();
@@ -440,41 +315,19 @@ ocShape::op_bool_nary(sArray<sPtr<ocShape> >& ops, const char *kind, char *err, 
 	else if ( ::strcmp(kind, "difference") == 0 )   op = &cu;
 	else return sPtr<ocShape>();
 	TopoDS_Shape out;
-	int lost = 0;
-	ocBreakScope br(brk);   /* ★ #3498: Build(range) が BOPAlgo までそのまま降りる */
 	if ( ! oc_guard([&]{
 		op->SetArguments(aL);
 		op->SetTools(tL);
-		op->Build(br.range());
-		if ( ! op->IsDone() ) return;
-		/* ★ #3501: 二項と同じ検査を n 項でも。**union のときだけ**
-		 *   (intersection / difference は結果が入力に含まれる側なので下界を持たない)。
-		 *   ⚠ 既定では occt は .arity 未申告 = 2 なのでここは通らないが、
-		 *     module("occt.so",{arity:k}) で上書きされれば通る。実測でも arity=32 で
-		 *     別の誤値 (0.1402) が出た — つまりこの経路も同じ壊れ方をする。 */
-		if ( ::strcmp(kind, "union") == 0 && op->HasWarnings() ) {
-			/* n 項の下界は「全オペランドの bbox の和」。左端 1 個との比較では足りない。
-			 * ops[0] から順に畳んだ箱を作って包含を見る。 */
-			TopoDS_Compound all;
-			BRep_Builder bld;
-			bld.MakeCompound(all);
-			for ( int i = 0 ; i < n ; ++i ) bld.Add(all, ops[i]->shape());
-			if ( ! oc_union_bbox_ok(all, all, op->Shape()) ) {
-				lost = 1;
-				oc_note_warnings(*op, err, errsz);
-				return;
-			}
-		}
-		out = op->Shape();
+		op->Build();
+		if ( op->IsDone() ) out = op->Shape();
 	}, err, errsz) )
 		return sPtr<ocShape>();
-	if ( lost ) return sPtr<ocShape>();
 	return oc_wrap(out);
 }
 
 sPtr<ocShape>
 ocShape::bool_from_args(sArray<sPtr<pigData> > *args, const char *kind, const char **errmsg,
-                        char *errbuf, int errbufsz, const pigBreak *brk)
+                        char *errbuf, int errbufsz)
 {
 	int na = ( args != 0 ) ? args->length() : 0;
 	if ( na < 2 ) { *errmsg = "needs at least two OCCT shapes"; return sPtr<ocShape>(); }
@@ -489,11 +342,11 @@ ocShape::bool_from_args(sArray<sPtr<pigData> > *args, const char *kind, const ch
 	char why[512];
 	why[0] = '\0';
 	if ( na == 2 ) {   /* 既存キャッシュを byte 不変に保つため 2 項は従来どおり */
-		if      ( ::strcmp(kind, "union") == 0 )        r = ops[0]->op_union(ops[1], why, (int)sizeof why, brk);
-		else if ( ::strcmp(kind, "intersection") == 0 ) r = ops[0]->op_intersection(ops[1], why, (int)sizeof why, brk);
-		else                                            r = ops[0]->op_difference(ops[1], why, (int)sizeof why, brk);
+		if      ( ::strcmp(kind, "union") == 0 )        r = ops[0]->op_union(ops[1], why, (int)sizeof why);
+		else if ( ::strcmp(kind, "intersection") == 0 ) r = ops[0]->op_intersection(ops[1], why, (int)sizeof why);
+		else                                            r = ops[0]->op_difference(ops[1], why, (int)sizeof why);
 	} else
-		r = op_bool_nary(ops, kind, why, (int)sizeof why, brk);
+		r = op_bool_nary(ops, kind, why, (int)sizeof why);
 	/* ★ OCCT はトレランスが噛み合わないと **演算そのものが失敗する**。黙って壊れた形を返す
 	 *   よりよい性質なので、そのまま明示エラーにする。 */
 	if ( ! r.is_notNull() ) {
@@ -511,17 +364,15 @@ ocShape::bool_from_args(sArray<sPtr<pigData> > *args, const char *kind, const ch
  * 頂点には球パッチが生成される = Steiner の公式を構成的にやっているのと同じ。
  * Join=GeomAbs_Arc が「丸める」= 球との Minkowski 和に対応する接続方式。 */
 sPtr<ocShape>
-ocShape::op_offset(double d, char *err, int errsz, const pigBreak *brk)
+ocShape::op_offset(double d, char *err, int errsz)
 {
 	if ( s_.IsNull() ) return sPtr<ocShape>();
 	if ( d == 0.0 ) return oc_wrap(s_);
 	TopoDS_Shape out;
-	ocBreakScope br(brk);   /* ★ #3498: PerformByJoin の末尾引数が進捗/中断の口 */
 	if ( ! oc_guard([&]{
 		BRepOffsetAPI_MakeOffsetShape mk;
 		mk.PerformByJoin(s_, d, Precision::Confusion(),
-		                 BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
-		                 Standard_False, br.range());
+		                 BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
 		if ( mk.IsDone() ) out = mk.Shape();
 	}, err, errsz) )
 		return sPtr<ocShape>();
@@ -603,13 +454,12 @@ ocShape::op_affine(const double e[12], char *err, int errsz)
  * ★ OCCT は「作れない」で普通に失敗する (半径が大きすぎて自己交差する等)。失敗は null
  *   にして呼び元が明示エラーにする。**黙って入力を返さない**。 */
 sPtr<ocShape>
-ocShape::op_fillet(double r, char *err, int errsz, const pigBreak *brk)
+ocShape::op_fillet(double r, char *err, int errsz)
 {
 	if ( s_.IsNull() ) return sPtr<ocShape>();
 	if ( r == 0.0 ) return oc_wrap(s_);
 	if ( r < 0.0 ) return sPtr<ocShape>();   /* 負の丸めは定義しない (収縮は offset の仕事) */
 	TopoDS_Shape out;
-	ocBreakScope br(brk);   /* ★ #3498 */
 	if ( ! oc_guard([&]{
 		BRepFilletAPI_MakeFillet mk(s_);
 		int n = 0;
@@ -618,7 +468,7 @@ ocShape::op_fillet(double r, char *err, int errsz, const pigBreak *brk)
 			++n;
 		}
 		if ( n == 0 ) return;            /* 稜が無い = 丸める対象が無い */
-		mk.Build(br.range());
+		mk.Build();
 		if ( mk.IsDone() ) out = mk.Shape();
 	}, err, errsz) )
 		return sPtr<ocShape>();
@@ -626,13 +476,12 @@ ocShape::op_fillet(double r, char *err, int errsz, const pigBreak *brk)
 }
 
 sPtr<ocShape>
-ocShape::op_chamfer(double d, char *err, int errsz, const pigBreak *brk)
+ocShape::op_chamfer(double d, char *err, int errsz)
 {
 	if ( s_.IsNull() ) return sPtr<ocShape>();
 	if ( d == 0.0 ) return oc_wrap(s_);
 	if ( d < 0.0 ) return sPtr<ocShape>();
 	TopoDS_Shape out;
-	ocBreakScope br(brk);   /* ★ #3498 */
 	if ( ! oc_guard([&]{
 		BRepFilletAPI_MakeChamfer mk(s_);
 		int n = 0;
@@ -643,7 +492,7 @@ ocShape::op_chamfer(double d, char *err, int errsz, const pigBreak *brk)
 			++n;
 		}
 		if ( n == 0 ) return;
-		mk.Build(br.range());
+		mk.Build();
 		if ( mk.IsDone() ) out = mk.Shape();
 	}, err, errsz) )
 		return sPtr<ocShape>();
@@ -686,21 +535,13 @@ ocShape::decode(ocChunkSource &src)
 	if ( s_.IsNull() ) set_decode_err("OCCT BinTools could not read the stored shape (unsupported or corrupt B-rep)");
 }
 
-/* ★ #3503 続き: 中断なしの入口 (codec / write_to の既存の呼び手はこちら)。 */
 bool
 ocShape::write_to(const char *path, const char *unit)
 {
-	return write_to(path, unit, 0);
-}
-
-bool
-ocShape::write_to(const char *path, const char *unit, const pigBreak *wbrk)
-{
 	(void)unit;
-	(void)wbrk;   /* ★ SRAVA_OCCT_STEP=OFF のビルドでは使い道が無い (.brep には進捗の口が無い) */
 	if ( s_.IsNull() ) return false;
-#ifdef SRAVA_OCCT_STEP
 	const char *dot = ::strrchr(path, '.');
+#ifdef SRAVA_OCCT_STEP
 	if ( dot != 0 && ( oc_ieq(dot, ".step") || oc_ieq(dot, ".stp") ) ) {
 		/* ★ STEP (ISO 10303) — **解析曲面のまま**書ける唯一の出口。
 		 *   triangulate の出口 (mf-mesh3d) は三角形へ落とすが、こちらは B-rep のまま
@@ -708,18 +549,11 @@ ocShape::write_to(const char *path, const char *unit, const pigBreak *wbrk)
 		 *   ここは占有的に重要。AP203 (機械部品の形状) を既定にする。 */
 		STEPControl_Writer w;
 		Interface_Static::SetCVal("write.step.schema", "AP203");
-		/* ★ #3503 続き: **Transfer だけ**が Message_ProgressRange を取る。
-		 *   ⚠ Write(filename) には口が無い (多重定義も無い)。⇒ 変換は中断できるが、
-		 *     ファイルへの書き出しは始まったら最後まで走る。長さの主は Transfer 側なので
-		 *     実用上はこれで足りるが、「export は中断できる」と読まないこと。 */
-		ocBreakScope br(wbrk);
-		if ( w.Transfer(s_, STEPControl_AsIs, Standard_True, br.range()) != IFSelect_RetDone )
-			return false;
-		if ( wbrk != 0 && wbrk->cancelled() ) return false;   /* 書き出す前に降りる */
+		if ( w.Transfer(s_, STEPControl_AsIs) != IFSelect_RetDone ) return false;
 		return w.Write(path) == IFSelect_RetDone;
 	}
 #endif
-	/* .brep (OCCT 固有のバイナリ/ASCII 形式)。⚠ BinTools / BRepTools には進捗の口が無い。 */
+	/* .brep (OCCT 固有のバイナリ/ASCII 形式)。 */
 	return BRepTools::Write(s_, path) == Standard_True;
 }
 
@@ -730,21 +564,15 @@ ocShape::write_to(const char *path, const char *unit, const pigBreak *wbrk)
  *   「入口を作らない」という設計判断のまま変えない (ocShape.h 冒頭)。
  * 失敗は null。**部分的に読めた形を黙って返さない**。 */
 sPtr<ocShape>
-ocShape::read_file(const char *path, const pigBreak *brk)
+ocShape::read_file(const char *path)
 {
-	(void)brk;   /* ★ SRAVA_OCCT_STEP=OFF のビルドでは使い道が無い (BRepTools::Read に口が無い) */
 	if ( path == 0 ) return sPtr<ocShape>();
-#ifdef SRAVA_OCCT_STEP
 	const char *dot = ::strrchr(path, '.');
+#ifdef SRAVA_OCCT_STEP
 	if ( dot != 0 && ( oc_ieq(dot, ".step") || oc_ieq(dot, ".stp") ) ) {
 		STEPControl_Reader r;
 		if ( r.ReadFile(path) != IFSelect_RetDone ) return sPtr<ocShape>();
-		/* ★ #3503 続き: 巨大な STEP の取り込みは長い。TransferRoots は
-		 *   Message_ProgressRange を取るので中断できる (ReadFile 自体には口が無い)。
-		 *   ⚠ 中断されると NbShapes()==0 になり「読めなかった」と区別がつかないので、
-		 *     呼び手が旗を見て弾く (ocaImport)。 */
-		ocBreakScope br(brk);
-		r.TransferRoots(br.range());
+		r.TransferRoots();
 		if ( r.NbShapes() < 1 ) return sPtr<ocShape>();
 		return oc_wrap(r.OneShape());
 	}
@@ -833,8 +661,8 @@ ocFace2D::write_to(const char *path, const char *unit)
 {
 	(void)unit;
 	if ( s_.IsNull() ) return false;
-#ifdef SRAVA_OCCT_STEP
 	const char *dot = ::strrchr(path, '.');
+#ifdef SRAVA_OCCT_STEP
 	if ( dot != 0 && ( oc_ieq(dot, ".step") || oc_ieq(dot, ".stp") ) ) {
 		STEPControl_Writer w;
 		Interface_Static::SetCVal("write.step.schema", "AP203");

@@ -111,9 +111,6 @@ vdaRenormalize_::compute()
 	std::vector<openvdb::Vec3s> pts;
 	std::vector<openvdb::Vec3I> tris;
 	std::vector<openvdb::Vec4I> quads;
-	/* ⚠ #3498: **volumeToMesh には中断点が 1 つも無い** (VolumeToMesh.h)。
-	 *   つまり renormalize は *後半 (メッシュ → 距離場) だけ*が止まる。前半で
-	 *   Ctrl+C を受けたら、そこは走り切ってから後半の入口で気づくことになる。 */
 	openvdb::tools::volumeToMesh(*in->grid(), pts, tris, quads, /*isovalue=*/0.0);
 	tris.reserve(tris.size() + 2*quads.size());
 	for ( size_t i = 0 ; i < quads.size() ; ++i ) {
@@ -123,16 +120,11 @@ vdaRenormalize_::compute()
 	}
 	long fellBack = 0;
 	openvdb::FloatGrid::Ptr g =
-	    vd_mesh_to_levelset(pts, tris, in->grid()->transform(), halfWidth, &fellBack, &brk_);
+	    vd_mesh_to_levelset(pts, tris, in->grid()->transform(), halfWidth, &fellBack);
 	if ( ! g ) {
-		if ( (result = vd_abort_err(brk_, "renormalize")) != thNULL ) return;   /* ★ #3498 */
 		result = vda_err(thNEW(stdString,("renormalize: levelSetRebuild failed")));
 		return;
 	}
-	/* ★ #3498: meshToVolume は中断されると **途中までの格子**を返すことがある (null とは限らない)。
-	 *   それを set_body すると「作り直した」と称する壊れた距離場がキャッシュに焼き付くので、
-	 *   null でなくても旗を見る。 */
-	if ( (result = vd_abort_err(brk_, "renormalize")) != thNULL ) return;
 	if ( fellBack > 0 )
 		::fprintf(stderr, "[renormalize] WARN: %ld column(s) with non-zero winding sum "
 		                  "(isosurface is not a closed, consistently oriented surface); "

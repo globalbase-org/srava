@@ -133,20 +133,6 @@ extern const srava_module_descriptor ppatsAgent_descriptor = {
 	.provides      = 0,   /* 無し */
 	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
 	.cache_version = 1,
-	/* ★★ #3503: **graceful のみ** (kill も panic もされない)。#3502 続きで *全 op・全経路* が
-	 * 中断要求を見るようにしたので名乗れる — 現時点でこれを名乗れる唯一のモジュール。
-	 *
-	 *   pipe_adjust / pipe_scene_adjust   本体 (cdRun / adjust / adjustScene の反復境界)
-	 *                                     + 後段の分離パス + ポリッシュ
-	 *   pipe_proximity / pipe_scene_proximity   ペア列挙の境界
-	 *   pipe_sample                       サンプル点の境界
-	 *
-	 * ⚠ 「op を配線した」ではなく「**その op の全経路**」で判断すること。#3502 の初版は
-	 *   主経路だけ配線して後段 (sepIter=600 回の分離パスと polish) が残っており、
-	 *   中断後に *劣化した結果が成功として返る*状態だった。
-	 * ⚠ ここを -1 にした以上、中断点を持たない経路を足したら **必ずここも見直す**。
-	 *   見落とすと Ctrl+C で永久ハングする (in-proc なら planner ごと)。 */
-	.grace_ms      = -1,
 	/* ★ v7 (#3419): op 内並列の方式と σ (docs/srava_load_control_design.md §5.5/§5.6)。
 	 *   raw pthread。⚠ ロード済みライブラリからは検出できない */
 	.initialize    = 0,   /* 無し */

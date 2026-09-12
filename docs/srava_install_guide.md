@@ -91,14 +91,12 @@ srava needs it for the worker gate admission order. Install tinyState v2.0.0-rc1
 
 ```sh
 grep TS_REVISION /usr/local/include/std2/tinyState_config.h
-#   → #define TS_REVISION       "v2.0.0-rc16-0-g070e615"      ← 公開 rc16 を素で建てた場合
+#   → #define TS_REVISION       "v2.0.0-rc16-<n>-g<hash>"   (形は git describe そのまま)
 ```
 
-⚠ `TS_REVISION` は `git describe` の出力を焼いたものなので、**建て方で文字列が揺れる**
-(タグから進んだコミットの `-<n>-g<hash>`、作業ツリーが汚れていれば `-dirty`、
-同じコミットに別名のタグが同居していればその名前)。版の見当をつけるには使えるが、
-**完全一致で判定しない**こと。判定が要るなら、srava が実際に見ているものを直接見る
-— これが空なら configure は止まる:
+⚠ `TS_REVISION` は `git describe` の出力を焼いたもので、**手元の tag の付き方で文字列が変わる**
+(同じコミットに別名の tag が同居していると、そちらの名前で出ることがある)。版の判別には使えるが、
+**文字列の完全一致で判定しない**こと。確実なのは次の 1 行 — これが空なら srava の configure は止まる:
 
 ```sh
 grep -l insNeq /usr/local/include/ts2/c++/stdLimitSemaphore.h
@@ -138,18 +136,15 @@ cmake --build build -j
 sudo cmake --install build                              # /usr/local/bin へ
 ```
 
-- 検証実績: Debian 13(trixie)/ g++ 14.2 / CMake 3.31・**既定構成**(§7 の既定のまま = `nef_snc` だけ OFF)で
-  **`srava_occt_contact` 1 本を除いて green**(2026-09-12)。その 1 本は **OCCT 7.8.1 の上流欠陥**で、
-  srava 側の回帰ではない(下記)。
-  ⚠ **ctest の本数は構成で変わる**ので、他所の数字と突き合わせるときは option を揃えること
-  (例: `-DSRAVA_MODULE_NEF_SNC=ON` は `nef_snc` と橋渡し 2 本のぶんテストが増える)。
+- 検証実績: Debian 13(trixie)/ g++ 14.2 / CMake 3.31・全モジュール ON で **`srava_occt_contact`
+  1 本を除いて green**(2026-09-12)。その 1 本は **OCCT 7.8.1 の上流欠陥**で、srava 側の回帰ではない
+  (下記)。
 
 > ### ⚠ Debian 13 の OCCT 7.8.1 では `srava_occt_contact` が落ちる
 >
 > **境界だけで接する立体の融合**(2 球の対称差 = 三日月 2 つが交線の円だけで接する形)で、OCCT が
 > その接触面を内部面とみなして消してしまい、レンズが材料に化けて **`xor` が `union` の値を返す**。
-> **OCCT 7.9.3 では 7 ケースすべて正しく、このテストも通る**(macOS で確認済み)。
-> ⇒ 落ちるかどうかは **OCCT の版だけ**で決まる。
+> OCCT 7.9 系では 7 ケースすべて正しいことを確認している。
 >
 > ⚠ **面積では検出できない** — `xor` の境界は元の 2 球の境界そのものなので、union に化けても
 > 面積は正しく見える。体積で見る必要がある。
@@ -392,9 +387,8 @@ srava --count-cache <dir>         キャッシュ dir の内訳を 1 行で出�
 
 ```
 $ srava --module-info d3
-d3  (abi=24 prio=-2 <build>/d3.so)
+d3  (abi=21 prio=-2 <build>/d3.so)
     exec_caps=thread|process(0x3)  exec_default=process  make_agent=yes
-    grace=0(kill at once)  panic=off
     arity=0  cache_version=1  import=-  export=-  initialize=no  configure=no
     cache_salt=|d3|v1
     ops (5):
@@ -419,16 +413,6 @@ no such module is loaded (see `srava --modules` for the names)
 - `cache_salt=` は出力キャッシュキーに混ざる弁別バイト列で、**モジュール名 + `cache_version`** から
   レジストリが組む(`|` は表示できない区切り `\x01` の代用)。`.so` を 1 本だけ差し替えたときに
   ここが動いているかで切り分けられる。
-- `grace` / `panic` は**撤収の猶予**の申告(#3503)。`grace` は **process 実行**で SIGKILL までの
-  猶予(`0(kill at once)` / `Nms` / `graceful-only` = kill しない)、`panic` は **in-proc 実行**で
-  居座ったときに planner を abort するまでの猶予(`off` / `Nms`)。同じモジュールでも実行方式で
-  使う口が変わるので 2 本ある。
-  - ⚠ **ここに出るのは `.so` が申告している値**であって実行時の実効値ではない。
-    `module(so,{grace:N})` や `SRAVA_AGENT_GRACE_MS` / `SRAVA_INPROC_PANIC_MS` での上書きは
-    この表示に現れない(実効値は env > `module()` > 記述子 の順で解決される)。
-  - ⚠ `graceful-only` を名乗れるのは **全 op・全経路が中断要求を見る**モジュールだけ。止まらない
-    経路が 1 つでもあると Ctrl+C で永久に終わらない。迷ったら `Nms` にする(申告が間違っていても
-    代償は遅延だけで済む)。
 
 - `sig` は長いものがあるが**折り返さない**。揃って見えることより `grep` で拾えることを優先している。
 - `provides` の `tag` 行は申告をそのまま出すのではなく、**実際に `create_for_meta` へ通して検証**した
