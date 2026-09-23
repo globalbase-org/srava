@@ -30,7 +30,7 @@
 両方**が候補列に入る（擬似が受けなかった呼び出しは、そのまま実モジュールへ降りる）。
 
 ```
-include "module/all.sra";            // .so のロードは all.sra / module() の仕事
+module("cgal.so", {});               // ← 使う .so だけを名指しでロードする
 include "module/pseudo.sra";         // 擬似モジュール集
 
 use [ pm_cgal({seg:64}) ];
@@ -40,6 +40,72 @@ var b = sphere(1.5, 8);              // ← 明示した 8 が勝つ（省略形
 
 ⚠ **`include` はロードではない。** `.so` を載せるのは `module()` / `module/all.sra` の仕事で、
 `pseudo.sra` は**候補列に書く値**を定義するだけ。両方要る。
+
+### ★ 使う `.so` が決まっているなら `module()` で名指しする {#name-the-modules}
+
+`include "module/all.sra";` は同梱のカーネルを一式ロードする。**手軽だが無料ではない。**
+同梱モジュールは増え続けるので、全ロードの負荷はこの先も増える。加えて、候補列を書かずに
+一式を載せると、**その op がどの `.so` に当たるかが読んだだけでは決まらない**。
+
+使うものが決まっているなら、`module()` で名指しする方が**常駐が小さく、配線が読んで分かる**。
+実際に、全ロードから 2 本の名指しへ移して**出力がバイト単位で変わらないまま常駐が目に見えて
+減った**利用例がある（外れた十数本は、その用途では最初から使われていなかった）。
+
+```
+module("cgal.so", {});
+module("pipe_proximity.so", {});
+include "module/pseudo.sra";
+use [ pm_cgal({}), "pipe_proximity" ];
+```
+
+⚠ `pm_cgal({})` のように **`{}` を書く**（`pm_cgal()` は不可）。`seg` を省けば各カーネルの既定値になる。
+⚠ 実モジュール名は **引用符つき**（`"pipe_proximity"`）。引用符が無いと `undefined variable` になる。
+
+★ どの op がどの `.so` に在るかは [`srava --module-info`](srava_install_guide.html#module-info)
+で引ける（`--modules` が**在庫一覧**、`--module-info` が**中身**）。
+[op × モジュールの表](srava_function_reference.html#module-matrix) も同じことを一覧で見せる。
+
+### ⚠⚠ `use` は候補列を**置き換える** — 並べ忘れた op は落ちる {#use-replaces}
+
+`use [ … ]` を書いた瞬間、**そこに並べたものだけ**が候補になる。`module/all.sra` で
+ロード済みでも、候補列に居なければ選ばれない。落ち方はこの形:
+
+```
+*** USE_MODULES ('pm_cgal','cgal'): none of them implements op 'export_vox'
+    (see `srava --module-info <name>`) ***
+```
+
+**この形で落ちたら、足りない実モジュールを引用符つきで候補列に併記する。**
+
+```
+use [ pm_cgal({}), "openvdb_cg" ];       // ← export_vox を持つモジュールを足した
+```
+
+⚠ 踏みやすいのは、**生成 op と、それ以外の op（I/O・ソルバ）が同じスクリプトに同居している**
+ときである。粒度の既定値を入れたいのは生成 op だけでも、`use` は**スクリプト全体**に効く。
+
+#### 候補列を絞ると、**暗黙のキャストも止まる**
+
+落ちるのは「op が無い」ときだけではない。op は在っても、**入力の型を合わせる変換が
+自動では挟まらなくなる**:
+
+```
+use [ pm_cgal({seg:32}) ];
+volume(offset(box(1,1,1), 0.1))
+*** USE_MODULES: op 'offset' does not accept input type(s) cg-mesh3d in any candidate ...
+    ★ qualification narrows the candidates, it does not insert a cast
+       — convert explicitly with cast(<target type>, ...) ***
+```
+
+（`use` を書かなければ、同じ式はそのまま通る。）
+
+★ **これは欠陥ではなく、そういう仕様である。** 裏返せば、**使っていないモジュールへ勝手に
+配線されて意図しない動きをすることが無くなる**。候補列が明示されていれば、
+外したものが効いていなかったことを**利用者自身が検算できる**。
+黙って別のものに当たるより、明示して落ちる方がよい、という設計である。
+
+⚠ 維持コストは「**op を足すたびに候補列を見直す**」。ただし静かに壊れることはなく、
+必ず上の形で落ちるので、気づけないコストではない。
 
 ---
 

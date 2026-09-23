@@ -213,6 +213,33 @@ cgal の op に渡せる。逆に `oc-brep3d` の行は `occt` / `occt_mf` に�
 （`include "module/all.sra";` または `SRAVA_MODULE_ALL=1` で一括）。表に ○ があっても、
 そのモジュールをロードしていなければ使えない。
 
+⚠⚠ **この表に出てこない名前は、op ではなく標準ライブラリの関数のことがある。**
+その場合に要るのは `module()` ではなく **`include`** で、`.so` は一切関係しない。
+紛らわしい実例:
+
+| 名前 | 正体 | 要るもの |
+|---|---|---|
+| `tube` / `tube_ruled` | **op** | それを持つモジュールのロード |
+| `tube_wall` / `tube_wall_var` | **標準ライブラリの関数**（`std/curve.sra`） | `include "std/curve.sra";` |
+
+⇒ `tube_ruled` は表に在るのに `tube_wall` が `srava --module-info` に出てこない、というのは
+**正常**である。
+
+★ **このページの本体 (各関数の項) では、標準ライブラリの関数に 〔`stdlib: <ライブラリ名>`〕
+タグが付いている。** 名前で引けば、op か std 関数かはそこで分かる
+（例: [`tube_wall`](#tube_wallpath-d-tube_wall_varpath-ds-パイプ壁オフセット-stdlib-curve) には
+〔`stdlib: curve`〕が付いている）。**この表だけを見て「無い」と判断しないこと** —
+表は op の対応表なので、std 関数は最初から載らない。
+
+手元で確かめるなら、標準ライブラリは `<prefix>/share/srava/lib/std/*.sra` に
+**平文で置かれている**ので、`grep` すれば op か関数かが確定する。
+
+```sh
+grep -rn 'tube_wall' /usr/local/share/srava/lib/std/
+```
+
+（ここに一覧は載せない。標準ライブラリは増減するので、焼いた一覧は必ず古くなる。）
+
 | op | cgal | nef ※1 | geogram | cherchi | manifold | geomutils ※7 | openvdb | openvdb 橋渡し ※3 | occt | occt_mf ※2 | points ※6 | pipe_proximity |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **生成（3D）** | | | | | | | | | | | | |

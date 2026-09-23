@@ -104,7 +104,11 @@ grep TS_REVISION /usr/local/include/std2/tinyState_config.h
 ⚠ `TS_REVISION` は `git describe` の出力を焼いたものなので、**建て方で文字列が揺れる**
 (タグから進んだコミットの `-<n>-g<hash>`、作業ツリーが汚れていれば `-dirty`、
 同じコミットに別名のタグが同居していればその名前)。版の見当をつけるには使えるが、
-**完全一致で判定しない**こと。判定が要るなら、srava が実際に見ているものを直接見る
+**完全一致で判定しない**こと。
+★ 照合するなら **末尾の `g<hash>` を見る**。タグ名の部分は「**建てた時点でどのタグが
+見えていたか**」でしかなく、タグを後から付ければ同じコミットが別の名前を名乗る
+(`v2.0.0-rc17-0-g…` と `v2.0.0-rc16-21-g…` が同一物、ということが実際に起きる)。
+ハッシュの方は建てた時刻に依存しない。判定が要るなら、srava が実際に見ているものを直接見る
 — これが空なら configure は止まる:
 
 ```sh
@@ -114,6 +118,45 @@ grep -l insNeq /usr/local/include/ts2/c++/stdLimitSemaphore.h
 ⚠ `find_package(tinyState)` が立てる `PACKAGE_VERSION` は `2.0.0` 固定で **rc 番号を持たない**ので、
 版の判別にはこちらを見る。C++ からは `#include "std2/tinyState_config.h"` で `TS_REVISION` /
 `TS_VERSION` を参照できる。
+
+### ⚠⚠ tinyState の prefix を振り替えたら、**その build dir は捨てる** {#tscpp2-prefix}
+
+**症状**: `tinyState_DIR` を別の prefix へ向け直すと、ライブラリ・ヘッダ・CMake パッケージは
+追随するのに、**コード生成器 `tscpp2` だけが古い prefix のものを回し続ける**ことがある。
+結果、**生成クラスのレイアウトは一方の install 由来・リンクするライブラリは他方の install 由来**
+という食い違いが、**エラーを出さずに**成立する。srava は生成クラスを大量に使うので、
+これは「ビルドは通るのに実行時に壊れる」形で出る。
+
+**原因**: 公開版の `tinyStateConfig.cmake` は `TINYSTATE_TSCPP2` を **CMake のキャッシュ変数**
+として置いている。キャッシュ変数は**一度決まると再 configure では動かない**ので、
+prefix を振り替えても最初の値が残る。
+
+**確かめ方**:
+
+```sh
+grep TINYSTATE_TSCPP2 <build>/CMakeCache.txt
+#   → いま使っている tinyState の prefix と同じ bin/ を指しているか
+```
+
+**直し方**: 指している先がズレていたら、**その build dir を捨てて作り直す**。
+再 configure では直らない (キャッシュが動かないのが原因なので)。
+最初から明示しておくこともできる:
+
+```sh
+cmake -B build -DtinyState_DIR=<prefix>/lib/cmake/tinyState \
+               -DTINYSTATE_TSCPP2=<prefix>/bin/tscpp2
+```
+
+★ **prefix を振り替えていないなら、この節は関係ない。** 素直に 1 つの prefix を使い続けている
+build dir では起きない。上流では修正済みだが、公開版にはまだ入っていないので当面はこの手当てで凌ぐ。
+
+**手元の tinyState がもう直っているかは、版番号ではなく現物で分かる**:
+
+```sh
+grep TINYSTATE_TSCPP2 <prefix>/lib/cmake/tinyState/tinyStateConfig.cmake
+#   CACHE FILEPATH が付いている → この節はまだ要る
+#   付いていない               → その prefix では直っているので、もう気にしなくてよい
+```
 
 ```sh
 git clone https://github.com/globalbase-org/tinyState.git
