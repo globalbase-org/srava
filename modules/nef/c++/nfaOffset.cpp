@@ -38,7 +38,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -52,7 +52,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -74,7 +74,7 @@ void
 nfaOffset_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	double d   = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
 	int subdiv = ( na > 2 ) ? (int)(*args)[2]->get_int() : 1;   /* 近似球の細分化 (既定 1) */
 
@@ -86,7 +86,7 @@ nfaOffset_::compute()
 	 *   旧実装は 3 を超える値を黙って 3 へ丸めており、利用者は「4 を頼んだのに 3 の結果を
 	 *   受け取り、しかもそれと気づけない」状態だった (本プロジェクトの「黙ってフォールバック
 	 *   しない」原則に反する)。
-	 *   上限が 6 なのは **実測で完走を確認できた最大値**だから (nfMesh::op_offset の表を参照)。
+	 *   上限が 6 なのは **実測で完走を確認できた最大値**だから (nfNefMesh::op_offset の表を参照)。
 	 *   誤差は 1 段ごとに下がるが、コストの伸びの方が急なので、6 は事実上の終端。 */
 	if ( subdiv < 0 || subdiv > 6 ) {
 		char b[224];

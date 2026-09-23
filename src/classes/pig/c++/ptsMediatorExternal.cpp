@@ -28,6 +28,7 @@
  * compact ゲート) は呼び元状態関数の再走で再入され、pipe の pico state が再開を担保する
  * (現行 pigfAgent の SEND 系と同じ規約: 1 状態 1 write)。
  */
+#include	<string.h>   /* strstr — agent の名乗りを照合する (#3550) */
 #include	"pig/c++/ptsMediator.h"
 #include	"pig/c++/osglue.h"   /* osglue_env_int (#3419 §17.2) */
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
@@ -42,6 +43,7 @@
 #include	"pig/c++/ptsErrSink.h"   /* agent stderr をテキストへ溜める (efd の受け皿) */
 #include	"ts2/c++/ts2IO.h"
 #include	"ts2/c++/stdEvent.h"
+#include	"ts2/c++/stdInterval.h"   /* #3503: 撤収の猶予タイマ */
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ptsMediatorExternal_.h"
 
@@ -69,13 +71,24 @@ public:
 	 * 並べて protected に置く。 */
 	int		set_env(sPtr<pigData> env);
 	virtual int	launch_failed();  /* 起動失敗が確定したか (pigfAgent がエラー文言を作るのに使う) */
-	virtual int	child_status();   /* 子 agent の waitpid 生 status (終了していれば・未終了は -1) */
+	/* ★ 子 agent の終了 status (終了していれば・未終了は -1)。**INTEGER64 で持つ** —
+	 * Windows の例外コード (0xC0000005 等) は int に落とすと負になり、下の
+	 * compose_agent_error() の「st < 0 = まだ観測していない」に化ける (#3550)。 */
+	virtual INTEGER64	child_status();
+	virtual sPtr<stdString>	agent_stderr();   /* #3550: agent の名乗りを裏づけに取るため */
 	/* ★ agent (ts2System=子プロセス) の TSE_RETURN を握りつぶして agentReturnFlag に畳む。
 	 * pigfAgent が med に対してやっているのと同じ作法 (§8.3)。「子が終了した」はどの状態に
 	 * 居ても意味を持つ横断的事実なので、イベントではなくフラグで持つ。 */
 	virtual sPtr<stdEvent>	filter(sPtr<stdEvent> ev);
 	virtual int	pl_write_arg(int idx, sPtr<pigData> d);
 	virtual int	pl_write_end(sPtr<pigDataCache> outCache);
+	/* ⚠⚠ **public に置くこと**。protected だと tscpp2 が interface 側に override を
+	 *   生成せず、glue が基底を **修飾付き (非仮想)** で呼ぶため、エラーも警告も出ないまま
+	 *   基底の no-op が走り続ける (pigfAgent::priority が踏んだのと同じ罠。#3503 で再度踏んだ —
+	 *   猶予が一切効かず gms=0 のままだった)。 */
+	virtual int	is_external();          /* ★ #3503: 1 (子プロセスを持つ) */
+	virtual void	set_grace_ms(int ms);   /* ★ #3503 (基底の但し書き参照) */
+
 protected:
 	/* 破棄列。**界面ではない** (§2.1/§3.2: 外からの終了要求は destroy() に統一) — 自分の
 	 * FIN からだけ呼ぶ。 */
@@ -93,7 +106,11 @@ protected:
 	void		handle_packet(sPtr<ptsWirePacket> pkt);   /* 1 レコードを解釈 */
 	void		post_packet(int type, sPtr<pigData> d);   /* ptsMediatorPacket にして投函 */
 	void		flush_held();                             /* 値パース中に溜めた分を順に処理 */
-	sPtr<ts2System>		agent;    /* agent process (sh -c 経由) */
+	sPtr<ts2System>		agent;    /* agent process。⚠ **直接の子** (2026-08-11 に先頭 '#' =
+	                                   *   直接 execvp が既定になった)。旧コメントの「sh -c 経由」は
+	                                   *   当時の記述で、いまは孫プロセスを挟まない。retPid は実 pid。
+	                                   *   ★ MinGW は '#' 無しのコマンド文字列を **起動しない**
+	                                   *     (retp=-6)。sh の存在を前提にできないため。 */
 	sPtr<ts2IO>		rfd;      /* 子の stdout (読み) */
 	sPtr<ts2IO>		wfd;      /* 子の stdin (書き) */
 	/* ★ 子の stderr (読み)。従来は ts2System に nullptr を渡して ts2IOdevNull へ自動排水させて
@@ -116,9 +133,16 @@ protected:
 	/* ★ ptsWirePipe の終了コード (0=W_END 番兵まで正常 / -1=番兵を見ずに切れた)。
 	 * 「agent は exit 0 なのに会話が途中で切れた」を見分けるのに要る (2026-08-26)。 */
 	int			wireErr;
-	int			childStatus;   /* 子 agent の waitpid 生 status (終了していれば) */
+	/* ★ 子 agent の終了 status。**POSIX の wait status、または 0x10000 以上なら
+	 * Windows の例外コード** (ts2System が MinGW でそう正規化する・#3550)。
+	 * int ではなく INTEGER64 — 0xCxxxxxxx を正のまま保つため。 */
+	INTEGER64		childStatus;
 	int			agentReturnFlag;  /* ★ 子プロセス (ts2System) が終了して TSE_RETURN を返したか */
 	int			retPid;
+	/* ★ #3503: 撤収の猶予。0 = まだ EOF を撃っていない / 1 = 撃って待っている。
+	 *   タイマが切れる (または子が自分で終わる) までは kill を撃たない。 */
+	int			graceArmed;
+	int			graceMs;    /* ★ #3503: pigfAgent が起動時に渡す実効値 */
 	/* ★ #3441: enable(env) で渡された opts。pipe が確立するまで(fork は非同期)保持し、
 	 * enable_body() の末尾で 1 回だけ流す。 */
 	sPtr<pigData>		pendingEnv;
@@ -157,6 +181,8 @@ ptsMediatorExternal_::ptsMediatorExternal_(TS_ARGS0)
         : ptsMediator_(parent),
 	  parent(tinyState_::parent)
 {
+    graceArmed = 0;   /* ★ #3503 */
+    graceMs    = 0;
     TS_CPARGS0
     retPid = 0;
     endSent = 0;
@@ -194,10 +220,48 @@ ptsMediatorExternal_::enable(sPtr<pigData> env)
 
 /* 子 (agent) が終了していれば waitpid の生 status、まだなら -1。pigfAgent が
  * 「版が違う」等の具体的なエラー文を作るのに使う。 */
-int
+INTEGER64
 ptsMediatorExternal_::child_status()
 {
 	return ( agentReturnFlag ) ? childStatus : -1;
+}
+
+/* ★ #3550: agent が stderr に書いたもの。compose_agent_error と同じく **先に読み切る**
+ * (waitpid の通知と sink の read event は順序が保証されない)。 */
+sPtr<stdString>
+ptsMediatorExternal_::agent_stderr()
+{
+	if ( esink.is_notNull() )
+		esink->drain_now();
+	return ( esink.is_notNull() ) ? esink->text() : sPtr<stdString>();
+}
+
+/* ★ #3550: **版不一致のとき agent 自身が stderr に書く名乗り** (srava_agent_main.cpp)。
+ * exit 3 だけでは版不一致と断定できない (Windows の abort() も exit 3) ので、これを裏づけに取る。
+ * ⚠ ASCII の前半だけで照合する — 後続は日本語なので、文言を直しても壊れないように。 */
+#define	PIG_AGENT_VERSION_MARK	"srava_agent: planner"
+
+/* ★ #3550: Windows の例外コードに名前を付ける。**名前が付かないものは 0 を返す**ので
+ * 呼び手が 16 進をそのまま見せる。⚠ ここに載せるのは「異常終了の理由として読めるもの」だけ。
+ * 実際に踏んだものを優先して並べてある (アクセス違反 = #3524 / DLL 初期化失敗 = ビルド中に観測)。 */
+static const char *
+pig_win_exception_name(unsigned long code)
+{
+	switch ( code ) {
+	case 0xC0000005UL: return "EXCEPTION_ACCESS_VIOLATION";
+	case 0xC00000FDUL: return "EXCEPTION_STACK_OVERFLOW";
+	case 0xC000001DUL: return "EXCEPTION_ILLEGAL_INSTRUCTION";
+	case 0xC0000006UL: return "EXCEPTION_IN_PAGE_ERROR";
+	case 0xC000008CUL: return "EXCEPTION_ARRAY_BOUNDS_EXCEEDED";
+	case 0xC0000094UL: return "EXCEPTION_INT_DIVIDE_BY_ZERO";
+	case 0xC0000090UL: return "EXCEPTION_FLT_INVALID_OPERATION";
+	case 0xC0000017UL: return "STATUS_NO_MEMORY";
+	case 0xC0000135UL: return "STATUS_DLL_NOT_FOUND";
+	case 0xC0000142UL: return "STATUS_DLL_INIT_FAILED";
+	case 0xC0000409UL: return "STATUS_STACK_BUFFER_OVERRUN";
+	case 0xC000041DUL: return "STATUS_FATAL_USER_CALLBACK_EXCEPTION";
+	}
+	return 0;
 }
 
 /* ★ agent が異常終了した理由を組み立てる (2026-08-26・ひさ設計)。
@@ -232,7 +296,30 @@ ptsMediatorExternal_::compose_agent_error()
 	if ( etext != 0 && *etext == '\0' ) etext = 0;
 
 	char msg[900];   /* stderr を載せるので長い */
-	int st = ( agentReturnFlag ) ? childStatus : -1;
+	INTEGER64 st = ( agentReturnFlag ) ? childStatus : -1;
+
+	/* ★ #3550: **0x10000 以上は Windows の例外コード** (MinGW の ts2System がそう正規化する)。
+	 * POSIX の wait status は sig / exit code とも 8bit なので 16bit に収まり、この境界で
+	 * 一意に分かれる。⚠ ここを通さずに下の POSIX 解釈へ落とすと、アクセス違反
+	 * (0xC0000005) が「シグナル 5」に化ける。Cygwin は本物の waitpid なのでここへは来ない。 */
+	if ( st >= 0x10000 ) {
+		const unsigned long wcode = (unsigned long)st;
+		/* ⚠ Ctrl+C / コンソール終了は **こちらの撤収でも飛ぶ** ので理由として名乗らない
+		 * (POSIX 側で SIGINT/SIGTERM/SIGKILL を名乗らないのと同じ判断)。 */
+		if ( wcode == 0xC000013AUL || wcode == 0xC00000A3UL )
+			return sPtr<pigData>();
+		const char *name = pig_win_exception_name(wcode);
+		char what[80];
+		if ( name != 0 ) ::snprintf(what, sizeof what, "%s (0x%08lX)", name, wcode);
+		else             ::snprintf(what, sizeof what, "Windows exception 0x%08lX", wcode);
+		if ( etext != 0 )
+			::snprintf(msg, sizeof msg, "agent died with %s. agent stderr: %s", what, etext);
+		else
+			::snprintf(msg, sizeof msg,
+				"agent died with %s - likely a fatal error in a library the module links "
+				"(nothing written to stderr).", what);
+		return thNEW(pigDataError,(msg));
+	}
 
 	if ( st < 0 ) {
 		/* 子の終了をまだ観測していない (起動していない等)。会話が壊れていて stderr に
@@ -265,8 +352,22 @@ ptsMediatorExternal_::compose_agent_error()
 		return thNEW(pigDataError,(msg));
 	}
 
-	if ( code == 3 )
-		return sPtr<pigData>();      /* 版不一致。pigfAgent の fatal 文言に任せる */
+	if ( code == 3 ) {
+		/* ★ #3550: exit 3 は版不一致の**合図**だが、**Windows では abort() も exit 3** なので
+		 * それだけでは断定できない。agent 自身の名乗り (下の marker) があるときだけ
+		 * pigfAgent の fatal 文言に任せ、無ければ「ただの異常終了」として理由を組み立てる。
+		 * ⚠ これを分けないと、モジュールが abort した理由 (stderr) が捨てられて
+		 *   「版が違う」という**誤った断定**に化ける (srava_geogram_fatal が検出)。 */
+		if ( etext != 0 && ::strstr(etext, PIG_AGENT_VERSION_MARK) != 0 )
+			return sPtr<pigData>();
+		if ( etext != 0 )
+			::snprintf(msg, sizeof msg, "agent exited 3. agent stderr: %s", etext);
+		else
+			::snprintf(msg, sizeof msg,
+				"agent exited 3 with nothing on stderr. (exit 3 は版不一致の合図でもある — "
+				"SRAVA_AGENT がこのビルドのものか確認)");
+		return thNEW(pigDataError,(msg));
+	}
 
 	if ( code != 0 ) {
 		if ( etext != 0 )
@@ -305,7 +406,9 @@ ptsMediatorExternal_::filter(sPtr<stdEvent> ev)
 		return ev;
 	if ( ev->type == TSE_RETURN && ev->source == agent ) {
 		agentReturnFlag = 1;
-		childStatus = (int)ev->msg_int;   /* waitpid の生 status (版不一致の判定に使う) */
+		/* ★ (int) に落とさない (#3550)。MinGW は Windows の例外コードを 0x10000 以上の
+		 * 正の値で載せてくるので、32bit に丸めると 0xC0000005 が負に化ける。 */
+		childStatus = ev->msg_int;   /* POSIX の wait status か Windows の例外コード */
 		wakeup();       /* 置き換えイベントで通知 (握りつぶすと状態関数が走らないため) */
 		return thNULL;  /* TSE_RETURN は握りつぶし */
 	}
@@ -409,6 +512,19 @@ ptsMediatorExternal_::pl_write_end(sPtr<pigDataCache> outCache)
 	return 0;
 }
 
+/* ★ #3503: pigfAgent が起動直後に 1 回だけ渡す。実効値の解決は registry の仕事。 */
+int
+ptsMediatorExternal_::is_external()
+{
+	return 1;
+}
+
+void
+ptsMediatorExternal_::set_grace_ms(int ms)
+{
+	graceMs = ms;
+}
+
 void
 ptsMediatorExternal_::teardown()
 {
@@ -420,14 +536,26 @@ ptsMediatorExternal_::teardown()
 		 * とき**に TSE_RETURN (msg_int = waitpid の生 status) を返す。ここで手放すと受け手が
 		 * 居なくなり、子の回収を待たずに parent へ「終わった」と返してしまう (planner が先に消えても
 		 * 重い agent は計算を続ける)。回収は FIN_AGENTWAIT が待つ。 */
-		agent->destroy();
+		/* ★ #3417 (2026-09-06): モードを DM_CONT_KILL に揃える。異常経路では ACT_START が
+		 *   既に撃っているので二度目 (destroy は冪等)。正常経路ではここが唯一の呼び出しだが、
+		 *   その時点で agent は自分で終了済み = 空振りするだけ。 */
+		agent->destroy(DM_CONT_KILL);
 	}
 	if ( retPid > 0 && ptsApp != thNULL ) ptsApp->load_pid_del((uint32_t)retPid);   /* ★ #3419 T4-b */
 	if ( pipe.is_notNull() ) { pipe->destroy(); pipe = thNULL; }
 	if ( rfd.is_notNull() )  { rfd->destroy();  rfd  = thNULL; }
 	if ( wfd.is_notNull() )  { wfd->destroy();  wfd  = thNULL; }
 	if ( vparser.is_notNull() ) { vparser->destroy(); vparser = thNULL; }
-	/* ★ efd / esink は **ここで畳まない**。agent の stderr は EOF まで読み切りたいし、
+	/* ★★ #3556 (2026-09-20): **この設計がこの木を「撤収の窓」に入りやすくしている**。
+	 *   efd を ts2System でなく呼び出し側が持つようにしたのは c67bb36 (2026-08-26・agent の
+	 *   stderr を捨てずに拾うため) だが、その結果 **ts2System に EOF 待ちの保険が 1 本も残って
+	 *   いない** (rfd / wfd / efd の 3 本とも呼び出し側が取っている)。
+	 *   さらに esink は EOF まで生きるので、**撤収の最終盤に ts2IOdescriptor の FIN が走る**。
+	 *   tinyState 側にその時点で仕事を積むと永久ハングになる窓が在り (tinyState #3565:
+	 *   tsThread::FIN_WAIT が ready/run を捨てるのに resRefio() を呼ばない)、box で実機の
+	 *   座り込み個体を捕まえている。⇒ 直すのは tinyState 側だが、**踏みやすい形であること**は
+	 *   こちらの設計判断に由来する。撤収の順序をいじるときはここを思い出すこと。
+	 * ★ efd / esink は **ここで畳まない**。agent の stderr は EOF まで読み切りたいし、
 	 * compose_agent_error() は teardown の**後** (FIN_AGENTWAIT) に読む。efd の destroy は
 	 * esink の FIN が行い、esink 自身は子 tinyState として mediator と一緒に回収される。 */
 	held.length(0);
@@ -462,6 +590,11 @@ ptsMediatorExternal_::post_packet(int type, sPtr<pigData> d)
 void
 ptsMediatorExternal_::handle_packet(sPtr<ptsWirePacket> pkt)
 {
+	/* ★ #3417 (2026-09-06): W_EOF は **agent プロセス側のための通知**なので planner は無視する。
+	 *   こちらが wfd を閉じた結果として自分の pipe にも立つことがあるが、撤収は既に
+	 *   自分で始めている (is_destroyed) ので用が無い。 */
+	if ( pkt.is_notNull() && (int)pkt->type == W_EOF )
+		return;
 	if ( pkt == thNULL )
 		return;
 	int n = pkt->payload.length();
@@ -587,9 +720,59 @@ TS_STATE(ACT_RUN)
 	 * キャッシュを書き切れるようにするため (ひさ回答 2026-08-05)。 */
 	if ( is_destroyed() ) {
 		if ( pipe.is_notNull() ) {
+			/* ★★ #3503 (2026-09-07): **猶予つきの撤収**。
+			 *
+			 * 旧: EOF と SIGKILL を *この 1 回の呼び出しの中で連続して* 撃っていた。
+			 *   ts2System::filter() は destroy 後の最初のイベントで即座に SIGKILL を撃つので、
+			 *   両者はマイクロ秒差。⇒ **agent が自分で畳まれる余地が事実上ゼロ**だった。
+			 *   #3498 で 3 カーネルを配線しても end-to-end で差が出なかったのはこれが理由。
+			 *   ⚠ ファイル冒頭の「即座に殺さないのは書きかけのキャッシュを書き切れるように
+			 *     するため (ひさ回答 2026-08-05)」という意図も、これで失われていた。
+			 *
+			 * 新: EOF を撃ったら grace_ms だけ待つ。子が自分で終われば stdout が閉じて
+			 *   pipe が FIN し、この状態には戻ってこない (= kill は撃たれない)。
+			 *   待っても終わらなければタイマで戻ってきて kill する。
+			 *   grace_ms は「モジュールが自分で畳まれるのに要る時間」の申告
+			 *   (記述子 / module(so,{grace}) / env SRAVA_AGENT_GRACE_MS)。
+			 * ⚠ 連打によるエスカレーションではない (#3417 の否定は *キー入力* 駆動の話)。
+			 *   ここは時間で進む。destroy は冪等なので 2 度目の Ctrl+C は何も変えない。 */
+			const int gms = graceMs;
+			if ( gms != 0 && graceArmed == 0 ) {
+				graceArmed = 1;
+				if ( wfd.is_notNull() ) { wfd->destroy(); wfd = thNULL; }   /* EOF だけ先に */
+				if ( gms > 0 ) stdInterval::wait(ifThis, (INTEGER64)gms * 1000, TSE_TIMER);
+				/* ⚠ gms < 0 (= -1) はタイマを張らない。「必ず自分で畳まれる」と宣言した
+				 *   モジュールだけが名乗れる。止まらない経路が 1 つでもあると永久に待つ。 */
+				return 0;
+			}
+			if ( gms > 0 && graceArmed == 1 && ev != thNULL && ev->type != TSE_TIMER )
+				return 0;   /* 猶予中。タイマ以外のイベントでは kill しない */
+			if ( gms < 0 ) return 0;   /* graceful のみ: kill は撃たない */
 			if ( wfd.is_notNull() ) { wfd->destroy(); wfd = thNULL; }
-			pipe->destroy();
-			return 0;   /* pipe の TSE_RETURN を待つ */
+			/* ★★ #3417 6.2 (2026-09-06): ここで **子プロセスを確実に殺す**。
+			 *
+			 *   旧: pipe->destroy() だけ。しかし ptsWirePipe は is_destroyed() を **1 箇所も
+			 *   見ておらず** (grep で 0 件)、ACT_HDR の rio->read_c() に居座り続ける。
+			 *   FIN → TSE_RETURN に届くのは「相手が W_END を送る」か「read が EOF を踏む」= 
+			 *   **agent プロセスが終了して stdout を閉じたとき**だけ。
+			 *   ⇒ 計算に入り込んだ agent では TSE_RETURN が来ず、FIN_START に到達せず、
+			 *     teardown() の agent->destroy() が **一度も呼ばれなかった**。
+			 *     「planner を殺した後 agent が居残る」の直接の原因。
+			 *
+			 *   新: agent->destroy(DM_CONT_KILL) を撃つ。SIGKILL でプロセスが死ぬと
+			 *   OS が stdout を閉じるので **rio が EOF を踏み、pipe が自然に FIN する**。
+			 *   pipe の TSE_RETURN も ts2System の TSE_RETURN (waitpid) も揃うので、
+			 *   既存の待ち (下の pipe==thNULL 判定 / FIN_AGENTWAIT) がそのまま解ける。
+			 *   ⇒ **ptsWirePipe には一切手を入れなくてよい** (ひさ設計 2026-09-06)。
+			 *
+			 *   ⚠ pipe->destroy() は不要になった。畳むのは teardown() が行う。
+			 *   ⚠ wfd の EOF は先に送ってある。EOF だけで素直に終わる agent (待機中のもの) は
+			 *     kill が届く前に自分で畳まれる。
+			 *   ⚠ 連打によるエスカレーションは **しない** (is_destroyed() は冪等で 2 度目の
+			 *     destroy が伝わらず、キーボードのチャッタリングで graceful のつもりが kill に
+			 *     化ける — ひさ判断 2026-09-06)。撃つ手は常にこの 1 種類。 */
+			if ( agent.is_notNull() ) agent->destroy(DM_CONT_KILL);
+			return 0;   /* pipe の TSE_RETURN (= 子の死による EOF) を待つ */
 		}
 		if ( vparser.is_notNull() ) {
 			vparser->destroy();

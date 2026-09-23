@@ -12,6 +12,12 @@
 #include	<geogram/mesh/mesh_io.h>
 #include	<geogram/mesh/mesh_repair.h>
 #include	<geogram/mesh/mesh_surface_intersection.h>
+#include	<geogram/mesh/mesh_convex_hull.h>   /* ★ #3511: compute_convex_hull_3d */
+#include	<geogram/numerics/predicates.h>    /* ★ #3511: 退化の事前判定 (厳密述語) */
+#include	<geogram/mesh/mesh_AABB.h>          /* ★ #3514: 点との距離 (MeshFacetsAABB) */
+#include	<geogram/points/co3ne.h>            /* ★ #3535①: 点群の法線推定 (Co3Ne) */
+#include	<geogram/basic/command_line.h>      /* ★ #3535①: Co3Ne が読む変数の宣言 */
+#include	<geogram/basic/command_line_args.h>
 
 #include	"pig/c++/pigModuleRegistry.h"   /* モジュール専用データの預かり所 (static を置かないため) */
 #include	"common/exact_wire.h"   /* cgal 厳密 wire の有理数文字列パーサ (manifold と共通) */
@@ -78,6 +84,90 @@ ggMesh::ensure_init()
 	 * configure() 自身が即時に適用する(下)。 */
 	if ( d != thNULL && d->maxThreads > 0 )
 		GEO::Process::set_max_threads((GEO::index_t)d->maxThreads);
+}
+
+/* ★★ #3535①: 点群の法線推定 (Co3Ne)。**GEO:: に直に触るのはこちら側 (libsrava_gg) だけ**
+ * という規約のためにここにある (理由は ggMesh.h の宣言のところ)。
+ * 中身は 2026-09-14 まで ggaEstimateNormals.cpp (= geogram.so 側) にあったものをそのまま移した。
+ * ⚠ 移したことで @c GEO::initialize() の **2 度呼びは不要**になった (対症療法 7a3f853)。
+ *   ensure_init() とこの関数が同じ .so に居るので、初期化されるコピーが必ず一致する。 */
+int
+ggMesh::co3ne_normals(const double *xyz, int np, int k,
+                      std::vector<double> &oxyz, std::vector<double> &onrm,
+                      char *err, int errsz)
+{
+	ensure_init();   /* ★ この .so のコピーを初期化する = 下で触るのと同じコピー */
+	/* ⚠⚠ Co3Ne は **CmdLine の変数を読む** (co3ne:max_N_angle / co3ne:strict / log:pretty)。
+	 *   宣言されていない変数を引くと geogram は **assert で落ちる** (environment.cpp:217
+	 *   "Assertion failed: variable_exists")。⇒ 使う前に arg group を import しておく。
+	 *   ⚠ 3 群とも要る: co3ne (max_N_angle / strict) / algo (**nn_search** — kNN 探索の実装名を
+	 *     nn_search.cpp:133 が引く) / standard (log:pretty)。
+	 *   ★ import_arg_group は geogram 側で **冪等** (関数内 static の集合で 1 回に畳む)。 */
+	GEO::CmdLine::import_arg_group("standard");
+	GEO::CmdLine::import_arg_group("algo");
+	GEO::CmdLine::import_arg_group("co3ne");
+
+	try {
+		GEO::Mesh M;
+		M.vertices.set_dimension(3);
+		/* ★ 平坦な double 配列をそのまま渡せる (これが点群型を中立にできた理由そのもの)。 */
+		M.vertices.assign_points(xyz, 3, (GEO::index_t)np);
+
+		int ok = GEO::Co3Ne_compute_normals(M, (GEO::index_t)k, true /* reorient */) ? 1 : 0;
+
+		/* ⚠⚠ #3528: **点が減っていないことを確かめる**。この op の約束は「黙って点を
+		 *   減らさない」(CGAL の作法は向き付かなかった点を erase するが、それは採らなかった —
+		 *   点は残して印だけ下ろす) なのに、出口で **入力の np で回していた**。
+		 *   ⇒ Co3Ne が頂点を減らす版と組んだら、そのまま範囲外読み出しになる。
+		 *   ★ 2026-09-14 現在、減る実装は見つかっていない。それでも検査を置くのは、
+		 *     **約束が守られていることを誰も見ていなかった**ため。
+		 *   ⚠ 落ちるのではなく明示エラーにする。「いくつ減ったか」が分かれば追える。 */
+		const GEO::index_t nv = M.vertices.nb();
+		if ( nv != (GEO::index_t)np ) {
+			if ( err != 0 && errsz > 0 )
+				::snprintf(err, (size_t)errsz,
+				    "geogram changed the point count (%d in, %u out); "
+				    "this op must not drop points, so the result cannot be trusted",
+				    np, (unsigned)nv);
+			return -1;
+		}
+
+		GEO::Attribute<double> normal;
+		normal.bind_if_is_defined(M.vertices.attributes(), "normal");
+		if ( ! normal.is_bound() ) {
+			if ( err != 0 && errsz > 0 )
+				::snprintf(err, (size_t)errsz, "geogram produced no \"normal\" attribute");
+			return -1;
+		}
+		/* ⚠ 属性の要素数も見る (dim=3 で無ければ 3*i+2 が範囲外になる)。
+		 *   ★ nb_elements() は **nb_items × dimension**。 */
+		if ( normal.nb_elements() < (GEO::index_t)3 * nv ) {
+			if ( err != 0 && errsz > 0 )
+				::snprintf(err, (size_t)errsz,
+				    "geogram's \"normal\" attribute is not 3 values per point");
+			return -1;
+		}
+		oxyz.reserve((size_t)np * 3);
+		onrm.reserve((size_t)np * 3);
+		for ( int i = 0 ; i < np ; ++i ) {
+			const double *p = M.vertices.point_ptr((GEO::index_t)i);
+			oxyz.push_back(p[0]);
+			oxyz.push_back(p[1]);
+			oxyz.push_back(p[2]);
+			onrm.push_back(normal[3*(size_t)i + 0]);
+			onrm.push_back(normal[3*(size_t)i + 1]);
+			onrm.push_back(normal[3*(size_t)i + 2]);
+		}
+		return ok;
+	} catch ( const std::exception &e ) {
+		if ( err != 0 && errsz > 0 )
+			::snprintf(err, (size_t)errsz, "geogram failed (%s)", e.what());
+		return -1;
+	} catch ( ... ) {
+		if ( err != 0 && errsz > 0 )
+			::snprintf(err, (size_t)errsz, "geogram failed");
+		return -1;
+	}
 }
 
 /* ★ #3441 (ひさ設計 2026-08-26): module("geogram.so",{threads:N}) を受ける。
@@ -194,6 +284,39 @@ ggMesh::op_valid() const
 	return srava_mesh::valid(v);
 }
 
+/* ---- 点との距離 (#3514) ----
+ * ⚠ MeshFacetsAABB は **入力メッシュを並べ替える** (AABB の構築で facets を reorder する)。
+ *   共有された値を壊さないよう **複製に対して**作る。
+ * ⚠ 符号は付けない (内側でも正)。cgal / occt / openvdb と約束を揃えてある。 */
+int
+ggMesh::op_distance_at(const double p[3], double *out) const
+{
+	ensure_init();
+	if ( m_.facets.nb() == 0 ) return 0;
+	GEO::Mesh work;
+	work.copy(m_);
+	GEO::MeshFacetsAABB aabb(work);
+	GEO::vec3 q(p[0], p[1], p[2]), np;
+	double sq = 0.0;
+	aabb.nearest_facet(q, np, sq);
+	if ( out ) *out = std::sqrt(sq < 0.0 ? 0.0 : sq);
+	return 1;
+}
+
+/* ---- 位相: シェル数 / 塊数 / 総種数 (#3514) ----
+ * 定義と導き方 (塊 = 符号つき体積が正のシェル) は common/meshprops.h の topology()。 */
+int
+ggMesh::op_topology(int *nshells, int *nparts, int *genus) const
+{
+	GgSoup s(m_);
+	srava_mesh::TriView v = s.view();
+	srava_mesh::Topology p = srava_mesh::topology(v);
+	if ( nshells ) *nshells = p.nshells;
+	if ( nparts  ) *nparts  = p.nparts;
+	if ( genus   ) *genus   = p.genus;
+	return p.closed;
+}
+
 
 double
 ggMesh::volume() const
@@ -262,6 +385,105 @@ gg_bool(const GEO::Mesh &A, sPtr<ggMesh> b, const char *expr, char *err, int err
 	sPtr<ggMesh> out = thNEW(ggMesh,());
 	if ( ! gg_guard([&]{ GEO::mesh_boolean_operation(out->mesh(), A, b->mesh(), expr); }, err, errsz) )
 		return sPtr<ggMesh>();
+	return out;
+}
+
+/* 点集合が **3 次元に広がっているか** (= 凸包が立体になるか) を厳密述語で見る。
+ * 真 = 広がっている / 偽 = 1 点・1 直線上・1 平面上 (退化)。
+ * 3 段階に分けるのは、各段が次の段の前提になるため (同一点を除いてから共線を、
+ * 共線でない 3 点を得てから共面を見る)。最悪でも点数の 3 倍しか触らない。 */
+static bool
+gg_points_are_coplanar(const GEO::Mesh &m)
+{
+	const GEO::index_t n = m.vertices.nb();
+	if ( n < 4 ) return false;
+	const double *p0 = m.vertices.point_ptr(0);
+	GEO::index_t i1 = 1;
+	while ( i1 < n && GEO::PCK::points_are_identical_3d(p0, m.vertices.point_ptr(i1)) ) ++i1;
+	if ( i1 >= n ) return false;                       /* 全部同じ点 */
+	const double *p1 = m.vertices.point_ptr(i1);
+	GEO::index_t i2 = i1 + 1;
+	while ( i2 < n && GEO::PCK::points_are_colinear_3d(p0, p1, m.vertices.point_ptr(i2)) ) ++i2;
+	if ( i2 >= n ) return false;                       /* 全部 1 直線上 */
+	const double *p2 = m.vertices.point_ptr(i2);
+	for ( GEO::index_t i = i2 + 1 ; i < n ; ++i )
+		if ( GEO::PCK::orient_3d(p0, p1, p2, m.vertices.point_ptr(i)) != GEO::ZERO )
+			return true;
+	return false;                                      /* 全部 1 平面上 */
+}
+
+/* ---- ★ 凸包 (#3511) ---------------------------------------------------------
+ * @c GEO::compute_convex_hull_3d は **その Mesh の頂点を点集合として読み、同じ Mesh を
+ * 凸包の三角形で置き換える** (in/out 引数)。⇒ 全オペランドの頂点を 1 つの Mesh へ写して
+ * 1 回呼べば n 項が済む。面も属性も要らない。
+ *
+ * ⚠ 面を見ないので、閉じていない入力も自己交差した入力もそのまま通る。geogram のブールが
+ *   前提にする「閉じていて自己交差の無い曲面」の制約は hull には掛からない。
+ * ⚠ 退化 (1 点 / 1 直線上 / 1 平面上) は立体にならない。面数で弾く。
+ * ⚠ 出力の面の向きは geogram に任せる。裏返っていると体積が負になるので、ここで
+ *   確かめて直す (ブールの内外判定が向きで決まるため、裏返ったまま下流へ流せない)。 */
+sPtr<ggMesh>
+ggMesh::hull_from_args(sArray<sPtr<pigData> > *args, const char **errmsg, char *errbuf, int errbufsz)
+{
+	int na = ( args != 0 ) ? args->length() : 0;
+	if ( na < 1 ) { *errmsg = "needs at least one mesh"; return sPtr<ggMesh>(); }
+	ensure_init();
+	sPtr<ggMesh> out = thNEW(ggMesh,());
+	for ( int i = 0 ; i < na ; ++i ) {
+		sPtr<ggMesh> mi = sPtr<ggMesh>::d_cast((*args)[i]);
+		if ( ! mi.is_notNull() ) { *errmsg = "needs geogram meshes"; return sPtr<ggMesh>(); }
+		const GEO::Mesh &m = mi->mesh();
+		for ( GEO::index_t v = 0 ; v < m.vertices.nb() ; ++v ) {
+			const GEO::vec3 &p = m.vertices.point(v);
+			out->add_vertex(p.x, p.y, p.z);
+		}
+	}
+	if ( out->mesh().vertices.nb() == 0 ) { *errmsg = "the operands have no vertices"; return sPtr<ggMesh>(); }
+	/* ★★ 退化は **geogram へ渡す前に**弾く。点が 1 平面に乗っていると @c compute_convex_hull_3d が
+	 *   **戻ってこない** (実測: box(1,1,0) の hull で 90 秒経っても返らず kill した)。
+	 *   ⚠ 面数を見る後段の検査では間に合わない。判定は geogram 自身の**厳密述語**で行う
+	 *   (double の外積で 0 を判定すると、丸めで「退化していないことにして」また固まる)。
+	 *
+	 * ★ 2026-09-13 追試 — 原因は「3D Delaunay だから」ではなく **「並列版だから」**だった。
+	 *   @c compute_convex_hull_3d は @c Delaunay::create(3,"PDEL") と **マルチスレッド版**
+	 *   (@c ParallelDelaunay3d) を決め打ちしている (mesh_convex_hull.cpp)。同じ入力を
+	 *   **逐次版** (@c Delaunay3d ・登録名 "BDEL") へ直接渡すと *0.00 秒で「四面体 0 個」を返す*。
+	 *
+	 *     入力 (z=0 の格子 400 点)      BDEL 逐次 0.00s cells=0   PDEL 並列 **>45s ハング**
+	 *     ほぼ同一平面 (ノイズ 1e-12)   BDEL      0.00s cells=2357  PDEL     0.00s cells=2357
+	 *     乱数 3D (20 万点)             BDEL      0.46s             PDEL     0.15s (×3)
+	 *
+	 *   ⇒ 止まるのは **厳密に同一平面のときだけ**で、*ほぼ*同一平面は並列版でも安全。
+	 *     つまり「危険な入力」と「この厳密述語が検出する入力」が**過不足なく一致している**。
+	 *   ⇒ この門番は **そのまま必要** (hull は PDEL 経由なので)。直したのは理由の記述だけ。
+	 *   ⚠ geogram 上流の欠陥と思われる (25 点の平面格子で並列 Delaunay が停止する)。
+	 *   ⚠ 将来 delaunay op を配線するときは、退化入力で "BDEL" を選べば止まらない。ただし
+	 *     "PDEL" は @c #ifdef GEOGRAM_WITH_PDEL の条件コンパイルで、**未登録の名前を渡すと
+	 *     @c Delaunay::create は警告だけ出して NN mode (最近傍探索構造 = Delaunay ではない) を
+	 *     返す**。Logger を quiet にしていると警告も見えないので、
+	 *     @c DelaunayFactory::has_creator("PDEL") で先に存在を確かめること。 */
+	if ( ! gg_points_are_coplanar(out->mesh()) ) {
+		*errmsg = "the points are degenerate (a single point, all on one line, or all on one plane), "
+		          "so the convex hull is not a solid";
+		return sPtr<ggMesh>();
+	}
+	if ( ! gg_guard([&]{ GEO::compute_convex_hull_3d(out->mesh()); }, errbuf, errbufsz) ) {
+		*errmsg = ( errbuf != 0 && errbuf[0] != '\0' ) ? errbuf : "geogram could not build the convex hull";
+		return sPtr<ggMesh>();
+	}
+	if ( out->mesh().facets.nb() < 4 ) {
+		*errmsg = "the points are degenerate (a single point, all on one line, or all on one plane), "
+		          "so the convex hull is not a solid";
+		return sPtr<ggMesh>();
+	}
+	if ( out->volume() < 0.0 ) {   /* 裏返っていたら向きを揃える */
+		GEO::Mesh &m = out->mesh();
+		for ( GEO::index_t f = 0 ; f < m.facets.nb() ; ++f ) {
+			GEO::index_t a = m.facets.vertex(f, 0);
+			m.facets.set_vertex(f, 0, m.facets.vertex(f, 2));
+			m.facets.set_vertex(f, 2, a);
+		}
+	}
 	return out;
 }
 

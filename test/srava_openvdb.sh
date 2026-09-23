@@ -1,4 +1,6 @@
 #!/bin/sh
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 # openvdb (ボリューム型) モジュール (#3434 P2) の振る舞い回帰。
 # $1 = srava 実行体。$2 = モード。env: SRAVA_AGENT, SRAVA_CACHE_DIR。
 #

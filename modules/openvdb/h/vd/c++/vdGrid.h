@@ -36,7 +36,13 @@
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigModuleError.h"   /* #3475: 自分の名前でエラーを作る */
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
-#include	<openvdb/openvdb.h>
+#include	"vd/c++/vdBreak.h"       /* #3498: 中断 (どの op が止まるかは vdBreak.h の表) */
+/* ★★ #3545 段 5 (2026-09-18): **OpenVDB のヘッダをここから外した**。
+ *   これを include しただけの op TU に上流の可変大域が emit されていた
+ *   (@openvdb::math::Mat3/Mat4<double>::identity()::sIdentity@ ・ 30/31 本が保持)。
+ *   ⇒ 実体は不透明な @vdGridBox@ が抱え、OpenVDB 型を取る API は @vd/c++/vdGridVdb.h@ にある。
+ *   ⚠ vdGridVdb.h を op の .cpp から include しないこと (柵が数えている)。 */
+class vdGridBox;
 #include	<stdint.h>
 #include	<vector>
 
@@ -95,9 +101,14 @@ class vdGrid : public vdGeom {
 public:
 	vdGrid(sPtr<pigInfo> i = thNULL);
 
-	openvdb::FloatGrid::Ptr&       grid()       { return g_; }
-	const openvdb::FloatGrid::Ptr& grid() const { return g_; }
-	void set_grid(openvdb::FloatGrid::Ptr g) { g_ = g; }
+	virtual ~vdGrid();
+
+	/* ★ #3545: OpenVDB の実体は不透明な箱の中。中身を取るのは vdGridVdb.h の vd_grid()。 */
+	vdGridBox&       box()       { return *box_; }
+	const vdGridBox& box() const { return *box_; }
+
+	/* ★ op 側が「中身が入っているか」だけを見るための述語 (OpenVDB 型を要さない)。 */
+	int has_grid() const;
 
 	virtual sPtr<stdString> get_str();
 
@@ -151,7 +162,7 @@ public:
 	 *   - メッシュ往復 (rebuild) が消えるので **速くもなった**。
 	 *   ★ 解像度に依存する近似値であることは変わらない。桁が要るなら isosurface で
 	 *     メッシュにしてから測る。これは別の話。 */
-	double volume() const;          /* 符号つきボクセル積分 (world 単位) */
+	double volume(const pigBreak *brk = 0) const;   /* 符号つきボクセル積分 (world 単位) */
 	double voxel_size() const;      /* 格子間隔 (等方前提) */
 	int    active_voxels() const;   /* 活性ボクセル数 (= 狭帯域の実サイズ) */
 
@@ -167,8 +178,39 @@ public:
 	 *   これは「別のことを答えている」のではなく「その表現では ②③ が恒真」という事実。 */
 	int    op_bbox(double mn[3], double mx[3]) const;
 	int    op_centroid(double c[3]) const;
-	double op_area() const;
+	double op_area(const pigBreak *brk = 0) const;
 	int    op_valid() const;
+	/* ★ #3514: **点との距離** — p から零等値面までの最短距離 (符号なし)。
+	 *   返り 1 = 出せた / 0 = 空 / **-1 = 狭帯域の外**。
+	 *   ★★ この表現では距離が **場そのもの**なので、探索も三角形化も要らず値を読むだけで出る。
+	 *     ⇒ 符号も本当は持っている (負 = 内側) が、op の約束は cgal / occt / geogram と
+	 *       揃えて **符号なし**にしてある。
+	 *   ⚠⚠ 狭帯域 (既定 3 ボクセル) の外では値が background に **飽和**していて、
+	 *     「遠い」ことしか分からない。飽和していたら -1 を返し、呼び側が明示エラーにする
+	 *     — 飽和値をそのまま距離として返すと **黙って嘘の数**になる。
+	 *   ⚠ 帯の中でも解像度に依存する近似値 (体積・面積と同じ)。 */
+	int    op_distance_at(const double p[3], double *out) const;
+
+	/* ---- #3579/#3580: 点群を立体に対して **3 つに分ける** ------------------------
+	 * @cls[i]@ = **0 境界ちょうど / -1 内側 (開) / +1 外側**。@pts@ は @dim@ 成分 x @npt@
+	 * (@dim@ = 2 なら **z=0 とみなす**)。返り 1 = 分けた / 0 = 断った (+ @why@)。
+	 *
+	 * ★★ 判定は **距離場の符号**。⚠ @op_distance_at@ は使えない — あちらは
+	 *   「点から境界までの最短距離」の約束なので **符号を落として**返し (#3553 で 4 モジュール
+	 *   共通に符号なしと定義を揃えた)、しかも **帯の外を明示エラーにする**。
+	 *   ⇒ 距離としては正しい振る舞いだが、分類には両方とも都合が悪い:
+	 *     ・符号が無いと内外が言えない
+	 *     ・点群は面から遠い点を普通に含む (rand の一様点はまさにそれ) ので、
+	 *       帯の外で断られると **ほとんどの点が分類できない**
+	 * ★ 帯の外でも **符号は生きている** (level set の background は外が +bg / 内が -bg)。
+	 *   ⇒ 飽和していても内外は言える。*距離の値*が意味を失うだけ。
+	 *   ⚠ この前提は端から端まで試して確かめてある (球の中心 = 帯の外 が「内側」と出ること)。
+	 *
+	 * ★ 境界の帯は **0.75 ボクセル** — #3491 が零交差の近くで oracle を訊かないのと同じ幅。
+	 *   ⚠ これは欠陥ではなくこの表現の精度そのもの (#3575: s[0] の厚みはモジュールごとに
+	 *     違ってよい)。⚠ 逆に s[1] / s[2] は他モジュールと一致するべき。 */
+	int    op_classify_points(const double *pts, int npt, int dim,
+	                          signed char *cls, const char **why) const;
 
 	/* OpenVDB のグローバル初期化 (プロセスに 1 回)。全 op の入口で呼ぶ。
 	 * ★ GEO::initialize() と同じ性質で、これを呼ばずに触ると型レジストリが未登録で落ちる。 */
@@ -186,7 +228,7 @@ public:
 
 	/* ★ #3462: プリミティブ。OpenVDB 本体の生成器をそのまま使う。
 	 *   これが入るまで openvdb は leaf を作れず、mesh を manifold に作らせて voxelize していた。 */
-	static sPtr<vdGrid> make_sphere(double r, double dx);
+	static sPtr<vdGrid> make_sphere(double r, double dx, const pigBreak *brk = 0);
 	static sPtr<vdGrid> make_box(double w, double h, double d, double dx);
 
 	/* ★ #3463: 一般アフィン変換 (行優先 3x4)。translate / rotate / scale / mirror /
@@ -202,7 +244,7 @@ public:
 	 *   world 変換」に差し替え、出力を**元の格子**で用意して呼ぶ。level set の面倒
 	 *   (scale/shear で距離が保存されない件) は resampleToMatch が内部の
 	 *   doLevelSetRebuild で見てくれる。 */
-	sPtr<vdGrid> op_affine(const double e[12]);
+	sPtr<vdGrid> op_affine(const double e[12], const pigBreak *brk = 0);
 
 	/* ★ #3441 (ABI v10): module("openvdb.so",{threads:N}) の受け口。記述子の .configure に配線。
 	 *   n > 0 = op あたりの上限 / n <= 0 = 指定なし (TBB 既定へ戻す)。
@@ -213,13 +255,47 @@ public:
 	 * (ABI を変えずにモジュール別を実現する形)。 */
 	static void configure(sPtr<pigData> opts);
 
+	/* ★★ #3545 段 5: **op が OpenVDB を触らずに済むように**、素の型で受けるメソッドを
+	 *   こちら (幾何 lib 側) に足した。移す前は vdaEmpty3D / vdaOffset / vdaRenormalize の
+	 *   3 本だけが直に OpenVDB を呼んでいた。 */
+	/* 空の level set (背景 = dx)。⚠ 中身は各 op が入れる。 */
+	static sPtr<vdGrid> make_empty(double dx);
+	/* ★★ #3545 段 5: **三角形スープから level set を作る** (meshToLevelSet)。
+	 *   ⚠ 素の配列で受けるのが要点 — これが無いと @vdTriSink.h@ が OpenVDB の型
+	 *     (@Vec3s@ / @Vec3I@) を公開面に持ち、それを include する **9 本の op TU** が
+	 *     上流を引く (nef が踏んだ「推移的な取り込み」と同じ形)。 */
+	static sPtr<vdGrid> from_triangles(const double *xyz, int nv,
+	                                   const uint32_t *tri, int nt, double dx);
+	/* level set のオフセット (LevelSetFilter::offset)。⚠ 入力は DAG で共有されうるので複製してから。
+	 *   失敗は null (+ why に理由・静的文字列)。 */
+	sPtr<vdGrid> op_offset(double d, const pigBreak *brk, const char **why) const;
+	/* 距離場の作り直し (volumeToMesh → meshToLevelSet)。hw <= 0 なら既定の帯幅。 */
+	sPtr<vdGrid> op_renormalize(double hw, const pigBreak *brk, const char **why) const;
+
 private:
-	openvdb::FloatGrid::Ptr g_;
+	vdGridBox *box_;   /* ★ #3545: OpenVDB の実体 (不透明)。ctor で確保・dtor で解放 */
 };
 
 
 /* ★ #3475: このモジュール専用のエラー生成子。文言は "[TAG] <name>/op: message" になる。
  *   素の vda_err(...) を使うとモジュール名が付かない。 */
 PIG_DEFINE_MODULE_ERR(vda_err, VD_MODULE_NAME)
+
+/* ★ #3498: 中断で終わったならそのエラーを、そうでなければ thNULL。
+ *
+ * ⚠ **失敗を報告する前に必ずこれを見ること**。中断された算法は「作れなかった」(null) や
+ *   途中までの値を返してくるので、そのまま報告すると *中断したのに格子が悪いと言う* ことになる。
+ * ⚠⚠ 特に **計測 (volume / area) は途中までの総和を返す** — 見た目は普通の数値なので、
+ *   これを通すと **中断が「小さめの答え」として成功扱いで焼き付く**。キャッシュに入れば
+ *   次回以降それが正しい答えとして引かれる (#3489 の cache_version 上げ忘れと同じ形)。
+ *   ⇒ 計測でも必ずここを通す。 */
+static inline sPtr<pigData>
+vd_abort_err(const pigBreak &b, const char *op)
+{
+	if ( ! b.cancelled() ) return sPtr<pigData>();
+	char m[160];
+	::snprintf(m, sizeof m, "%s: aborted (interrupted)", op ? op : "openvdb");
+	return sPtr<pigData>(vda_err(m));
+}
 
 #endif

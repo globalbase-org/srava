@@ -8,6 +8,8 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"cg/c++/cgMesh.h"
+#include	"cg/c++/cgAffineDemote.h"   /* ★ #3554 段5 */
+#include	"pig/c++/pigOpMatch.h"   /* ★ 段5: routing と同じ軸判定を使う */
 #include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
@@ -86,7 +88,28 @@ cgaRotate_::compute()
 		mesh = thNEW(cgMesh3D,());
 		return;
 	}
+	/* ★★ #3526 (2026-09-13): **2D は枠 (平面) を持つようになった**ので、面外へ出す変換は
+	 *   もう断らない — cgMesh2D::apply_affine が z 成分を **枠へ渡す**。
+	 *   ⚠ #3518 の但し書きとして 2940662 で「黙って射影する」のを明示エラーにしたが、
+	 *     それは *置き場所を持てなかった* からで、持てるなら断る理由は無い。
+	 *   ⚠ 線形部が退化して平面が線に潰れる場合だけ null が返る ⇒ 明示エラーにする。 */
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<cgMesh>();
+	/* ★★ #3554 段5 (2026-09-19): **routing と同じ判定でなければならない**。
+	 *   routing 側 (@rotate#z@ のマッチ関数) は *軸が z か* しか見られない — マッチ関数は
+	 *   引数を 1 個ずつしか受け取らないので、*軸と角度の両方*で決まる「平面を保つか」を
+	 *   判定できないため。⇒ ここで @keeps_z_plane(e)@ を使うと **判定が食い違う**:
+	 *     rotate(R,"x",180) は行列としては平面を保つ (2D では mirror("y")) ので、
+	 *     routing は基底行 (sig ->cg-face3d) を選ぶのに計算本体は cross2d を返す
+	 *     = **sig と実際の型が食い違う** (2026-09-19 に実測して発覚)。
+	 *   ⇒ ここでも *軸が z か* だけを見る。⚠ 保守的だが **嘘をつかない**ほうを採る。 */
+	if ( pig_val_axis_is_z(( args != 0 && args->length() > 1 ) ? (*args)[1] : sPtr<pigData>()) )
+		cg_demote_if_flat(in, mesh, e);
+	if ( in.is_notNull() && ! mesh.is_notNull() ) {
+		result = cga_err(thNEW(stdString,(
+		    "rotate: this transform flattens the 2D region onto a line (its plane collapses)")));
+		mesh = thNEW(cgMesh3D,());
+		return;
+	}
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

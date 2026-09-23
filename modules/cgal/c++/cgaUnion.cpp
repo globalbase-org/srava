@@ -79,7 +79,13 @@ cgaUnion_::compute()
 	}
 	mesh = ma->op_union(mb);   /* 多態: 3D=corefinement / 2D=bso_2(将来)。次元を知らない */
 	if ( ! mesh.is_notNull() ) {
-		const char *m = ( ma->dim() != mb->dim() )
+		/* ★ #3526 + #3479: **理由を言い分ける**。2D で平面が本当に違うのか、ブールその
+		 *   ものが失敗したのかで説明が全く別になる。⚠ ここを混ぜると利用者は
+		 *   *閉じた立体が触れ合っている* という無関係な説明を読むことになる。 */
+		const char *m = cg_2d_planes_differ(ma, mb)
+		    ? "union: the 2D regions are on different planes, so the result is not a 2D region "
+		      "(it would drop to a segment); move them onto one plane first"
+		    : ( ma->dim() != mb->dim() )
 		    ? "union: cannot mix 2D and 3D operands"
 		    : "union: boolean failed. Operands must be closed solids that do not touch tangentially or "
 		      "share coplanar faces, and must not self-intersect (an earlier boolean may have made "

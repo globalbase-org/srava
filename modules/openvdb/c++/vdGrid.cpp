@@ -2,6 +2,7 @@
  * vdGrid — OpenVDB ボリューム幾何の実装 (#3434 P2)。設計の背景はヘッダ冒頭を参照。
  */
 #include	"vd/c++/vdGrid.h"
+#include	"vd/c++/vdGridVdb.h"   /* ★ #3545 段 5: OpenVDB を引くのはここだけ */
 #include	"common/blockframe.h"   /* ★ #3507: ブロック分割フレーミング */
 #include	"pig/c++/pigModuleRegistry.h"   /* モジュール専用データの預かり所 (static を置かないため) */
 #include	"ts2/c++/stdString.h"
@@ -22,8 +23,12 @@
 #include	<string>
 #include	<vector>
 #include	<openvdb/tools/LevelSetSphere.h>
+#include	<openvdb/tools/LevelSetFilter.h>   /* ★ #3545 段 5: offset を op から移した */
+#include	<openvdb/tools/VolumeToMesh.h>     /* ★ #3545 段 5: renormalize を op から移した */
+#include	"vd/c++/vdMeshVoxelize.h"          /* vd_mesh_to_levelset (空洞を保つ入口) */
 #include	<openvdb/tools/MeshToVolume.h>
 #include	<openvdb/tools/GridTransformer.h>
+#include	<openvdb/tools/Interpolation.h>   /* ★ #3514: 点との距離 = 場を読むだけ */
 
 /* ---- ★ 環境変数 SRAVA_OP_THREADS — op 内並列のスレッド予算 ----
  *
@@ -100,14 +105,18 @@ vd_data(int id, int create)
  * manifold で球を作って voxelize する従来の経路より 1 段短い。
  * ⚠ どちらも **原点中心**。他カーネルの box / sphere と揃えてある。 */
 sPtr<vdGrid>
-vdGrid::make_sphere(double r, double dx)
+vdGrid::make_sphere(double r, double dx, const pigBreak *brk)
 {
 	ensure_init();
+	/* ★ #3498: createLevelSetSphere は interrupter を取る (LevelSetSphere.h に 1 箇所)。
+	 *   ⚠ box (LevelSetPlatonic.h) には中断点が **無い**ので、そちらは渡す先が無い。 */
+	vdBreakScope br(brk);
 	openvdb::FloatGrid::Ptr g = openvdb::tools::createLevelSetSphere<openvdb::FloatGrid>(
-	    (float)r, openvdb::Vec3f(0.0f, 0.0f, 0.0f), (float)dx);
+	    (float)r, openvdb::Vec3f(0.0f, 0.0f, 0.0f), (float)dx,
+	    (float)openvdb::LEVEL_SET_HALF_WIDTH, br.ptr());
 	if ( ! g ) return sPtr<vdGrid>();
 	sPtr<vdGrid> out = thNEW(vdGrid,());
-	out->set_grid(g);
+	out->box().g = g;
 	return out;
 }
 
@@ -141,7 +150,7 @@ vdGrid::make_box(double w, double h, double d, double dx)
 	    openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(*xform, pts, tri);
 	if ( ! g ) return sPtr<vdGrid>();
 	sPtr<vdGrid> out = thNEW(vdGrid,());
-	out->set_grid(g);
+	out->box().g = g;
 	return out;
 }
 
@@ -160,9 +169,9 @@ vdGrid::make_box(double w, double h, double d, double dx)
  *   非等方でも縮小でも正しく rebuild される (narrow band が薄くなる懸念は
  *   resampleToMatch が halfWidth を出力側から決め直すので吸収される)。 */
 sPtr<vdGrid>
-vdGrid::op_affine(const double e[12])
+vdGrid::op_affine(const double e[12], const pigBreak *brk)
 {
-	if ( ! g_ ) return sPtr<vdGrid>();
+	if ( ! box_->g ) return sPtr<vdGrid>();
 	/* 目的の world 変換 M (行優先 3x4) を Mat4R へ。⚠ OpenVDB は**行ベクトル規約**
 	 * (applyMap(in) = in * mMatrix) なので、転置して入れる。 */
 	openvdb::Mat4R M = openvdb::Mat4R::identity();
@@ -171,20 +180,22 @@ vdGrid::op_affine(const double e[12])
 			M[j][i] = e[i*4+j];
 	M.setTranslation(openvdb::Vec3R(e[3], e[7], e[11]));
 
-	const openvdb::math::Transform &base = g_->transform();
+	const openvdb::math::Transform &base = box_->g->transform();
 	if ( ! base.isLinear() ) return sPtr<vdGrid>();   /* 非線形 map は対象外 */
 	openvdb::Mat4R B = base.baseMap()->getAffineMap()->getMat4();
 
-	openvdb::FloatGrid::Ptr tmp = g_->copy();          /* 木は共有 (shallow) */
+	openvdb::FloatGrid::Ptr tmp = box_->g->copy();          /* 木は共有 (shallow) */
 	tmp->setTransform(openvdb::math::Transform::createLinearTransform(B * M));
 
-	openvdb::FloatGrid::Ptr res = openvdb::FloatGrid::create(g_->background());
+	openvdb::FloatGrid::Ptr res = openvdb::FloatGrid::create(box_->g->background());
 	res->setTransform(base.copy());                    /* ★ 元の格子のまま */
-	res->setGridClass(g_->getGridClass());
-	openvdb::tools::resampleToMatch<openvdb::tools::BoxSampler>(*tmp, *res);
+	res->setGridClass(box_->g->getGridClass());
+	/* ★ #3498: resampleToMatch は interrupter を取る (GridTransformer.h に 1 箇所)。 */
+	vdBreakScope br(brk);
+	openvdb::tools::resampleToMatch<openvdb::tools::BoxSampler>(*tmp, *res, br.ref());
 
 	sPtr<vdGrid> out = thNEW(vdGrid,());
-	out->set_grid(res);
+	out->box().g = res;
 	return out;
 }
 
@@ -242,10 +253,115 @@ vdGrid::ensure_init()
 	vd_apply_thread_budget();
 }
 
-vdGrid::vdGrid(sPtr<pigInfo> i) : vdGeom(i)
+vdGrid::vdGrid(sPtr<pigInfo> i) : vdGeom(i), box_(new vdGridBox)
 {
 	ensure_init();
-	g_ = openvdb::FloatGrid::create();   /* background = 0。実体は各 op が入れる */
+	box_->g = openvdb::FloatGrid::create();   /* background = 0。実体は各 op が入れる */
+}
+
+/* ★ #3545 段 5: 不透明な箱の後始末。ヘッダ側は前方宣言しか持たないので **ここに定義が要る**
+ *   (ヘッダで inline にすると delete が不完全型になる)。 */
+vdGrid::~vdGrid()
+{
+	delete box_;
+}
+
+/* ★ op 側が OpenVDB 型を触らずに「中身が入っているか」だけを見るための述語。 */
+int
+vdGrid::has_grid() const
+{
+	return ( box_ != 0 && box_->g ) ? 1 : 0;
+}
+
+/* ---- ★★ #3545 段 5: op から移してきた 3 本 ------------------------------------
+ * ⚠ 移す前は vdaEmpty3D / vdaOffset / vdaRenormalize が **直に OpenVDB を呼んでいた**ので、
+ *   その 3 本だけは vdGrid.h を不透明にしても上流を引き続けていた。⇒ 素の型で受ける入口を
+ *   こちら (幾何 lib 側) に置く (#3545 の型・⑤)。 */
+
+sPtr<vdGrid>
+vdGrid::make_empty(double dx)
+{
+	/* ★ 活性ボクセルが 1 つも無い level set = 空集合。★ dx を取るのは、ボリューム同士の
+	 *   合成が transform 一致を要求するため — 空でも「どの格子の上の空か」が要る。 */
+	openvdb::FloatGrid::Ptr g = openvdb::createLevelSet<openvdb::FloatGrid>(dx);
+	if ( ! g ) return sPtr<vdGrid>();
+	sPtr<vdGrid> out = thNEW(vdGrid,());
+	out->box().g = g;
+	return out;
+}
+
+sPtr<vdGrid>
+vdGrid::from_triangles(const double *xyz, int nv, const uint32_t *tri, int nt, double dx)
+{
+	std::vector<openvdb::Vec3s> pts;
+	std::vector<openvdb::Vec3I> tris;
+	pts.reserve((size_t)nv);
+	tris.reserve((size_t)nt);
+	for ( int i = 0 ; i < nv ; ++i )
+		pts.push_back(openvdb::Vec3s((float)xyz[3*(size_t)i+0],
+		                             (float)xyz[3*(size_t)i+1],
+		                             (float)xyz[3*(size_t)i+2]));
+	for ( int i = 0 ; i < nt ; ++i )
+		tris.push_back(openvdb::Vec3I(tri[3*(size_t)i+0], tri[3*(size_t)i+1], tri[3*(size_t)i+2]));
+	openvdb::math::Transform::Ptr xform = openvdb::math::Transform::createLinearTransform(dx);
+	openvdb::FloatGrid::Ptr g = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(*xform, pts, tris);
+	if ( ! g ) return sPtr<vdGrid>();
+	sPtr<vdGrid> o = thNEW(vdGrid,());
+	o->box().g = g;
+	return o;
+}
+
+sPtr<vdGrid>
+vdGrid::op_offset(double d, const pigBreak *brk, const char **why) const
+{
+	if ( why ) *why = 0;
+	if ( ! box_->g ) { if ( why ) *why = "offset: needs an openvdb grid"; return sPtr<vdGrid>(); }
+	openvdb::FloatGrid::Ptr g = box_->g->deepCopy();   /* 入力は DAG で共有されうる = 壊さない */
+	if ( d != 0.0 ) {
+		/* ★ #3498: LevelSetFilter は ctor で interrupter を取り、内部の LevelSetTracker が
+		 *   要所で引く。中断されると **途中までしか動いていない格子**が残るので、
+		 *   呼び手が旗を見て捨てる (ここでは null を返さない — 区別は呼び手がする)。 */
+		vdBreakScope br(brk);
+		openvdb::tools::LevelSetFilter<openvdb::FloatGrid> f(*g, br.ptr());
+		f.offset((float)(-d));   /* ★ srava は d>0 で膨張・OpenVDB は phi に足すと収縮 */
+	}
+	sPtr<vdGrid> out = thNEW(vdGrid,());
+	out->box().g = g;
+	return out;
+}
+
+sPtr<vdGrid>
+vdGrid::op_renormalize(double hw, const pigBreak *brk, const char **why) const
+{
+	if ( why ) *why = 0;
+	if ( ! box_->g ) { if ( why ) *why = "renormalize: needs an openvdb grid"; return sPtr<vdGrid>(); }
+	const float halfWidth = ( hw > 0 ) ? (float)hw : (float)openvdb::LEVEL_SET_HALF_WIDTH;
+	/* ★★ #3491: tools::levelSetRebuild を直接呼ばない。中身は volumeToMesh → meshToVolume の
+	 *   往復で、**メッシュ → 距離場の側が内部空洞を埋める**。同じ往復を自前で回し、
+	 *   メッシュ → 距離場だけを空洞を保つ共通の入口 (vd_mesh_to_levelset) に差し替える。
+	 *   ⚠ volumeToMesh は四角形も出すので、三角形へ割ってから渡す。
+	 *   ⚠ #3498: **volumeToMesh には中断点が 1 つも無い** ⇒ 止まるのは後半だけ。 */
+	std::vector<openvdb::Vec3s> pts;
+	std::vector<openvdb::Vec3I> tris;
+	std::vector<openvdb::Vec4I> quads;
+	openvdb::tools::volumeToMesh(*box_->g, pts, tris, quads, /*isovalue=*/0.0);
+	tris.reserve(tris.size() + 2*quads.size());
+	for ( size_t i = 0 ; i < quads.size() ; ++i ) {
+		const openvdb::Vec4I &q = quads[i];
+		tris.push_back(openvdb::Vec3I(q[0], q[1], q[2]));
+		tris.push_back(openvdb::Vec3I(q[0], q[2], q[3]));
+	}
+	long fellBack = 0;
+	openvdb::FloatGrid::Ptr g =
+	    vd_mesh_to_levelset(pts, tris, box_->g->transform(), halfWidth, &fellBack, brk);
+	if ( ! g ) { if ( why ) *why = "renormalize: levelSetRebuild failed"; return sPtr<vdGrid>(); }
+	if ( fellBack > 0 )
+		::fprintf(stderr, "[renormalize] WARN: %ld column(s) with non-zero winding sum "
+		                  "(isosurface is not a closed, consistently oriented surface); "
+		                  "internal cavities will be filled\n", fellBack);
+	sPtr<vdGrid> out = thNEW(vdGrid,());
+	out->box().g = g;
+	return out;
 }
 
 sPtr<stdString>
@@ -260,15 +376,15 @@ vdGrid::get_str()
 double
 vdGrid::voxel_size() const
 {
-	if ( ! g_ ) return 0.0;
-	return g_->transform().voxelSize()[0];   /* 等方前提 (voxelize が等方でしか作らない) */
+	if ( ! box_->g ) return 0.0;
+	return box_->g->transform().voxelSize()[0];   /* 等方前提 (voxelize が等方でしか作らない) */
 }
 
 int
 vdGrid::active_voxels() const
 {
-	if ( ! g_ ) return 0;
-	return (int)g_->activeVoxelCount();
+	if ( ! box_->g ) return 0;
+	return (int)box_->g->activeVoxelCount();
 }
 
 /* ---- 場が真の距離場かどうかの印 (grid メタデータ = .vdb を越える) ---- */
@@ -277,16 +393,16 @@ static const char *VD_META_NORMALIZED = "srava_normalized";
 void
 vdGrid::set_normalized(bool v)
 {
-	if ( ! g_ ) return;
-	g_->removeMeta(VD_META_NORMALIZED);
-	g_->insertMeta(VD_META_NORMALIZED, openvdb::BoolMetadata(v));
+	if ( ! box_->g ) return;
+	box_->g->removeMeta(VD_META_NORMALIZED);
+	box_->g->insertMeta(VD_META_NORMALIZED, openvdb::BoolMetadata(v));
 }
 
 bool
 vdGrid::is_normalized() const
 {
-	if ( ! g_ ) return true;
-	openvdb::BoolMetadata::ConstPtr m = g_->getMetadata<openvdb::BoolMetadata>(VD_META_NORMALIZED);
+	if ( ! box_->g ) return true;
+	openvdb::BoolMetadata::ConstPtr m = box_->g->getMetadata<openvdb::BoolMetadata>(VD_META_NORMALIZED);
 	/* ★ 印が無ければ正規化済みとみなす。voxelize / renormalize は必ず印を付けるので、
 	 *   印が無いのは srava の外で作られた .vdb だけ。 */
 	if ( ! m ) return true;
@@ -298,20 +414,20 @@ int
 vdGrid::op_bbox(double mn[3], double mx[3]) const
 {
 	mn[0] = mn[1] = mn[2] = mx[0] = mx[1] = mx[2] = 0.0;
-	if ( ! g_ || g_->activeVoxelCount() == 0 ) return 3;
+	if ( ! box_->g || box_->g->activeVoxelCount() == 0 ) return 3;
 	/* ★ 活性ボクセルの箱をそのまま使うと **狭帯域の厚み**ぶん膨らむ (既定 3 ボクセル =
 	 *   dx の 3 倍)。零等値面をまたぐボクセル (|値| <= dx) だけを見れば dx の精度で済む。 */
 	const double dx = voxel_size();
 	bool first = true;
-	for ( openvdb::FloatGrid::ValueOnCIter it = g_->cbeginValueOn() ; it ; ++it ) {
+	for ( openvdb::FloatGrid::ValueOnCIter it = box_->g->cbeginValueOn() ; it ; ++it ) {
 		if ( std::fabs((double)*it) > dx ) continue;
 		openvdb::CoordBBox bb;
 		if ( it.isVoxelValue() ) bb = openvdb::CoordBBox(it.getCoord(), it.getCoord());
 		else                     it.getBoundingBox(bb);
 		/* ★ ボクセルの **中心**で見る。±0.5 ボクセルぶん膨らませると誤差が 1.5dx になるが、
 		 *   中心なら「真の面から dx 以内」に収まる (|値| <= dx で選んでいるため)。 */
-		openvdb::Vec3d lo = g_->indexToWorld(openvdb::Vec3d(bb.min().x(), bb.min().y(), bb.min().z()));
-		openvdb::Vec3d hi = g_->indexToWorld(openvdb::Vec3d(bb.max().x(), bb.max().y(), bb.max().z()));
+		openvdb::Vec3d lo = box_->g->indexToWorld(openvdb::Vec3d(bb.min().x(), bb.min().y(), bb.min().z()));
+		openvdb::Vec3d hi = box_->g->indexToWorld(openvdb::Vec3d(bb.max().x(), bb.max().y(), bb.max().z()));
 		for ( int k = 0 ; k < 3 ; ++k ) {
 			double a = lo[k] < hi[k] ? lo[k] : hi[k];
 			double b = lo[k] < hi[k] ? hi[k] : lo[k];
@@ -327,12 +443,12 @@ int
 vdGrid::op_centroid(double c[3]) const
 {
 	c[0] = c[1] = c[2] = 0.0;
-	if ( ! g_ ) return 3;
+	if ( ! box_->g ) return 3;
 	/* ★ 内側 = 値が負。狭帯域の外の内部は **タイル**で持たれている (活性ではない) ので、
 	 *   ValueOn では届かない。cbeginValueAll でタイルも一緒に走査し、
 	 *   タイルは「中心 × 含むボクセル数」で重み付けする。 */
 	double sx = 0, sy = 0, sz = 0, w = 0;
-	for ( openvdb::FloatGrid::ValueAllCIter it = g_->tree().cbeginValueAll() ; it ; ++it ) {
+	for ( openvdb::FloatGrid::ValueAllCIter it = box_->g->tree().cbeginValueAll() ; it ; ++it ) {
 		if ( (double)*it >= 0.0 ) continue;
 		openvdb::CoordBBox bb;
 		double n;
@@ -341,7 +457,7 @@ vdGrid::op_centroid(double c[3]) const
 		openvdb::Vec3d ctr(0.5*(bb.min().x()+bb.max().x()),
 		                   0.5*(bb.min().y()+bb.max().y()),
 		                   0.5*(bb.min().z()+bb.max().z()));
-		openvdb::Vec3d wp = g_->indexToWorld(ctr);
+		openvdb::Vec3d wp = box_->g->indexToWorld(ctr);
 		sx += n * wp.x(); sy += n * wp.y(); sz += n * wp.z(); w += n;
 	}
 	if ( w > 0.0 ) { c[0] = sx/w; c[1] = sy/w; c[2] = sz/w; }
@@ -421,14 +537,21 @@ vd_dirac(double phi, double eps)
 
 /* volume と area を **1 回の走査**で出す。want_area が 0 なら勾配を取らない。
  * ★ 逐次に足す = 実行ごとに同じ値 (cold と warm で volume が動かないことは renorm が見張る)。 */
+/* ★ #3498: brk が非 0 なら走査中に中断を見る。中断したら *aborted に 1 を立てて途中で戻る。
+ * ⚠ **途中までの総和を答えとして返さないこと**。見た目は普通の数値なので、通すと中断が
+ *   「小さめの正しい答え」として焼き付く。呼び手は必ず *aborted を見て vd_abort_err を返す。 */
 static void
-vd_measure(const openvdb::FloatGrid &g, int want_area, double *vol, double *area)
+vd_measure(const openvdb::FloatGrid &g, int want_area, double *vol, double *area,
+           const pigBreak *brk = 0, int *aborted = 0)
 {
+	vdBreakPoll poll(brk);
+	if ( aborted ) *aborted = 0;
 	const double dx  = g.transform().voxelSize()[0];
 	const double eps = 1.5 * dx;   /* LevelSetMeasure と同じ半幅 (3 ボクセル幅) */
 	double sv = 0.0, sa = 0.0;
 	openvdb::FloatGrid::ConstAccessor acc = g.getConstAccessor();
 	for ( openvdb::FloatGrid::ValueAllCIter it = g.tree().cbeginValueAll() ; it ; ++it ) {
+		if ( poll.cancelled() ) { if ( aborted ) *aborted = 1; return; }
 		const double phi = (double)*it;
 		if ( ! it.isVoxelValue() ) {          /* タイル = 帯の外。符号だけ */
 			if ( phi < 0.0 ) {
@@ -476,11 +599,13 @@ vd_measure(const openvdb::FloatGrid &g, int want_area, double *vol, double *area
 }
 
 double
-vdGrid::op_area() const
+vdGrid::op_area(const pigBreak *brk) const
 {
-	if ( ! g_ || g_->activeVoxelCount() == 0 ) return 0.0;   /* 空は 0 (throw させない) */
+	if ( ! box_->g || box_->g->activeVoxelCount() == 0 ) return 0.0;   /* 空は 0 (throw させない) */
 	double a = 0.0;
-	vd_measure(*g_, /*want_area=*/1, 0, &a);
+	/* ★ #3498: 中断されたら a は途中までの総和。呼び手が vd_abort_err で弾く約束
+	 *   (ここで 0 を返して「空」に化けさせない — 0 は空という *答え* なので嘘が濃くなる)。 */
+	vd_measure(*box_->g, /*want_area=*/1, 0, &a, brk);
 	return a;
 }
 
@@ -488,20 +613,72 @@ int
 vdGrid::op_valid() const
 {
 	/* ★ 共通定義の ②③ (閉じている / 自己交差が無い) は距離場では恒真なので ① だけ見る。 */
-	return ( g_ && g_->activeVoxelCount() > 0 ) ? 1 : 0;
+	return ( box_->g && box_->g->activeVoxelCount() > 0 ) ? 1 : 0;
+}
+
+/* ---- 点との距離 (#3514) ----
+ * ★★ この表現の面白いところ: 距離は **場そのもの**なので、AABB も三角形化も要らず
+ *   世界座標でサンプルするだけで出る (他の 4 カーネルは最近接探索をしている)。
+ * ⚠⚠ 狭帯域の外は background に **飽和**している。飽和値を距離として返すと黙って嘘になるので、
+ *   帯の外なら -1 を返して呼び側に明示エラーを出させる。
+ *   判定は |phi| >= background * (1 - 1e-6)。background は halfWidth * voxelSize。
+ * ⚠ 補間は三次線形 (BoxSampler)。ボクセル内では線形なので、帯の中でも誤差は dx の程度。 */
+int
+vdGrid::op_distance_at(const double p[3], double *out) const
+{
+	ensure_init();
+	if ( ! box_->g || box_->g->activeVoxelCount() == 0 ) return 0;
+	openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> samp(*box_->g);
+	const double phi = (double)samp.wsSample(openvdb::Vec3R(p[0], p[1], p[2]));
+	const double bg  = (double)box_->g->background();
+	const double a   = ( phi < 0.0 ) ? -phi : phi;
+	if ( bg > 0.0 && a >= bg * (1.0 - 1e-6) ) return -1;   /* 帯の外 = 「遠い」しか分からない */
+	if ( out ) *out = a;
+	return 1;
 }
 
 
-double
-vdGrid::volume() const
+/* ★★ #3579/#3580: 点群を 3 つに分ける。判定は **距離場の符号** (宣言側に理由の全文)。
+ * ★ 帯は **0.75 ボクセル** (#3491 が零交差の近くで oracle を訊かないのと同じ幅)。
+ *   ⚠ 帯の外は飽和しているが **符号は生きている**ので内外は言える。 */
+int
+vdGrid::op_classify_points(const double *pts, int npt, int dim,
+                           signed char *cls, const char **why) const
 {
-	if ( ! g_ ) return 0.0;
+	*why = 0;
+	if ( dim != 2 && dim != 3 ) { *why = "the point cloud must be 2D or 3D"; return 0; }
+	ensure_init();
+	if ( ! box_->g || box_->g->activeVoxelCount() == 0 ) {
+		*why = "this level set is empty, so it encloses nothing";
+		return 0;
+	}
+	const double dx = box_->g->transform().voxelSize()[0];
+	/* ⚠ dx が出ないと帯が決められない ⇒ 黙って 0 にせず断る。 */
+	if ( !(dx > 0.0) ) { *why = "this level set has no voxel size, so the band cannot be set"; return 0; }
+	const double band = 0.75 * dx;
+	openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> samp(*box_->g);
+	for ( int i = 0 ; i < npt ; ++i ) {
+		const double x = pts[(size_t)i*dim + 0];
+		const double y = pts[(size_t)i*dim + 1];
+		const double z = ( dim == 3 ) ? pts[(size_t)i*dim + 2] : 0.0;   /* ★ 2D は z=0 */
+		const double phi = (double)samp.wsSample(openvdb::Vec3R(x, y, z));
+		if ( phi > band )       cls[i] = (signed char)1;    /* 外 */
+		else if ( phi < -band ) cls[i] = (signed char)-1;   /* 内 */
+		else                    cls[i] = (signed char)0;    /* 境界の帯 */
+	}
+	return 1;
+}
+
+double
+vdGrid::volume(const pigBreak *brk) const
+{
+	if ( ! box_->g ) return 0.0;
 	/* ★ #3474 続き (2026-09-05): **活性ボクセルが 1 つも無い格子 = 空集合**は体積 0。
 	 *   ⚠ ここで先に返さないと OpenVDB が
 	 *     "LevelSetMeasure does not support empty grids" を **throw** し、
 	 *     ワーカースレッドから漏れて agent ごと死ぬ (geogram で踏んだのと同じ形)。
 	 *   空は empty3d() だけでなく、差で丸ごと消えた中間結果としても普通に出る。 */
-	if ( g_->activeVoxelCount() == 0 ) return 0.0;
+	if ( box_->g->activeVoxelCount() == 0 ) return 0.0;
 	/* ★ level set の体積は等値面が囲む世界座標系の体積。**メッシュを作らずに**出せるのが
 	 *   ボリューム表現の利点 (メッシュ系は面を積む)。解像度に依存する近似値なので、
 	 *   メッシュ系との一致は「相対誤差」で見る (bit 一致は要求しない)。
@@ -509,7 +686,7 @@ vdGrid::volume() const
 	 *   ⚠ 印 (is_normalized) はもう見ない。積分は |grad| = 1 を仮定しないので分ける必要が
 	 *     無く、しかも分岐先で掛けていた levelSetRebuild こそが **空洞を埋めていた**。 */
 	double v = 0.0;
-	vd_measure(*g_, /*want_area=*/0, &v, 0);
+	vd_measure(*box_->g, /*want_area=*/0, &v, 0, brk);   /* ★ #3498: 中断時の扱いは op_area と同じ */
 	return v;
 }
 
@@ -523,7 +700,7 @@ vd_wrap(openvdb::FloatGrid::Ptr g)
 {
 	if ( ! g ) return sPtr<vdGrid>();
 	sPtr<vdGrid> out = thNEW(vdGrid,());
-	out->set_grid(g);
+	out->box().g = g;
 	out->set_normalized(false);
 	return out;
 }
@@ -532,24 +709,24 @@ sPtr<vdGrid>
 vdGrid::op_union(sPtr<vdGrid> b)
 {
 	ensure_init();
-	if ( b == thNULL || !g_ || !b->grid() ) return sPtr<vdGrid>();
-	return vd_wrap(openvdb::tools::csgUnionCopy(*g_, *b->grid()));
+	if ( b == thNULL || !box_->g || !b->box().g ) return sPtr<vdGrid>();
+	return vd_wrap(openvdb::tools::csgUnionCopy(*box_->g, *b->box().g));
 }
 
 sPtr<vdGrid>
 vdGrid::op_intersection(sPtr<vdGrid> b)
 {
 	ensure_init();
-	if ( b == thNULL || !g_ || !b->grid() ) return sPtr<vdGrid>();
-	return vd_wrap(openvdb::tools::csgIntersectionCopy(*g_, *b->grid()));
+	if ( b == thNULL || !box_->g || !b->box().g ) return sPtr<vdGrid>();
+	return vd_wrap(openvdb::tools::csgIntersectionCopy(*box_->g, *b->box().g));
 }
 
 sPtr<vdGrid>
 vdGrid::op_difference(sPtr<vdGrid> b)
 {
 	ensure_init();
-	if ( b == thNULL || !g_ || !b->grid() ) return sPtr<vdGrid>();
-	return vd_wrap(openvdb::tools::csgDifferenceCopy(*g_, *b->grid()));
+	if ( b == thNULL || !box_->g || !b->box().g ) return sPtr<vdGrid>();
+	return vd_wrap(openvdb::tools::csgDifferenceCopy(*box_->g, *b->box().g));
 }
 
 /* ---- wire 形式 (D_META 4CC "VDB ") ------------------------------------------
@@ -580,7 +757,7 @@ vdGrid::encode(vdChunkSink &sink)
 	blockframe::obuf<vdChunkSink> ob(sink);
 	std::ostream                  os(&ob);
 	openvdb::GridCPtrVec grids;
-	if ( g_ ) grids.push_back(g_);
+	if ( box_->g ) grids.push_back(box_->g);
 	openvdb::io::Stream(os).write(grids);
 	os.flush();
 	ob.finish();
@@ -597,8 +774,8 @@ vdGrid::decode(vdChunkSource &src)
 	openvdb::io::Stream strm(is, /*delayLoad=*/false);
 	openvdb::GridPtrVecPtr grids = strm.getGrids();
 	if ( ! grids || grids->empty() ) { set_decode_err("the stored VDB file contains no grid"); return; }
-	g_ = openvdb::gridPtrCast<openvdb::FloatGrid>((*grids)[0]);
-	if ( ! g_ ) set_decode_err("the stored VDB grid is not a FloatGrid; openvdb only handles FloatGrid");
+	box_->g = openvdb::gridPtrCast<openvdb::FloatGrid>((*grids)[0]);
+	if ( ! box_->g ) set_decode_err("the stored VDB grid is not a FloatGrid; openvdb only handles FloatGrid");
 }
 
 sPtr<vdGeom>
@@ -619,10 +796,10 @@ vdGrid::write_to(const char *path, const char *unit)
 {
 	(void)unit;   /* 単位付きの形式は未対応 — export_exts で申告していない */
 	ensure_init();
-	if ( ! g_ ) return false;
+	if ( ! box_->g ) return false;
 	openvdb::io::File f(path);
 	openvdb::GridCPtrVec grids;
-	grids.push_back(g_);
+	grids.push_back(box_->g);
 	f.write(grids);
 	f.close();
 	return true;
@@ -654,10 +831,10 @@ vdGrid::bool_from_args(sArray<sPtr<pigData> > *args, const char *kind,
 		 *   静かに返す。いまは voxelize が等方 map しか作らないので dx の比較で足りているが、
 		 *   一般の transform が入ってくることを見越して**最初から全体で比べる**。
 		 *   ★ 一部でも異なればエラー (全項を先頭と突き合わせる)。 */
-		if ( ! ops[i]->grid() ) { *errmsg = "needs openvdb grids"; return sPtr<vdGrid>(); }
+		if ( ! ops[i]->box().g ) { *errmsg = "needs openvdb grids"; return sPtr<vdGrid>(); }
 		if ( i == 0 ) { d0 = ops[0]->voxel_size(); continue; }
-		const openvdb::math::Transform &t0 = ops[0]->grid()->transform();
-		const openvdb::math::Transform &ti = ops[i]->grid()->transform();
+		const openvdb::math::Transform &t0 = ops[0]->box().g->transform();
+		const openvdb::math::Transform &ti = ops[i]->box().g->transform();
 		if ( ! (t0 == ti) ) {
 			double d = ops[i]->voxel_size();
 			if ( d != d0 )

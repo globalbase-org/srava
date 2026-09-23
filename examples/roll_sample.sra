@@ -28,12 +28,12 @@ var pitch_viz = 3.0;    // 出力チューブのサンプリング間隔
 var core = { ctrl: [[0,0,-60],[0,0,0],[0,0,700]], radius: a, movable: 0 };
 var pipe = { radius: [r, m], movable: 1 };
 var params = { maxIter: 100, wBend: 0.1, threads: 21, parallel: 1, wSpace: 0.1 };  // wSpace=制御点均一化
-var mandrel = tube([ [core.ctrl[0], a], [core.ctrl[length(core.ctrl)-1], a] ]);
+var mandrel = tube_ruled([ [core.ctrl[0], a], [core.ctrl[length(core.ctrl)-1], a] ]);
 
 // ================= 出力ヘルパ =================
 var arc_of = \(ctrl){ var S = arclen(map(pipe_sample(ctrl, [r,m], 0), \(p){ p[0]; })); S[length(S)-1]; };
 var export_horn = \(ctrl, path){   // 真半径(テーパ反映)ホーン + 芯マンドレル
-    export(path, color(tube(pipe_sample(ctrl, [r,m], pitch_viz), 32), "orange") +++ color(mandrel, "gray"));
+    export(path, color(tube_ruled(pipe_sample(ctrl, [r,m], pitch_viz), 32), "orange") +++ color(mandrel, "gray"));
 };
 
 // ================= 実行 =================

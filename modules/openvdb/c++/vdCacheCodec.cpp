@@ -9,6 +9,7 @@
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"
 #include	"vd/c++/vdGrid.h"
+#include	"pt/c++/ptCloud.h"   /* ★ #3580: 値の器を借りる (#3528) */
 #include	"vd/c++/ptsvdWireCacheStreamReaderGrid.h"
 #include	"vd/c++/ptsvdWireCacheStreamWriterGrid.h"
 
@@ -53,6 +54,13 @@ extern const pigModuleType openvdb_provides[];
 const pigModuleType openvdb_provides[] = {
 	{ &vdGeom::WIRE, VD_TYPE,
 	  VD_TAG },
+	/* ★ #3580: **自前のクラスを作らず libsrava_pt のクラスをそのまま並べる**
+	 *   (cgal / geomutils / occt_mf が同じ作法)。intersection(点群, grid) が点群を
+	 *   *受けて* 点群を *返す* ので、agent プロセスに openvdb.so しか load されない
+	 *   process 実行でも codec がここから届く必要がある。
+	 *   ⚠ 借りているのは **値の器** だけで幾何の機能ではない ⇒ モジュール境界の約束①
+	 *     (他カーネルの機能を借りて自分の顔で出さない) に触れない。 */
+	{ &ptCloud::WIRE, PT_TYPE_2D "," PT_TYPE_3D, PT_TAG_2D "," PT_TAG_3D },
 	{ 0, 0, 0 },
 };
 

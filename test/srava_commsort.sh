@@ -8,17 +8,18 @@
 # $1=srava 実行体。SRAVA_AGENT / SRAVA_CACHE_DIR は cmake が注入。
 SRAVA="$1"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
-# ★ #3452: 起動時 eager-load 撤去に伴い、union/intersection/difference の実行に実カーネルの
-#   明示ロードが要る。
-export SRAVA_MODULE_ALL=1
-# include "module/all.sra" の解決に要る(cmake ENVIRONMENT が SRAVA_PATH を設定していないため)。
-SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
-export SRAVA_PATH
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
+# ★ #3569: 要るのは **cgal 1 本だけ** — box / union / intersection / difference / export は
+#   すべて cgal (priority 20) が答える。#3452 の互換スイッチ (all.sra 16 本) は外した。
+#   ⚠ この検定はキャッシュキーの一致/不一致を見るので、**読むモジュールが変わると鍵も変わる**。
+#     比較は同じ run の中で閉じているので、1 本に減らしても関係は保たれる。
+MCG='module("cgal.so",{});'
 
 hashof() {   # $1 = srava ソース → result cache の 16hex を返す。dir を毎回リセットして
 	# 他 run のキャッシュ掃除ログ("swept unused cache: <hash>")の混入を防ぐ。result 行限定で抽出。
 	rm -rf "$D"
-	SRAVA_SOURCE="$1" "$SRAVA" 2>&1 | grep 'result cache=' | grep -oE '[0-9a-f]{16}\.cache' | head -1
+	SRAVA_SOURCE="$MCG$1" "$SRAVA" 2>&1 | grep 'result cache=' | grep -oE '[0-9a-f]{16}\.cache' | head -1
 }
 
 u1=$(hashof 'export(box(2,2,2) ||| box(1,1,3));')

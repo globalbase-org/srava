@@ -29,6 +29,7 @@
 #include	"pig/c++/pigOpEntry.h"   /* pigWireClass (配線先) */
 #include	<geogram/mesh/mesh.h>
 #include	<stdint.h>
+#include	<vector>
 
 #define GG_MODULE_NAME	"geogram"
 #define GG_TYPE		"gg-mesh3d"
@@ -134,6 +135,17 @@ public:
 	static sPtr<ggMesh> bool_from_args(sArray<sPtr<pigData> > *args, const char *kind,
 	                                   const char **errmsg, char *errbuf = 0, int errbufsz = 0);
 
+	/* ★ #3511: 凸包 hull(a[,b,…]) — **1 個以上**を受け、与えた形すべての凸包を返す。
+	 *   geogram は @c GEO::compute_convex_hull_3d を持つ (中身は 3D Delaunay。header いわく
+	 *   将来 QuickHull へ置き換え予定)。**入口は「頂点だけを入れた Mesh」** なので、
+	 *   全オペランドの頂点を 1 つの Mesh へ写してから 1 回呼べばよい = n 項がそのまま通る。
+	 *   ⚠ 面は見ない (arrangement もブールも通らない) ので、**閉じている必要も自己交差が
+	 *     無い必要も無い**。かわりに穴も凹みも消える。
+	 *   ⚠ 退化 (1 点 / 1 直線上 / 1 平面上) は立体にならない。面数を見て明示エラーにする。
+	 *   失敗時は null を返し *errmsg に理由を置く (errbuf は呼び手が用意する受け皿)。 */
+	static sPtr<ggMesh> hull_from_args(sArray<sPtr<pigData> > *args, const char **errmsg,
+	                                   char *errbuf = 0, int errbufsz = 0);
+
 	/* ★ #3445: 自己交差した境界から**内外を決め直して**ソリッドにする。
 	 *   geogram の MeshSurfaceIntersection (arrangement + radial sort) で交差を解き、
 	 *   外側シェルだけを残す。cgal/manifold には無い能力。 */
@@ -151,11 +163,43 @@ public:
 	int    op_centroid(double c[3]) const;
 	double op_area() const;
 	int    op_valid() const;
+	/* ★ #3514: 位相を **直接**数える。返り 1 = 閉じている (0 なら genus は意味を持たない)。
+	 *   ⚠ geogram の @mesh_nb_connected_components@ / @mesh_Xi@ は使っていない。欲しいのは
+	 *     **シェルごとの**符号つき体積 (塊と空洞の区別) で、上流はメッシュ全体の値しか返さない
+	 *     ⇒ 成分ごとの集計が要り、それは topology() が 1 パスでやっている。 */
+	int    op_topology(int *nshells, int *nparts, int *genus) const;
+	/* ★ #3514: **点との距離** — p から境界までの最短距離 (符号なし)。返り 1 = 出せた。
+	 *   GEO::MeshFacetsAABB (三角形の内部まで含めた最近接) を使う。 */
+	int    op_distance_at(const double p[3], double *out) const;
 	int    nverts() const { return (int)m_.vertices.nb(); }
 	int    nfaces() const { return (int)m_.facets.nb(); }
 
 	/* geogram のグローバル初期化 (プロセスに 1 回)。全 op の入口で呼ぶ。 */
 	static void ensure_init();
+
+	/* ★★ #3535①: **点群の法線推定 (Co3Ne)**。中身は geogram なのに *メッシュではない* ので
+	 *   ggMesh に置くのは一見ちぐはぐだが、置き場所を決めているのは「何を扱うか」ではなく
+	 *   **どの .so に実体があるか**である。
+	 *   ⚠⚠ geogram は @c GEO:: の file-scope な可変状態 (CmdLine の変数表・Process の
+	 *     スレッド数) を持ち、静的リンクされた .so ごとに **その状態が別物**になる。
+	 *     op 側 (geogram.so) から @c GEO::Co3Ne_* を直に呼ぶと、その参照は
+	 *     *geogram.so 自身が抱え込んだコピー* に解決され、@c ggMesh::ensure_init() が
+	 *     初期化した libsrava_gg 側のコピーとは別になる ⇒ @c CmdLine::desc_ が nullptr のまま
+	 *     @c declare_arg に入って SIGSEGV した (2026-09-14・Linux 実測・#3535 4 節)。
+	 *   ⇒ **GEO:: に直に触るのは libsrava_gg 側だけ**という規約を、申し送りではなく
+	 *     *コードの位置* で守る。op はこの入口を呼ぶだけで GEO:: を一切見ない。
+	 *   ⚠ 併せて CMake 側で geogram.so から geogram アーカイブを外してある
+	 *     (LINK srava_gg のみ) ので、この規約を破ると **リンクが通らない** = 構造で止まる。
+	 *
+	 *   xyz  … 平坦な double 配列 (x,y,z の np 個)
+	 *   k    … kNN の近傍数 (呼び手が 1..np-1 に丸めておくこと)
+	 *   oxyz … 出力の点 (3*np 個。入力と同じ順・同じ数)
+	 *   onrm … 出力の法線 (3*np 個・正規化済み)
+	 *   返り 1 = 向き付けた / 0 = 推定はしたが向き付けていない / -1 = 失敗 (err に理由)
+	 *   ⚠ 「点が減っていないこと」の検査もここで行う (減る実装と組んだら範囲外読みになる)。 */
+	static int co3ne_normals(const double *xyz, int np, int k,
+	                         std::vector<double> &oxyz, std::vector<double> &onrm,
+	                         char *err, int errsz);
 
 	/* ★ #3441 (ひさ設計 2026-08-26): module("geogram.so",{threads:N}) を受ける configure フック。
 	 * geogram は GEO::initialize() 経由で **nproc をそのまま**スレッド数に使う (ensure_init 参照)。

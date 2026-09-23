@@ -1,5 +1,5 @@
 /*
- * ocaRevolve — revolve(cross2d, angle[, segs]) (#3471)。2D 領域 (oc-cross2d) を Y 軸まわりに
+ * ocaRevolve — revolve(cross2d, angle[, segs]) (#3471)。2D 領域 (oc-face3d) を Y 軸まわりに
  *   angle 度だけ回して回転体にする。
  * ★ BRepPrimAPI_MakeRevol。回転面は **厳密な回転面** (球・円錐・トーラス等) になる。
  * ⚠ **segs は無視する**。回転面が厳密に作られるので分割数に意味が無い
@@ -14,6 +14,9 @@
 #include	"_ts2/c++/ocaRevolve_.h"
 
 #include	<BRepPrimAPI_MakeRevol.hxx>
+#include	<BRepGProp.hxx>
+#include	<GProp_GProps.hxx>
+#include	<math.h>
 #include	<gp_Ax1.hxx>
 #include	<gp_Pnt.hxx>
 #include	<gp_Dir.hxx>
@@ -79,10 +82,13 @@ ocaRevolve_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<ocFace2D> in = ( na > 0 ) ? sPtr<ocFace2D>::d_cast((*args)[0]) : sPtr<ocFace2D>();
 	if ( ! in.is_notNull() ) {
-		result = oca_err(thNEW(stdString,("revolve: input must be a 2D region (oc-cross2d)")));
+		result = oca_err(thNEW(stdString,("revolve: input must be a 2D region (oc-face3d)")));
 		return;
 	}
 	double deg = ( na > 1 ) ? (*args)[1]->get_flt() : 360.0;
+	/* ★ #3570 段3: segs の引数そのものを撤去した (記述子の nin を減らした) ので、
+	 *   ここに在った #3530 の「受けるが無視し、検査はする」は **届かなくなった**。
+	 *   原則が「そのモジュールで必要のない引数は撤去する」に変わったため。 */
 	if ( !(deg > 0) || deg > 360.0 ) {
 		result = oca_err(thNEW(stdString,("revolve: angle must be in (0, 360] degrees")));
 		return;
@@ -106,6 +112,28 @@ ocaRevolve_::compute()
 			result = oca_err(thNEW(stdString,(
 			    "revolve: the 2D region has no face to revolve")));
 			return;
+		}
+		/* ★★ #3518 の 5: extrude と同じ検査。回転でも「掃引が単調でない」= 断面が軸に
+		 *   またがっていると、境界からのフラックスが打ち消して 0 になる。
+		 *   ★ 閾値は **面積 x 重心の回る距離 (パップスの定理の体積)** に対する相対。 */
+		{
+			GProp_GProps gp;
+			BRepGProp::VolumeProperties(comp, gp);
+			double vol = gp.Mass();
+			GProp_GProps fa;
+			BRepGProp::SurfaceProperties(in->shape(), fa);
+			gp_Pnt c = fa.CentreOfMass();
+			/* 軸は Y 軸なので重心の回転半径は sqrt(x^2 + z^2)。 */
+			double r = ::sqrt(c.X()*c.X() + c.Z()*c.Z());
+			double scale = fa.Mass() * r * rad;   /* パップス = 面積 x 2πr x (θ/2π) */
+			if ( scale <= 0.0 ) scale = 1.0;
+			if ( ( ( vol < 0 ) ? -vol : vol ) <= 1e-9 * scale ) {
+				result = oca_err(thNEW(stdString,(
+				    "revolve: the 2D region straddles the axis of revolution, so the solid has "
+				    "no well-defined inside (its signed volume cancels to 0); move the region "
+				    "off the axis")));
+				return;
+			}
 		}
 		out = thNEW(ocShape,());
 		out->set_shape(comp);

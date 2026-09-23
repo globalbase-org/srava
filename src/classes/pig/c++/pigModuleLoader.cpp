@@ -49,9 +49,16 @@ pigModuleRegistry::record_shadowed(const std::string &path, const std::string &w
 	log_v.push_back(ev);
 }
 
-/* 実体。記録は下の load_file ラッパが一本で行う (return 箇所ごとに書かない)。 */
+/* 実体。記録は下の load_file ラッパが一本で行う (return 箇所ごとに書かない)。
+ *
+ * ★★ #3558: 失敗を **「入っていない」と「拒んだ」** に分けて返す (refused)。
+ *   @optional:1@ が飲み込んでよいのは前者だけで、後者 (ABI 不一致・記述子違反・モジュールで
+ *   ない .so・ファイルは在るのに dlopen が失敗) は *実装のバグか構成の誤り* なので、
+ *   黙って消えると「別のカーネルが答えている」状態のまま検定まで緑になる。
+ *   ⚠ 判別を err の文面に頼らない — 文言を変えた瞬間に黙って壊れるため。 */
 const srava_module_descriptor*
-pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy, bool *not_a_module)
+pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy,
+                                  bool *not_a_module, bool *refused)
 {
 	if ( path == 0 || path[0] == '\0' ) {
 		if ( err ) *err = "empty module path";
@@ -66,14 +73,25 @@ pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy,
 	void *h = osglue_dlopen(path, lazy ? 1 : 0, ebuf, sizeof ebuf);
 	if ( h == 0 ) {
 		if ( err ) *err = ( ebuf[0] != '\0' ) ? ebuf : "dlopen failed";
+		/* ★ #3558: **ファイルが在るのに** dlopen が失敗したなら「入っていない」ではない
+		 *   (未解決シンボル・アーキ違い・壊れたファイル 等)。実体の有無で分ける
+		 *   — dlopen のメッセージは OS ごとに違うので文面では判定しない。
+		 *   ⚠ 区切りを含まない名前は探索路で解けなかった場合にそのまま来る。そのときは
+		 *     実ファイルが無いので stat が失敗し、正しく「入っていない」側になる。 */
+		struct stat st;
+		if ( refused && ::stat(path, &st) == 0 ) *refused = true;
 		return 0;
 	}
 
 	ebuf[0] = '\0';
 	srava_module_fn fn = (srava_module_fn)osglue_dlsym(h, SRAVA_MODULE_SYM, ebuf, sizeof ebuf);
 	if ( fn == 0 ) {
-		/* SRAVA_MODULE_SYM が無い = そもそもモジュールでない .so (libpig.so 等)。エラーではない。 */
+		/* SRAVA_MODULE_SYM が無い = そもそもモジュールでない .so (libpig.so 等)。
+		 * ★ 探索路の走査 (load_search_path) では **エラーではない** (libpig.so 等が普通に並ぶ)。
+		 *   ⚠ ただし **名指しで module() した**のにこれなら話は別 — ファイルは在るのに
+		 *     使えないので #3558 の refused を立てる (呼び手が optional でも落とせるように)。 */
 		if ( not_a_module ) *not_a_module = true;
+		if ( refused )      *refused = true;
 		if ( err ) *err = ( ebuf[0] != '\0' ) ? ebuf : "symbol '" SRAVA_MODULE_SYM "' not found";
 		osglue_dlclose(h);
 		return 0;
@@ -82,6 +100,7 @@ pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy,
 	const srava_module_descriptor *d = fn();
 	if ( d == 0 ) {
 		if ( err ) *err = "srava_module() returned null";
+		if ( refused ) *refused = true;   /* #3558: 在るのに使えない */
 		osglue_dlclose(h);
 		return 0;
 	}
@@ -94,6 +113,7 @@ pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy,
 			           d->name ? d->name : "(null)", d->abi_version, SRAVA_MODULE_ABI);
 			*err = buf;
 		}
+		if ( refused ) *refused = true;   /* ★ #3558: ABI を上げた直後に古い .so が黙って消えるのを防ぐ */
 		osglue_dlclose(h);   /* 記述子を捨てる (docs §2.1: 不一致はエラーで拒否) */
 		return 0;
 	}
@@ -105,6 +125,7 @@ pigModuleRegistry::load_file_impl(const char *path, std::string *err, bool lazy,
 		std::string verr = pig_descriptor_violation(d);
 		if ( ! verr.empty() ) {
 			if ( err ) *err = verr;
+			if ( refused ) *refused = true;   /* ★ #3558: 記述子違反は **実装のバグ**。飲み込ませない */
 			osglue_dlclose(h);
 			return 0;
 		}
@@ -219,7 +240,8 @@ pigModuleRegistry::id_of_loaded_file(const char *path) const
  * ★ ただし冪等なのは **同じ実ファイル**を指したときだけ。同じファイル名で別の実ファイルを
  *   指したら拒否する (下の same_file 判定)。 */
 const srava_module_descriptor*
-pigModuleRegistry::load_file(const char *path, std::string *err, bool lazy, bool *conflict)
+pigModuleRegistry::load_file(const char *path, std::string *err, bool lazy, bool *conflict,
+                             bool *refused)
 {
 	std::string e;
 	bool nam = false;
@@ -248,7 +270,7 @@ pigModuleRegistry::load_file(const char *path, std::string *err, bool lazy, bool
 		}
 		return descriptor(already);
 	}
-	const srava_module_descriptor *d = load_file_impl(path, &e, lazy, &nam);
+	const srava_module_descriptor *d = load_file_impl(path, &e, lazy, &nam, refused);
 	if ( d == 0 && err != 0 )
 		*err = e;
 	record(path, d, e, nam);

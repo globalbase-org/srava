@@ -76,6 +76,16 @@ ggaBox_::compute()
 		if ( na > 1 ) h = (*args)[1]->get_flt();
 		if ( na > 2 ) d = (*args)[2]->get_flt();
 	}
+	/* ★ #3516: 退化・負の寸法を弾く (occt / openvdb は元から持っていた検査を揃えた)。
+	 *   ⚠ 弾かないと「体積 0 の立体」や「負を正として扱った立体」が**黙って**下流へ流れる。
+	 *     実測 (2026-09-12): 同じ box(-1,1,1) が nef=1 / cgal=-1 / manifold=0 / geogram=1 と
+	 *     カーネルごとに違う値になり、nef は box(1,1,0) で **SIGSEGV** していた
+	 *     (CGAL の SNC 構築が厚みゼロの面で落ちる。例外ではないので呼び手では受けられない)。
+	 *   ★ boxa も同じクラスが受けるので、ここ 1 箇所で両方に効く。 */
+	if ( !(w > 0) || !(h > 0) || !(d > 0) ) {
+		result = gga_err(thNEW(stdString,("box: sizes must be > 0")));
+		return;
+	}
 	mesh = thNEW(ggMesh,());
 	const double P[8][3] = {{0,0,0},{w,0,0},{w,h,0},{0,h,0},{0,0,d},{w,0,d},{w,h,d},{0,h,d}};
 	for ( int i = 0 ; i < 8 ; ++i ) mesh->add_vertex(P[i][0], P[i][1], P[i][2]);

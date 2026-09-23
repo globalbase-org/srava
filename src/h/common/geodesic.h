@@ -147,7 +147,9 @@ void make_geodesic(int seed, int n, double r, Sink& sink) {
 }
 
 /* seg (円周分割数) → n (種 1 辺の分割数)。Manifold::Sphere と同式。既定 seg は呼び出し側が渡す。 */
-inline int seg_to_n(int seg) { return (seg > 0) ? (seg + 3) / 4 : 8; }   /* 既定 seg=32 相当 = n=8 */
+/* ★★ #3530: 3 未満の可否は op 側の共通検査 (common/segs.h) が決める。ここに来る seg は
+ *   0 (= 未指定) か 3 以上のみ。⇒ 0 だけを既定へ落とす。 */
+inline int seg_to_n(int seg) { return (seg >= 3) ? (seg + 3) / 4 : 8; }   /* 既定 seg=32 相当 = n=8 */
 
 /* subdiv (細分回数) → n。n = 2^subdiv (面数は 4 倍刻み: 20·4^subdiv)。 */
 inline int subdiv_to_n(int subdiv) {

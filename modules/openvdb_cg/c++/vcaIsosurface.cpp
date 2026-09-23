@@ -7,7 +7,11 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"vd/c++/vdGrid.h"
+#include	"vd/c++/vdGridVdb.h"   /* ★ #3545 段 5: 橋は OpenVDB 型を扱うので読んでよい */
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
+/* ★★ #3545 段 4: **CGAL を 1 枚も引かない**。頂点/三角形を素の配列で組み、
+ *   CGAL への積み込みは cgMesh3D::build_from_triangles (libsrava_cg) に任せる。
+ *   ⚠ double → EPECK が無損失なのは従来どおり (double は 2 進有理数なので厳密)。 */
 #include	"cg/c++/cgMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	<string>
@@ -86,7 +90,7 @@ vcaIsosurface_::compute()
 	vdGrid::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
-	if ( ! in.is_notNull() || ! in->grid() ) {
+	if ( ! in.is_notNull() || ! in->box().g ) {
 		result = vca_err(thNEW(stdString,("isosurface: needs an openvdb grid")));
 		return;
 	}
@@ -97,7 +101,7 @@ vcaIsosurface_::compute()
 	 *    method and post process the quad index list")。adaptivity 版は適応的メッシュ用。 */
 	std::vector<openvdb::Vec3s> points;
 	std::vector<openvdb::Vec4I> quads;
-	openvdb::tools::volumeToMesh(*in->grid(), points, quads, iso);
+	openvdb::tools::volumeToMesh(*in->box().g, points, quads, iso);
 	if ( points.empty() || quads.empty() ) {
 		result = vca_err(thNEW(stdString,
 		    ("isosurface: empty surface (isovalue outside the narrow band?)")));
@@ -122,16 +126,14 @@ vcaIsosurface_::compute()
 		t.push_back(q[0]); t.push_back(q[3]); t.push_back(q[2]);
 	}
 
-	/* ★ 頂点/三角形 → CGAL Surface_mesh。double → EPECK は無損失。 */
-	typedef cgMesh3D::Mesh Mesh;
+	/* ★ 頂点/三角形 → cgMesh3D。double → EPECK は無損失 (積むのは幾何 lib 側)。
+	 *   ⚠ t は openvdb の索引 (unsigned) なので int の列へ写す。 */
 	out = thNEW(cgMesh3D,());
-	Mesh &m = out->mesh();
-	std::vector<Mesh::Vertex_index> vi;
-	vi.reserve(v.size() / 3);
-	for ( size_t i = 0 ; i + 2 < v.size() ; i += 3 )
-		vi.push_back(m.add_vertex(Mesh::Point(v[i], v[i+1], v[i+2])));
-	for ( size_t i = 0 ; i + 2 < t.size() ; i += 3 )
-		m.add_face(vi[t[i]], vi[t[i+1]], vi[t[i+2]]);
+	std::vector<int> idx;
+	idx.reserve(t.size());
+	for ( size_t i = 0 ; i < t.size() ; ++i ) idx.push_back((int)t[i]);
+	out->build_from_triangles(v.empty() ? 0 : &v[0], (int)(v.size() / 3),
+	                          idx.empty() ? 0 : &idx[0], (int)(idx.size() / 3));
 	}, vdwhy) )
 		result = vca_err(thNEW(stdString,(vdwhy.c_str())));
 }

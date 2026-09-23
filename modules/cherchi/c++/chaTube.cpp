@@ -1,5 +1,5 @@
 /*
- * chaTube — tube(path[, segs]) — 折れ線まわりの掃引管 (cherchi 版・#3474)。
+ * chaTube — tube_ruled(path[, segs]) — 折れ線まわりの掃引管 (cherchi 版・#3474)。
  * ★ 掃引そのものは **common/tube.h** が持つ (rotation-minimizing frame・断面リング・
  *   平キャップ)。CGAL にも Manifold にも依存しないので、どのカーネルからも同じ物が出る。
  * ★ このカーネルは **3D 型しか持たない**ので 2D パス ([x,y]) は明示エラーにする
@@ -11,6 +11,7 @@
 #include	"ch/c++/chMesh.h"
 #include	"ch/c++/chTriSink.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"common/tube.h"
 #include	<vector>
 #include	"_ts2/c++/chaTube_.h"
@@ -72,12 +73,16 @@ chaTube_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<pigDataArray> path = ( na > 0 ) ? (*args)[0]->obt_array()
 	                                     : sPtr<pigDataArray>();
-	int segs = ( na > 1 ) ? (int)(*args)[1]->get_int() : 32;   /* 円の辺数。既定 32 */
-	if ( segs < 3 ) segs = 3;
-	if ( segs > 4096 ) segs = 4096;
+	int    segs_in = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 0 = 未指定 */
+	int    segs = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(segs_in, 32, &segs) != srava_geo::SEGS_OK ) {
+		result = cha_err(thNEW(stdString,(srava_geo::segs_error("tube_ruled").c_str()))); return;
+	}
 	int nraw = path.is_notNull() ? path->length() : 0;
 	if ( nraw < 2 ) {
-		result = cha_err(thNEW(stdString,("tube: needs >= 2 path vertices ([[[x,y,z],r],...])")));
+		result = cha_err(thNEW(stdString,("tube_ruled: needs >= 2 path vertices ([[[x,y,z],r],...])")));
 		return;
 	}
 
@@ -88,7 +93,7 @@ chaTube_::compute()
 	for ( int i = 0 ; i < nraw ; ++i ) {
 		sPtr<pigDataArray> pr = path->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! pr.is_notNull() || pr->length() < 2 ) {
-			result = cha_err(thNEW(stdString,("tube: each vertex must be [pos, r] (pos=[x,y,z])")));
+			result = cha_err(thNEW(stdString,("tube_ruled: each vertex must be [pos, r] (pos=[x,y,z])")));
 			return;
 		}
 		sPtr<pigDataArray> pos = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
@@ -96,7 +101,7 @@ chaTube_::compute()
 		/* ★ この幾何カーネルは 2D 型を持たないので、2D パス ([x,y]) は受けられない。
 		 *   黙って 3D として扱うと z=0 の平たい管になり、利用者の意図と違う値を返す。 */
 		if ( pl < 3 ) {
-			result = cha_err(thNEW(stdString,("tube: this kernel has no 2D type, so the path must be 3D ([[x,y,z],r]); use \"cgal\"::tube or \"manifold\"::tube for 2D ribbons")));
+			result = cha_err(thNEW(stdString,("tube_ruled: this kernel has no 2D type, so the path must be 3D ([[x,y,z],r]); use \"cgal\"::tube or \"manifold\"::tube for 2D ribbons")));
 			return;
 		}
 		Praw[(size_t)i] = srava_geo::TubeV3(
@@ -105,7 +110,7 @@ chaTube_::compute()
 		    pos->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt());
 		Rraw[(size_t)i] = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
 		if ( Rraw[(size_t)i] < 0.0 ) {
-			result = cha_err(thNEW(stdString,("tube: radius must be >= 0")));
+			result = cha_err(thNEW(stdString,("tube_ruled: radius must be >= 0")));
 			return;
 		}
 	}
@@ -115,18 +120,18 @@ chaTube_::compute()
 	std::vector<double> R;
 	srava_geo::tube_dedup(Praw, Rraw, P, R);
 	if ( P.size() < 2 ) {
-		result = cha_err(thNEW(stdString,("tube: needs >= 2 distinct path vertices (all given vertices coincide)")));
+		result = cha_err(thNEW(stdString,("tube_ruled: needs >= 2 distinct path vertices (all given vertices coincide)")));
 		return;
 	}
 
 	chTriSink sink;
 	int st = srava_geo::make_tube_3d(P, R, segs, sink);
 	if ( st == srava_geo::TUBE_ERR_ZERO_SEGMENT ) {
-		result = cha_err(thNEW(stdString,("tube: two consecutive zero-radius vertices (degenerate segment)")));
+		result = cha_err(thNEW(stdString,("tube_ruled: two consecutive zero-radius vertices (degenerate segment)")));
 		return;
 	}
 	if ( st != srava_geo::TUBE_OK ) {
-		result = cha_err(thNEW(stdString,("tube: duplicate consecutive path vertices")));
+		result = cha_err(thNEW(stdString,("tube_ruled: duplicate consecutive path vertices")));
 		return;
 	}
 	mesh = sink.finish();

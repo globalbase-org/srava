@@ -18,7 +18,10 @@
 #include	"ts2/c++/stdEvent.h"
 #include	"_ts2/c++/cgaExport_.h"
 
-#include	<CGAL/boost/graph/IO/polygon_mesh_io.h>   /* 拡張子で OFF/STL/OBJ/PLY 振り分け */
+/* ⚠ #3545: @<CGAL/boost/graph/IO/polygon_mesh_io.h>@ を **落とした** — 書き出しの実体は
+ *   @cgMesh::write_to@ (libsrava_cg) で、この TU は 1 度も CGAL を呼んでいなかった。
+ *   ★ CGAL は header-only なので、*使っていなくても* include しただけで可変大域が
+ *     この .o に emit される。⇒ 「使っていない include」も境界の破れになる。 */
 #include	<string>
 #include	<string.h>     /* strrchr */
 #include	<strings.h>    /* strcasecmp */
@@ -141,6 +144,18 @@ cgaExport_::compute()
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
 	if ( ! mIn->write_to(p, unitS->get_str()) ) {
+		/* ★ #3533: 「SVG に置かれた 2D」は *次元の取り違え* ではないので、一般の診断より先に
+		 *   専用の文言を出す (「2D を STL に投げた」と同じ説明では直しようがない)。 */
+		sPtr<cgMesh2D> c2 = sPtr<cgMesh2D>::d_cast(mIn);
+		const char *dot = ::strrchr(p, '.');
+		if ( c2.is_notNull() && dot != 0 && ::strcasecmp(dot + 1, "svg") == 0
+		     && ! c2->frame_is_default() ) {
+			result = cga_err(thNEW(stdString,(
+			    "export: SVG has no way to say where a plane is, and this 2D region is placed "
+			    "in space; use DXF (it writes the plane as an OCS), or project_flatten(...) to "
+			    "drop it onto z=0 first")));
+			return;
+		}
 		result = cga_err(export_write_error_msg(p, mIn->dim()));
 		return;
 	}

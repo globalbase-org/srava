@@ -21,7 +21,7 @@ var DMIN = 0.5;     // 目標クリアランス
 var ctrl0 = [[0,0,0], [12,0,0], [10.5,2,0], [12,4,0], [0,4,0]];
 
 // pipe_sample の戻り [[pos,r],...] はそのまま tube に渡せる(per-vertex 半径つき)
-var make_pipe = \(ctrl) { tube(pipe_sample(ctrl, RAD, PIT), 24); };
+var make_pipe = \(ctrl) { tube_ruled(pipe_sample(ctrl, RAD, PIT), 24); };
 
 // ---- 1) 検出(可変半径・gap<=DMIN の違反だけ返す) ----------------------------
 var before = pipe_proximity(ctrl0, RAD, DMIN);

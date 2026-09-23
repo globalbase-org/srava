@@ -26,6 +26,8 @@ MODEL="${2:?model not given}"
 SO="${3:?module .so not given}"
 TOL="${4:-0}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 
 # ---- モデル定義: それぞれ "VAL <数>" を 1 行以上出す srava プログラム ----
 #   カーネルを跨いで同じ値になるべきものだけを置く (面数や頂点数は分割規約が違うので入れない)。
@@ -65,9 +67,24 @@ prism_cut)    SRC='print("VAL", volume(prism(6,2,1) &&& box(10,10,1)));' ;;
 union)        SRC='var s = sphere(1.5,24); print("VAL", volume(s ||| translate(s,[1,1,1])));' ;;
 difference)   SRC='print("VAL", volume(box(2,2,2) --- sphere(1.2,24)));' ;;
 intersection) SRC='print("VAL", volume(box(2,2,2) &&& sphere(1.2,24)));' ;;
+# ★ #3511: 凸包。**閉形式で値が決まる**モデルを選ぶ (カーネル合議に頼らない)。
+#   hull3d … 単位箱 3 個 (原点 / x+2 / y+3) の凸包。z 方向は厚み 1 のままなので、
+#            底面の 2D 凸包 (0,0)-(3,0)-(3,1)-(1,4)-(0,4) の面積 9 × 高さ 1 = **9 ちょうど**。
+#            ⚠ 箱を斜めに置くのが肝 — 軸平行に並べると bbox と区別がつかなくなる。
+#   hull_convex … **凸なものの凸包はそれ自身**。測地球 (平面三角形の集まり) で確かめる。
+#            値は icosphere2 と同じになるので、その項と突き合わせれば hull が形を変えて
+#            いないことまで言える。
+#   hull2d  … 単位正方形 2 枚 (原点 / x+2) の 2D 凸包 = 3×1 の長方形 = **面積 3 ちょうど**。
+#            ⚠ #3533: 2 枚目を @translate@ で作ると **face3d** になり、hull の答えは *立体* に
+#              なる (規約③)。⇒ 2 枚目も **z=0 の簡易表現のまま** 作る = @polygon@ で直に置く。
+#              ★ @cast("<k>-cross2d", translate(…))@ でも同じ値になるが、型名がカーネルごとに
+#                違うので **カーネル横断の合議には使えない** (この検査は 1 本の式を全員に流す)。
+hull3d)       SRC='var b = box(1,1,1); print("VAL", volume(hull(b, translate(b,[2,0,0]), translate(b,[0,3,0]))));' ;;
+hull_convex)  SRC='print("VAL", volume(hull(icosphere(5,2))));' ;;
+hull2d)       SRC='print("VAL", area(hull(rect(1,1), polygon([[2,0],[3,0],[3,1],[2,1]]))));' ;;
 # 掃引管 (共通ヘッダ src/h/common/tube.h)。曲がり + 可変半径 + r=0 の尖り端を 1 式で踏む。
-tube3d)       SRC='print("VAL", volume(tube([[[0,0,0],0],[[2,0,0],0.5],[[2,3,1],0.4],[[0,4,2],0.2]], 16)));' ;;
-tube2d)       SRC='print("VAL", area(tube([[[0,0],3],[[20,5],2],[[35,-8],4]])));' ;;
+tube3d)       SRC='print("VAL", volume(tube_ruled([[[0,0,0],0],[[2,0,0],0.5],[[2,3,1],0.4],[[0,4,2],0.2]], 16)));' ;;
+tube2d)       SRC='print("VAL", area(tube_ruled([[[0,0],3],[[20,5],2],[[35,-8],4]])));' ;;
 *)            echo "FAIL: unknown model '$MODEL'"; exit 1 ;;
 esac
 
@@ -76,14 +93,14 @@ run() {   # run <module 注入行> <cache dir>
 	SRAVA_CACHE_DIR="$2" SRAVA_SOURCE="$1 $SRC" "$SRAVA" 2>&1 | sed -n 's/^VAL //p'
 }
 
-REF=$(run 'module("cgal.so",{priority:99});' "$D-ref")
-GOT=$(run "module(\"$SO\",{priority:99});"   "$D-$MODEL")
+REF=$(run 'module("cgal.so",{priority:99});module("geomutils.so",{});' "$D-ref")
+GOT=$(run "module(\"$SO\",{priority:99});module(\"geomutils.so\",{});"   "$D-$MODEL")
 
 if [ -z "$REF" ]; then echo "FAIL: cgal (基準) が $MODEL で値を出さない"; exit 1; fi
 if [ -z "$GOT" ]; then
 	echo "FAIL: $SO が $MODEL で値を出さない"
 	rm -rf "$D-dbg"
-	SRAVA_CACHE_DIR="$D-dbg" SRAVA_SOURCE="module(\"$SO\",{priority:99}); $SRC" "$SRAVA" 2>&1 | head -10
+	SRAVA_CACHE_DIR="$D-dbg" SRAVA_SOURCE="module(\"$SO\",{priority:99});module(\"geomutils.so\",{}); $SRC" "$SRAVA" 2>&1 | head -10
 	exit 1
 fi
 

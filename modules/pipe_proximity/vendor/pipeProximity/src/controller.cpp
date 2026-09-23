@@ -396,13 +396,22 @@ static std::vector<CDMove> cdColorMoves(const ChainDesign& design, const std::ve
 
 // 座標降下ドライバ(adjust / adjustScene 共用)。evalPhi=総エネルギー(スレッド安全)、
 // contactSegsFn=現設計の接触を可動同士の (segA,segB) 群で返す(彩色用)。design を更新する。
+// ★ #3502: 中断の問い合わせ。述語が無ければ常に false。
+static inline bool cdCancelled(const CtrlParams& cp){
+    return cp.cancelled && cp.cancelled();
+}
+
 static void cdRun(ChainDesign& design, int n, const std::vector<char>& fixed, bool anyHard,
                   const LinCon& L, const CtrlParams& cp, double& phi, int& it,
                   const std::function<double(const ChainDesign&)>& evalPhi,
-                  const std::function<std::vector<std::array<int,2>>(const ChainDesign&)>& contactSegsFn){
+                  const std::function<std::vector<std::array<int,2>>(const ChainDesign&)>& contactSegsFn,
+                  bool& cancelledOut){
     int nthreads = cp.cdThreads;
     if(nthreads <= 0){ unsigned hc = pipe_par::hw_threads(); nthreads = (hc>3) ? (int)hc-2 : 1; }
     for(int inner=0; inner<cp.maxIter; inner++, it++){
+        // ★ #3502: 反復の境界で見る。ここは **直列の位置**なので parallel_for の内側には入らない
+        //   = 1 反復に 1 回で、DOF ごとではない。1 反復ぶんは走り切ってから止まる。
+        if(cdCancelled(cp)){ cancelledOut = true; return; }
         bool moved=false;
         if(cp.cdParallel == 1){
             // L2: 彩色ブロック Jacobi。同色を並列更新、色間は Gauss-Seidel(色頭で基準 phi 再計算)。
@@ -456,6 +465,7 @@ CtrlResult adjust(ChainDesign design, const RadiusFn& R, CtrlParams cp){
 
     MultStore ms; ms.window = cp.alWindow;
     const int outerN = std::max(1, cp.alOuter);
+    bool cancelled = false;   // ★ #3502: 中断で打ち切ったか
     int it = 0;
     double phi = 0;
     for(int outer=0; outer<outerN; outer++){
@@ -470,9 +480,11 @@ CtrlResult adjust(ChainDesign design, const RadiusFn& R, CtrlParams cp){
               for(const Contact& c : findSelfProximities(ch, R, cp.det)) out.push_back({c.segA, c.segB});
               return out;
           };
-          cdRun(design, n, fixed, anyHard, L, cp, phi, it, evalPhi, segsFn);
+          cdRun(design, n, fixed, anyHard, L, cp, phi, it, evalPhi, segsFn, cancelled);
+          if(cancelled) break;
         } else {
         for(int inner=0; inner<cp.maxIter; inner++, it++){
+            if(cdCancelled(cp)){ cancelled = true; break; }   // ★ #3502
             std::vector<Vec3> g = gradient(design, R, cp, fixed, msp);
             if(anyHard) projectVec(g, L, false);     // 拘束の零空間へ
 
@@ -499,6 +511,7 @@ CtrlResult adjust(ChainDesign design, const RadiusFn& R, CtrlParams cp){
             if(anyHard) feasibilityProject(design, L);
         }
         }
+        if(cancelled) break;   // ★ #3502: 外ループ (拡張ラグランジュ) も進めない
         if(cp.alOuter>1){   // 乗数更新（PHR）
             auto cs = findSelfProximities(design.build(), R, cp.det);
             ms = updateMultipliers(ms, cs, cp.dMin, cp.wPenalty, cp.alWindow);
@@ -513,6 +526,7 @@ CtrlResult adjust(ChainDesign design, const RadiusFn& R, CtrlParams cp){
     res.contacts = findSelfProximities(res.chain, R, cp.det);
     res.constraintsFeasible = feasible;
     res.pinResidual = pinRes;
+    res.cancelled = cancelled;   // ★ #3502: 呼び手はこれを見て結果を捨てること
     res.maxClearViolation = maxViolation(res.contacts, cp.dMin);
     return res;
 }
@@ -537,6 +551,7 @@ CtrlResult adjustScene(Scene sc, int mi, CtrlParams cp){
 
     MultStore ms; ms.window = cp.alWindow;
     const int outerN = std::max(1, cp.alOuter);
+    bool cancelled = false;   // ★ #3502: 中断で打ち切ったか
     int it = 0;
     double phi = 0;
     for(int outer=0; outer<outerN; outer++){
@@ -553,10 +568,12 @@ CtrlResult adjustScene(Scene sc, int mi, CtrlParams cp){
                   if(c.bodyA==mi && c.bodyB==mi) out.push_back({c.segA, c.segB});   // 可動同士の自己接触のみ
               return out;
           };
-          cdRun(design, n, fixed, anyHard, L, cp, phi, it, evalPhi, segsFn);
+          cdRun(design, n, fixed, anyHard, L, cp, phi, it, evalPhi, segsFn, cancelled);
+          if(cancelled) break;
           sc.bodies[mi].design = design; sc.bodies[mi].rebuild();   // 後段(乗数更新等)のため sc を同期
         } else {
         for(int inner=0; inner<cp.maxIter; inner++, it++){
+            if(cdCancelled(cp)){ cancelled = true; break; }   // ★ #3502
             sc.bodies[mi].design = design; sc.bodies[mi].rebuild();
             std::vector<Vec3> g = gradientScene(sc, mi, cp, fixed, msp);
             if(anyHard) projectVec(g, L, false);
@@ -584,6 +601,7 @@ CtrlResult adjustScene(Scene sc, int mi, CtrlParams cp){
             if(anyHard) feasibilityProject(design, L);
         }
         }
+        if(cancelled) break;   // ★ #3502
         if(cp.alOuter>1){
             sc.bodies[mi].design = design; sc.bodies[mi].rebuild();
             auto cs = findSceneProximities(sc, cp.det);
@@ -600,6 +618,7 @@ CtrlResult adjustScene(Scene sc, int mi, CtrlParams cp){
     res.contacts = findSceneProximities(sc, cp.det);
     res.constraintsFeasible = feasible;
     res.pinResidual = pinRes;
+    res.cancelled = cancelled;   // ★ #3502: 呼び手はこれを見て結果を捨てること
     res.maxClearViolation = maxViolation(res.contacts, cp.dMin);
     return res;
 }

@@ -4,18 +4,20 @@
 SRAVA="$1"
 FMT="${2:-off}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
-# ★ #3452: 起動時 eager-load 撤去に伴い、box() の実行に実カーネルの明示ロードが要る。
-export SRAVA_MODULE_ALL=1
-# include "module/all.sra" の解決に要る(cmake ENVIRONMENT が SRAVA_PATH を設定していないため)。
-SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
-export SRAVA_PATH
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
+# ★ #3569: この検定が要るのは **cgal 1 本だけ** — box / ||| / export はいずれも
+#   cgal (priority 20) が答える。#3452 の互換スイッチ (SRAVA_MODULE_ALL=1 = all.sra 16 本)
+#   は外した。⇒ SRAVA_PATH も不要 (module() の名前解決は探索路①=ビルドツリーで足りる。
+#   SRAVA_PATH が要っていたのは include "module/all.sra" という *ソースの include* のため)。
+MCG='module("cgal.so",{});'
 OUT="$D.$FMT"
 # native srava と MSYS sh で /tmp の解決先が食い違う(C:\tmp vs C:\msys64\tmp)。export パスは
 # SRAVA_SOURCE 内リテラルとして native srava に渡るので、Windows では cygpath で両者一致の native 形へ。
 # Linux は cygpath 不在 → 変換なし(そのまま)。
 command -v cygpath >/dev/null 2>&1 && OUT=$(cygpath -m "$OUT")
 rm -rf "$D"; rm -f "$OUT"
-SRAVA_SOURCE="export(\"$OUT\", box(2,2,2) ||| box(1,1,3));" "$SRAVA" >/dev/null 2>&1
+SRAVA_SOURCE="$MCG export(\"$OUT\", box(2,2,2) ||| box(1,1,3));" "$SRAVA" >/dev/null 2>&1
 if [ ! -f "$OUT" ]; then echo "FAIL: output not written"; exit 1; fi
 case "$FMT" in
 off)

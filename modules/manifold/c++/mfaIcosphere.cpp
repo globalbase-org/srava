@@ -68,6 +68,12 @@ mfaIcosphere_::compute()
 	double r      = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	int    subdiv = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 細分回数。既定 0(二十面体 20 面) */
 	int    n      = srava_geo::subdiv_to_n(subdiv);
+	/* ★ #3516: 退化・負の半径を弾く (nef / geogram / cherchi / occt / openvdb は元から
+	 *   持っていた検査を揃えた)。 */
+	if ( !(r > 0) ) {
+		result = mfa_err(thNEW(stdString,("icosphere: radius must be > 0")));
+		return;
+	}
 	mesh = mfMesh::geodesic(srava_geo::SEED_ICOSAHEDRON, n, r);
 }
 

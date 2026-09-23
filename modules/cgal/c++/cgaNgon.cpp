@@ -6,8 +6,10 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"cg/c++/cgMesh.h"
+#include	<vector>
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/cgaNgon_.h"
 
 #include	<math.h>
@@ -63,18 +65,21 @@ cgaNgon_::cgaNgon_(TS_ARGS0)
 	INSTANCE FUNCTIONS
 ********************************************/
 
-/* 正 n 角形(CCW)を返す共有ヘルパ(circle も使う)。 */
-cgMesh2D::Polygon_2
+/* 正 n 角形(CCW)の座標を返す共有ヘルパ(circle も使う)。
+ * ★ #3545: 返りを **素の (x,y) 列**にした (旧: CGAL の Polygon_2)。
+ *   CGAL へ積むのは cgMesh2D::add_region_ring = 幾何 lib 側。 */
+std::vector<double>
 cga_regular_polygon(int n, double r)
 {
-	typedef cgMesh::K K;
 	if ( n < 3 ) n = 3;
-	cgMesh2D::Polygon_2 p;
+	std::vector<double> xy;
+	xy.reserve((size_t)n * 2);
 	for ( int k = 0 ; k < n ; ++k ) {
 		double a = 2.0 * M_PI * (double)k / (double)n;   /* CCW */
-		p.push_back(K::Point_2(K::FT(r * ::cos(a)), K::FT(r * ::sin(a))));
+		xy.push_back(r * ::cos(a));
+		xy.push_back(r * ::sin(a));
 	}
-	return p;
+	return xy;
 }
 
 void
@@ -83,8 +88,15 @@ cgaNgon_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double r = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
+	/* ★ #3516 続き: 他の実装 (occt) が元から持っていた検査を揃えた。
+	 *   ⚠ 無いと ngon(2,1) が「2 角形」として面積 1.299 を返し、ngon(6,-1) は
+	 *   ngon(6,1) と同じ面積を返していた (符号が黙って落ちる)。 */
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = cga_err(thNEW(stdString,(srava_geo::sides_error("ngon").c_str()))); return; }
+	if ( !(r > 0) )  { result = cga_err(thNEW(stdString,("ngon: radius must be > 0"))); return; }
 	mesh = thNEW(cgMesh2D,());
-	mesh->regions().push_back(cgMesh2D::Pwh_2(cga_regular_polygon(n, r)));
+	std::vector<double> xy = cga_regular_polygon(n, r);
+	mesh->add_region_ring(&xy[0], n);
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

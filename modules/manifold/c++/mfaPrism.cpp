@@ -8,6 +8,7 @@
 #include	"mf/c++/mfMesh.h"
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/mfaPrism_.h"
 
 CLASS_TINYSTATE(mf/c++/mfaPrism,pig/c++/ptsCalcBody)
@@ -68,6 +69,11 @@ mfaPrism_::compute()
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	double r = ( na > 2 ) ? (*args)[2]->get_flt() : 1.0;
+	/* ★ #3516: 他の 5 カーネルが持っていた検査を揃えた。 */
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = mfa_err(thNEW(stdString,(srava_geo::sides_error("prism").c_str()))); return; }
+	if ( !(h > 0) )  { result = mfa_err(thNEW(stdString,("prism: height must be > 0"))); return; }
+	if ( !(r > 0) )  { result = mfa_err(thNEW(stdString,("prism: radius must be > 0"))); return; }
 	mesh = mfMesh::prism(n, h, r);
 }
 

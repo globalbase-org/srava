@@ -85,12 +85,31 @@ mfaCombine_::compute()
 		v.push_back(ma->manifold()); v.push_back(mb->manifold());
 		geom = thNEW(mfMesh,(manifold::Manifold::Compose(v)));
 	} else if ( a2.is_notNull() && b2.is_notNull() ) {
+		/* ★★ #3526: combine もブールと同じ 2 段 — **別の平面の領域を 1 つの 2D にまとめられない**
+		 *   (まとめた後の局所座標が 2 つの平面のどちらを指すのか決まらない)。同じ平面で軸の
+		 *   取り方だけが違うなら **先頭の枠で表し直す**。 */
+		sPtr<mfCross> ub = b2;
+		if ( ! a2->same_frame(b2->frame_o(), b2->frame_u(), b2->frame_v()) ) {
+			ub = b2->reexpress(a2->frame_o(), a2->frame_u(), a2->frame_v());
+			if ( ! ub.is_notNull() ) {
+				result = mfa_err(thNEW(stdString,(
+				    "combine: the 2D regions are on different planes, so they cannot be put into "
+				    "one 2D value; move them onto one plane first")));
+				return;
+			}
+		}
 		std::vector<manifold::CrossSection> v;
-		v.push_back(a2->cross()); v.push_back(b2->cross());
-		geom = thNEW(mfCross,(manifold::CrossSection::Compose(v)));
+		v.push_back(a2->cross()); v.push_back(ub->cross());
+		sPtr<mfCross> r = thNEW(mfCross,(manifold::CrossSection::Compose(v)));
+		r->set_frame(a2->frame_o(), a2->frame_u(), a2->frame_v());   /* ★ 枠は引き継ぐ */
+		r->set_placed(a2->is_placed() || b2->is_placed());   /* ★ #3533 規約③ (⚠ 表し直す前の b2 を見る) */
+		geom = sPtr<mfGeom>::d_cast(r);
 	} else {
 		result = mfa_err(thNEW(stdString,("combine: incompatible operands (mixed dimension?)")));
+		return;
 	}
+	/* ★ #3498: Compose も遅延する (mfMesh.h の mf_eval_err の一覧)。 */
+	if ( (result = mf_eval_err(geom, brk_, "combine")) != thNULL ) geom = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

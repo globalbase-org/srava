@@ -1,4 +1,6 @@
 #!/bin/sh
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 # $SO (CGAL Nef / SNC・#3433 P1) の回帰テスト。
 # $1 = srava 実行体。$2 = モード。$3 = 変種(snc|hybrid)。env: SRAVA_AGENT, SRAVA_CACHE_DIR。
 #
@@ -63,13 +65,18 @@ esac
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
 rm -rf "$D" "$D-a" "$D-b" "$D-a2" "$D-b2"
 
-# ★ #3452: 起動時 eager-load 撤去に伴い、この回帰群の一部(agree の cg 比較対照・cast 先の
-#   cgal.so 等)が module() 未呼出のまま cgal/geogram 等の他カーネルを暗黙に使う(=旧挙動依存)。
-#   $SO は各ケースが個別に module() するのでそのまま。SRAVA_MODULE_ALL=1 で残りを一括解決する
-#   (include "module/all.sra"; 相当。$SO の priority 明示はこの後でも上書きとして効く)。
-export SRAVA_MODULE_ALL=1
-SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
-export SRAVA_PATH
+# ★ #3569: all.sra (16 本) の一括ロードをやめ、**各ケースが要る相手役だけ**を読む。
+#   $SO (nef_snc / nef_hybrid) は従来どおり各ケースが自分で module() する (priority 込み)。
+#   ここで用意するのは、その相手として要るものの短縮名:
+#     MCG  cgal      … box / sphere / union / volume の実行と、agree の比較対照
+#     MMF  manifold  … mfcross の相手 (mf-mesh3d を作る)
+#     MGG  geogram   … ggcross の相手 (gg-mesh3d を作る)
+#     MBR  nef 橋渡し … nf ⇄ 他カーネルの cast (#3499: 橋が持つ)
+#   ⚠ 読む順ではなく **priority** で勝者が決まる。$SO の {priority:99} は後から効く。
+MCG='module("cgal.so",{});'
+MMF='module("manifold.so",{});'
+MGG='module("geogram.so",{});'
+MBR='module("nef_cg.so",{}); module("nef_mf.so",{});'
 
 # cache dir の mesh 本体から D_META の 4CC を数える (PWIG ヘッダ直後に 4 バイト)。
 count_tag() {   # $1=dir $2=tag
@@ -90,8 +97,8 @@ case "$MODE" in
 agree)
 	S='var s = sphere(1.5, 40); print("VOL", volume(union(s, translate(s,[0.5,0.5,0.5]))));'
 	NF=$(SRAVA_CACHE_DIR="$D-a" \
-	     SRAVA_SOURCE="module(\"$SO\",{priority:99}); $S" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-	CG=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$S" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
+	     SRAVA_SOURCE="$MCG module(\"$SO\",{priority:99}); $S" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
+	CG=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $S" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	if [ -z "$NF" ] ; then echo "FAIL: nef produced no volume" ; exit 1 ; fi
 	if [ -z "$CG" ] ; then echo "FAIL: cgal produced no volume" ; exit 1 ; fi
 	ok=$(awk -v a="$NF" -v b="$CG" 'BEGIN{ d=a-b; if(d<0)d=-d; s=(a<0?-a:a); if(s<1)s=1;
@@ -102,7 +109,7 @@ agree)
 
 cross)
 	# cgal が作った箱 (MESH) を明示 cast で nf へ。昇格読みが効けば体積 8。
-	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"$SO\"); var b = box(2,2,2);
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MBR module(\"$SO\"); var b = box(2,2,2);
 	      print(\"VOL\", volume(cast(\"$TYPE\", b)));" "$SRAVA" 2>&1)
 	V=$(echo "$OUT" | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
@@ -157,13 +164,13 @@ downgrade)
 	#   ★ どちらの経路でも「境界表現を取れない値」= 非有界 は通らない。
 	#     ここが cgal の Nef 非依存を見張る点で、下の ② がそれを固定する。
 	#   いずれの不可も **明示エラー** (黙って 0 や 8 を返さない)。
-	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MBR module(\"$SO\",{priority:99}); var b = box(2,2,2);
 	      print(\"VOL\", volume(cast(\"cg-mesh3d\", b)));" "$SRAVA" 2>&1)
 	V=$(echo "$OUT" | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: nf->cg 降格 volume=$V (期待 8)" ; echo "$OUT" ; exit 1 ; fi
 	# ② 非有界な Nef は cg で表現できない → 明示エラー。黙って 0 (空 mesh) や 8 (境界だけ拾う) にしない
-	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MBR module(\"$SO\",{priority:99});
 	       var c = complement(box(2,2,2)); print(\"VOL\", volume(cast(\"cg-mesh3d\", c)));" "$SRAVA" 2>&1)
 	V2=$(echo "$OUT2" | sed -n 's/^VOL //p')
 	if [ -n "$V2" ] ; then
@@ -192,7 +199,7 @@ downgrade)
 	#    snc は橋 nef_cg.so が to_mesh() して渡す (#3499)。
 	#    ここが落ちたら、hybrid なら書き側が空洞を「境界を書けない値」へ逃がしている、
 	#    snc なら to_mesh() が空洞を落としている、の合図。
-	OUT3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	OUT3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$MCG $MBR module(\"$SO\",{priority:99});
 	       var h = difference(box(3,3,3), translate(box(1,1,1),[1,1,1]));
 	       print(\"VOL\", volume(cast(\"cg-mesh3d\", h)));" "$SRAVA" 2>&1)
 	V3=$(echo "$OUT3" | sed -n 's/^VOL //p')
@@ -205,18 +212,18 @@ downgrade)
 
 mfcross)
 	# ① mf(MFM3) → nf の昇格読み
-	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MMF $MBR module(\"manifold.so\",{priority:99});
 	      var b = box(2,2,2); module(\"$SO\",{priority:120});
 	      print(\"VOL\", volume(cast(\"$TYPE\", b)));" "$SRAVA" 2>&1)
 	V=$(echo "$OUT" | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: mf->nf 昇格 volume=$V (期待 8)" ; echo "$OUT" ; exit 1 ; fi
 	# ② 混成ブール (mf の球 ∪ nf の球を nef が計算) が純 nf と同値であること
-	MIX=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});
+	MIX=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MMF $MBR module(\"manifold.so\",{priority:99});
 	      var a = sphere(1.5,40); module(\"$SO\",{priority:120});
 	      var b = translate(sphere(1.5,40),[0.5,0.5,0.5]);
 	      print(\"VOL\", volume(union(a,b)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-	PURE=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	PURE=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:99});
 	       var s = sphere(1.5,40);
 	       print(\"VOL\", volume(union(s, translate(s,[0.5,0.5,0.5]))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	if [ -z "$MIX" ] || [ -z "$PURE" ] ; then echo "FAIL: 混成/純 nf のどちらかが値を返さない ($MIX / $PURE)" ; exit 1 ; fi
@@ -232,19 +239,19 @@ mfcross)
 	#     nef_mf.so だけ。
 	#   ★ 通らないのは「境界表現を取れない値」= 非有界 だけ。下の非有界チェックが
 	#     それを固定する = manifold/cgal に Nef 依存が戻っていないことの見張り。
-	V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
+	V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:99}); var b = box(2,2,2);
 	     module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
 	     print(\"VOL\", volume(cast(\"mf-mesh3d\", b)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V3" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	[ "$ok" = "1" ] || { echo "FAIL: nf->mf 直接 (有界) が volume=$V3 (期待 8)" ; exit 1 ; }
 	# cg を挟む 2 段も同じ値になること (経路が違っても答えは 1 つ)。
-	V4=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="module(\"$SO\",{priority:99}); var b = box(2,2,2);
+	V4=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:99}); var b = box(2,2,2);
 	     module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
 	     print(\"VOL\", volume(cast(\"mf-mesh3d\", cast(\"cg-mesh3d\", b))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V4" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	[ "$ok" = "1" ] || { echo "FAIL: nf->cg->mf 2 段が volume=$V4 (期待 8)" ; exit 1 ; }
 	# 非有界は両変種とも mf へ渡せない (境界を併記できない = SNC だけになるので manifold は読めない)
-	OUT4=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	OUT4=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:99});
 	       var c = complement(box(2,2,2));
 	       module(\"manifold.so\",{priority:50,exec_default:\"thread\"});
 	       print(\"VOL\", volume(cast(\"mf-mesh3d\", c)));" "$SRAVA" 2>&1)
@@ -268,18 +275,18 @@ ggcross)
 	#     明示エラーになったので、module_loaded で守る。#3452 で起動時の一括ロードが廃止された
 	#     ので実際には未ロードのことが多いが、守っておけば eager ロードが復活しても効く。
 	# ① gg("MFM3") → nf の昇格読み。codec は mf 用のものがそのまま効く。
-	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
 	      var b = box(2,2,2); module(\"$SO\",{priority:120});
 	      print(\"VOL\", volume(cast(\"$TYPE\", b)));" "$SRAVA" 2>&1)
 	V=$(echo "$OUT" | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V" 'BEGIN{ d=a-8; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: gg->nf 昇格 volume=$V (期待 8)" ; echo "$OUT" ; exit 1 ; fi
 	# ② 混成ブール (gg の箱 ∪ nf の箱) が純 nf と同値。ずらした 2 個の 2 立方 = 8+8-1 = 15 (厳密)。
-	MIX=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
+	MIX=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
 	      var a = box(2,2,2); module(\"$SO\",{priority:120});
 	      var b = translate(box(2,2,2),[1,1,1]);
 	      print(\"VOL\", volume(union(a,b)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-	PURE=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"$SO\",{priority:99});
+	PURE=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"$SO\",{priority:99});
 	       var a = box(2,2,2);
 	       print(\"VOL\", volume(union(a, translate(box(2,2,2),[1,1,1]))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	if [ -z "$MIX" ] || [ -z "$PURE" ] ; then echo "FAIL: 混成/純 nf のどちらかが値を返さない ($MIX / $PURE)" ; exit 1 ; fi
@@ -287,17 +294,17 @@ ggcross)
 	ok=$(awk -v a="$MIX" 'BEGIN{ d=a-15; if(d<0)d=-d; print (d<1e-9) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: 混成ブール volume=$MIX (期待 15)" ; exit 1 ; fi
 	# ③ ★nef 固有 op に gg を直接。Minkowski 2³ ⊕ 1³ = 3³ = 27 (厳密)。
-	MK=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
+	MK=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
 	     var g = box(2,2,2); module(\"$SO\",{priority:120});
 	     print(\"VOL\", volume(minkowski(g, box(1,1,1))));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$MK" 'BEGIN{ d=a-27; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: minkowski(gg,nf) volume=$MK (期待 27)" ; exit 1 ; fi
 	# ④ ★直接経路 (gg→nf) と 2 段経路 (gg→cg→nf) が **ビット一致** すること。
 	#    どちらも計算するのは nef で、違うのは入口の codec だけ (MFM3 読み / MESH 読み)。
-	D1=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
+	D1=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
 	     var g = box(2,2,2); module(\"$SO\",{priority:120});
 	     print(\"VOL\", volume(offset(g, 0.5, 1)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
-	D2=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
+	D2=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
 	     var g = box(2,2,2); module(\"$SO\",{priority:120});
 	     print(\"VOL\", volume(offset(cast(\"cg-mesh3d\", g), 0.5, 1)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	if [ -z "$D1" ] || [ "$D1" != "$D2" ] ; then
@@ -308,7 +315,7 @@ ggcross)
 	rm -rf "$D-d"
 	# ⚠ geogram を **cgal (既定 20) より上**にしないと box が cgal で作られ、gg でなく cg の
 	#   経路を測ってしまう (最初にこれを踏んだ)。leaf を作らせたいモジュールを必ず最上位にする。
-	OUT5=$(SRAVA_CACHE_DIR="$D-d" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
+	OUT5=$(SRAVA_CACHE_DIR="$D-d" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"geogram.so\",{priority:99});
 	       var g = box(2,2,2); module(\"$SO\",{priority:120});
 	       print(\"VOL\", volume(solidify(g)));" "$SRAVA" 2>&1)
 	NN=$(count_tag "$D-d" "$TAG")
@@ -322,13 +329,13 @@ ggcross)
 	rm -rf "$D-e" "$D-f"
 	# ★ #3452: module/all.sra は nef を hybrid だけ束ねる(設計通り)。snc 変種では $SO 自身が
 	#   自動ロードされないので、priority は変えずに明示ロードだけ足す(既定の梯子を測る意図は保つ)。
-	SRAVA_CACHE_DIR="$D-e" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"$SO\",{});
+	SRAVA_CACHE_DIR="$D-e" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"$SO\",{});
 	  print(\"V\", volume(solidify(cast(\"mf-mesh3d\", box(2,2,2)))));" "$SRAVA" >/dev/null 2>&1
 	NMF=$(count_tag "$D-e" "$TAG")
 	if [ "$NMF" != "0" ] ; then
 		echo "FAIL: solidify(mf) が nef へ行った ($TAG が $NMF 個)。double 入力は geogram (double のまま) が正" ; exit 1
 	fi
-	SRAVA_CACHE_DIR="$D-f" SRAVA_SOURCE="if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"$SO\",{});
+	SRAVA_CACHE_DIR="$D-f" SRAVA_SOURCE="$MCG $MGG $MBR if (module_loaded(\"$OTHER_SO\")) { module(\"$OTHER_SO\",\"off\"); } module(\"$SO\",{});
 	  print(\"V\", volume(solidify(box(2,2,2))));" "$SRAVA" >/dev/null 2>&1
 	NCG=$(count_tag "$D-f" "$TAG")
 	if [ "$NCG" = "0" ] ; then
@@ -472,7 +479,7 @@ cavity)
 	#   中実になる** (Nef_polyhedron_3(Mesh) が入れ子シェルを別立体として和で取り込む) ため、
 	#   difference(box(3,3,3), 内側の box) の体積が 26 → 27 に化けていた (snc は 26 で正しかった)。
 	#   → volume が 2 個 (無限体積 + 中身 1 個) のときだけ境界形式にする、で修正。
-	V=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	V=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MMF module(\"$SO\",{priority:99});
 	    print(\"VOL\", volume(difference(box(3,3,3), translate(box(1,1,1),[1,1,1]))));" "$SRAVA" 2>&1 |
 	    sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V" 'BEGIN{ d=a-26; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
@@ -480,7 +487,7 @@ cavity)
 		echo "FAIL: 空洞つき立体の体積が $V (期待 27-1=26)。境界形式で空洞が失われている" ; exit 1
 	fi
 	# 空洞を **さらに op へ渡して** も壊れない (cache を 2 回渡る)
-	V2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	V2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MMF module(\"$SO\",{priority:99});
 	     var h = difference(box(3,3,3), translate(box(1,1,1),[1,1,1]));
 	     print(\"VOL\", volume(translate(h,[10,0,0])));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V2" 'BEGIN{ d=a-26; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
@@ -488,7 +495,7 @@ cavity)
 	# ★条件を締めすぎていないこと: **離れた複数立体**は入れ子でないので境界形式のままでよい
 	#   (面の集まりから組み直しても和として正しく復元する)。ここが SNC に落ちると、部品を
 	#   combine/union で並べる普通のモデルで hybrid の利点 (cache が cg 並み) が消える。
-	V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	V3=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$MCG $MMF module(\"$SO\",{priority:99});
 	     print(\"VOL\", volume(union(box(1,1,1), translate(box(1,1,1),[5,0,0]))));" "$SRAVA" 2>&1 |
 	     sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V3" 'BEGIN{ d=a-2; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
@@ -497,12 +504,12 @@ cavity)
 	#   cg も mf も中空立体を正しく表現できるのに、nf へ昇格した瞬間に 26 → 27 になっていた。
 	#   原因は Nef_polyhedron_3(Mesh) が入れ子シェルを和で取り込むこと。シェルごとに Nef を作り
 	#   対称差 (even-odd) で畳むよう直した。
-	V4=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="module(\"$SO\");
+	V4=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="$MCG $MMF module(\"$SO\");
 	     var h = difference(box(3,3,3), translate(box(1,1,1),[1,1,1]));
 	     print(\"VOL\", volume(cast(\"$TYPE\", h)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
 	ok=$(awk -v a="$V4" 'BEGIN{ d=a-26; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	if [ "$ok" != "1" ] ; then echo "FAIL: cg→nf 昇格で空洞が失われた: $V4 (期待 26)" ; exit 1 ; fi
-	V5=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});
+	V5=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="$MCG $MMF module(\"manifold.so\",{priority:99});
 	     var h = difference(box(3,3,3), translate(box(1,1,1),[1,1,1]));
 	     module(\"$SO\",{priority:120});
 	     print(\"VOL\", volume(cast(\"$TYPE\", h)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
@@ -510,7 +517,7 @@ cavity)
 	if [ "$ok" != "1" ] ; then echo "FAIL: mf→nf 昇格で空洞が失われた: $V5 (期待 26)" ; exit 1 ; fi
 	# ★3 段の入れ子 (立体 ⊃ 空洞 ⊃ 立体)。even-odd なので深さに関わらず正しいはず。
 	#   216 - 64 + 1 = 153。単純な「外殻 − 空洞」では内側の立体を落とす。
-	V6=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="module(\"$SO\");
+	V6=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$MCG $MMF module(\"$SO\");
 	     var shell = difference(box(6,6,6), translate(box(4,4,4),[1,1,1]));
 	     var inner = translate(box(1,1,1),[2,2,2]);
 	     print(\"VOL\", volume(cast(\"$TYPE\", shell +++ inner)));" "$SRAVA" 2>&1 | sed -n 's/^VOL //p')
@@ -529,7 +536,7 @@ nonmani)
 	#     ・中空 → 空洞があるので「外側シェルだけ」を書くと 16 に化ける (全シェルの回帰)
 	U='(box(2,2,2) --- translate(box(1,1,1),[0.5,0.5,0.5])) ||| translate(box(2,2,2),[2,2,0])'
 	rm -rf "$D-a"
-	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"manifold.so\",{priority:1});
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MMF $MBR module(\"manifold.so\",{priority:1});
 	      module(\"cgal.so\",{priority:50}); module(\"$SO\",{priority:99});
 	      print(\"V\",  volume($U));
 	      print(\"NP\", nparts($U));
@@ -554,7 +561,7 @@ nonmani)
 	done
 	# ③ ★負の対照: 非有界は依然として不可で、**理由が付く**
 	rm -rf "$D-b"
-	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"manifold.so\",{priority:1});
+	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MMF $MBR module(\"manifold.so\",{priority:1});
 	       module(\"$SO\",{priority:99});
 	       print(\"V\", volume(cast(\"mf-mesh3d\", complement(box(1,1,1)))));" "$SRAVA" 2>&1)
 	if echo "$OUT2" | grep -q "^V " ; then
@@ -574,10 +581,10 @@ convex)
 	#      unify で内壁を消すと降格できるようになる (#3442 と組で意味を持つ)
 	#   ④ 範囲外の part は明示エラー
 	L='difference(box(3,3,3), translate(box(2,2,4),[1,1,-0.5]))'
-	NB=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	NB=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MBR module(\"$SO\",{priority:99});
 	     print(\"N\", nparts(convex_decomposition(box(2,2,2))));" "$SRAVA" 2>&1 | sed -n 's/^N //p')
 	[ "$NB" = "1" ] || { echo "FAIL: 箱の凸片が $NB (期待 1)" ; exit 1 ; }
-	OUT=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	OUT=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MBR module(\"$SO\",{priority:99});
 	      var d = convex_decomposition($L);
 	      print(\"N\", nparts(d));
 	      print(\"VD\", volume(d));
@@ -602,7 +609,7 @@ convex)
 	#      nparts が 2 のままで、part(d,i) が使えること (境界だけで書くと 1 塊に化ける)。
 	rm -rf "$D-a2"
 	CVX="convex_decomposition($L)"
-	SRC2="module(\"$SO\",{priority:99});
+	SRC2="$MCG $MBR module(\"$SO\",{priority:99});
 	      print(\"N\", nparts($CVX));
 	      print(\"VOL\", volume(cast(\"cg-mesh3d\", $CVX)));"
 	OUT2=$(SRAVA_CACHE_DIR="$D-a2" SRAVA_SOURCE="$SRC2" "$SRAVA" 2>&1)
@@ -616,7 +623,7 @@ convex)
 		echo "$OUT2W" ; exit 1 ; }
 	ok=$(awk -v a="$VC" 'BEGIN{ d=a-15; if(d<0)d=-d; print (a!="" && d<1e-9) ? 1 : 0 }')
 	[ "$ok" = "1" ] || { echo "FAIL: 分解直後の cg 降格が $VC (期待 15)" ; echo "$OUT2" ; exit 1 ; }
-	OUT3=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	OUT3=$(SRAVA_CACHE_DIR="$D-b2" SRAVA_SOURCE="$MCG $MBR module(\"$SO\",{priority:99});
 	       print(\"VOL\", volume(part(convex_decomposition($L), 5)));" "$SRAVA" 2>&1)
 	if echo "$OUT3" | grep -q "^VOL " ; then
 		echo "FAIL: 範囲外の part が値を返した (明示エラーになるべき)" ; exit 1
@@ -673,11 +680,11 @@ selfx)
 	#   ★旧コメントの「分割して union すると 50.51 が正しい値」は誤りだったので消した。分割すると
 	#     継ぎ目がマイター接合から平らな蓋どうしの重ねに変わって角が太る (自己交差の無い tube で
 	#     一本物 52.23 vs 2 分割 union 54.48)。面が囲む本当の体積は solidify の 48.61。
-	S='tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
-	V=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="print(\"VALID\", valid($S));" "$SRAVA" 2>&1 | sed -n 's/^VALID //p')
+	S='tube_ruled([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
+	V=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG print(\"VALID\", valid($S));" "$SRAVA" 2>&1 | sed -n 's/^VALID //p')
 	[ "$V" = "0" ] || { echo "FAIL: テスト用の形状が自己交差していない (valid=$V) = テストの前提が崩れた" ; exit 1 ; }
 	# repair (autorefine) してから nf へ: 落ちずに **明示エラー** になること
-	OUT=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\");
+	OUT=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG module(\"$SO\");
 	      print(\"VOL\", volume(cast(\"$TYPE\", repair($S))));" "$SRAVA" 2>&1)
 	if echo "$OUT" | grep -q "^VOL " ; then
 		echo "FAIL: 自己交差メッシュの nf 変換が値を返した (明示エラーになるべき)" ; echo "$OUT" ; exit 1
@@ -695,8 +702,8 @@ solidify)
 	# ★ #3445: 壊れた境界 (自己交差した閉メッシュ) からソリッドを組み直す。
 	#   面ごとの Nef を n 項 union → 有界セルを mark。**重い op** なので既定経路には無く、
 	#   利用者が明示的に呼ぶ (sig は (nf)->nf の 1 本・cg から使うときは cast を挟む)。
-	SELFX='tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
-	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	SELFX='tube_ruled([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
+	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:99});
 	      var n = cast(\"$TYPE\", $SELFX);
 	      print(\"BEFORE\", volume(n));
 	      print(\"AFTER\",  volume(solidify(n)));" "$SRAVA" 2>&1)
@@ -710,7 +717,7 @@ solidify)
 	[ "$ok" = "1" ] || { echo "FAIL: solidify 後の体積が $A (期待 48.6088)"; echo "$OUT"; exit 1; }
 	# ③ 健全な立体は不変 (8)・空洞は埋まらない (26)。★Mark_bounded_volumes は有界セルを無差別に
 	#    塗るので、連結成分ごとの深さ合成が壊れると中空箱が 27 になる = ここで落ちる。
-	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="module(\"$SO\",{priority:99});
+	OUT2=$(SRAVA_CACHE_DIR="$D-b" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:99});
 	       print(\"BOX\", volume(solidify(box(2,2,2))));
 	       var h = difference(box(3,3,3), translate(box(1,1,1),[1,1,1]));
 	       print(\"HOLLOW\", volume(solidify(h)));
@@ -733,7 +740,7 @@ solidify)
 	#      $SELFX が nef で走って入力が nf になり、この検査が「cg / mf 入力」を見なくなる
 	#      (CG は同じ値が出るので **落ちずに意味だけ失われる**・MF は cast nf→mf が無くて落ちた)。
 	#      入力の生成元を "cgal"::tube と **名指し**して意図を式に固定する。
-	OUT3=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="module(\"$SO\",{priority:120});
+	OUT3=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="$MCG $MMF $MBR module(\"$SO\",{priority:120});
 	       print(\"CG\", volume(solidify(\"cgal\"::$SELFX)));
 	       print(\"MF\", volume(solidify(cast(\"mf-mesh3d\", \"cgal\"::$SELFX))));" "$SRAVA" 2>&1)
 	for k in CG MF ; do

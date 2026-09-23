@@ -16,6 +16,7 @@
 #include	"cg/c++/cgMesh.h"
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	<cstring>
 #include	"_ts2/c++/cgaCast_.h"
 
 CLASS_TINYSTATE(cg/c++/cgaCast,pig/c++/ptsCalcBody)
@@ -81,6 +82,36 @@ cgaCast_::compute()
 		return;
 	}
 	mesh = in;   /* identity。保存時の WriterMesh が MESH(exact)で再エンコード = float→exact 変換の実体 */
+
+	/* ★★ #3533 規約②: **降格 (cg-face3d → cg-cross2d) だけは identity ではない**。
+	 *   「空間に置かれた 2D」を「z=0 の簡易表現」と名乗り直す操作なので、*本当に z=0 に
+	 *   居るとき* しか許さない。⇒ @frame_is_default()@ が偽なら明示エラー。幾何は 1 ミリも
+	 *   動かさない (傾いたものを落としたいなら #3534 の project_flatten を使う)。
+	 *   ★ 逆に「枠は既定だが型は face3d」= @rotate(rect,"z",90)@ の結果は *通る*。
+	 *     型 (規約①) と幾何 (枠) を別のビットで持っているのはこのため。
+	 *   ⚠ 目標型は args[0] (インラインの文字列)。プランナは既に routing に使っているが、
+	 *     ここは **値を作る側**なので自分で読む。 */
+	sPtr<cgMesh2D> c2 = sPtr<cgMesh2D>::d_cast(in);
+	if ( c2.is_notNull() && na > 0 ) {
+		sPtr<pigData> tv = (*args)[0];
+		const char *tname = ( tv.is_notNull() && tv->get_str() != thNULL )
+		                  ? tv->get_str()->get_str() : "";
+		if ( ::strcmp(tname, "cg-cross2d") == 0 && c2->is_placed() ) {
+			if ( ! c2->frame_is_default() ) {
+				result = cga_err(thNEW(stdString,(
+				    "cast: this 2D region is placed on another plane, so it cannot be named "
+				    "\"cg-cross2d\" (the z=0 representation); cast never moves geometry — "
+				    "use project_flatten(...) to drop it onto z=0, or transform it back first")));
+				mesh = thNULL;
+				return;
+			}
+			/* 幾何はそのまま・**名乗りだけ**下げる (共有されうる値なので複製する)。 */
+			sPtr<cgMesh2D> out = thNEW(cgMesh2D,());
+			out->copy_contents_from(c2);   /* ★ #3545: 複製は幾何 lib 側 */
+			out->set_placed(0);
+			mesh = out;
+		}
+	}
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

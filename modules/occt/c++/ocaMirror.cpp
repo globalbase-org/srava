@@ -34,7 +34,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<ocShape>	out;
+	sPtr<ocGeom>	out;
 private:
 	TS_DEFARGS
 };
@@ -48,7 +48,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class ocShape;
+class ocGeom;
 TS_END_INTERFACE
 
 #endif
@@ -72,9 +72,9 @@ ocaMirror_::compute()
 {
 	ocShape::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
+	sPtr<ocGeom> in = ( na > 0 ) ? sPtr<ocGeom>::d_cast((*args)[0]) : sPtr<ocGeom>();
 	if ( ! in.is_notNull() ) {
-		result = oca_err(thNEW(stdString,("mirror: needs an OCCT shape")));
+		result = oca_err(thNEW(stdString,("mirror: needs an OCCT shape (oc-brep3d) or 2D region (oc-face3d)")));
 		return;
 	}
 	sPtr<pigData> arg = ( na > 1 ) ? (*args)[1] : sPtr<pigData>();

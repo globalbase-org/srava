@@ -30,6 +30,8 @@ TOL="${3:-1e-9}"
 DX="$4"                     # openvdb だけ: 生成器の末尾引数 (",0.05" の形で連結する)
 CGCHK="$5"                  # "cg" = 向きを cgal へ渡して検算する (下の ⑭)
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 
 # ボクセルカーネル (openvdb) は生成 op の末尾に dx が要る。他は空。
 if [ -n "$DX" ]; then A=",$DX"; else A=""; fi

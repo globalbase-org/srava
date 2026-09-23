@@ -10,6 +10,7 @@
 #include	"gg/c++/ggTriSink.h"
 #include	"common/solids.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/ggaTorus_.h"
 
 CLASS_TINYSTATE(gg/c++/ggaTorus,pig/c++/ptsCalcBody)
@@ -69,7 +70,13 @@ ggaTorus_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	double R   = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double r   = ( na > 1 ) ? (*args)[1]->get_flt() : 0.25;
-	int    seg = ( na > 2 ) ? (int)(*args)[2]->get_int() : 0;   /* 大円・管断面ともこの分割数。0=既定 32 */
+	int    seg_in = ( na > 2 ) ? (int)(*args)[2]->get_int() : 0;   /* 0 = 未指定 */
+	int    seg = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(seg_in, 0, &seg) != srava_geo::SEGS_OK ) {
+		result = gga_err(thNEW(stdString,(srava_geo::segs_error("torus").c_str()))); return;
+	}
 	if ( !(R > 0) ) { result = gga_err(thNEW(stdString,("torus: R (distance from the axis to the tube center) must be > 0"))); return; }
 	if ( !(r > 0) ) { result = gga_err(thNEW(stdString,("torus: r (tube radius) must be > 0"))); return; }
 	if ( !(r < R) ) { result = gga_err(thNEW(stdString,("torus: r must be < R (self-intersecting otherwise)"))); return; }

@@ -13,7 +13,7 @@
 #   意図的 … カーネル固有 op が「持ち主へ落ちる」ことを見るテスト。これは routing の検査
 #            そのものなので、`"nef_hybrid"::minkowski(...)` と名指しに直すと **検査の意味が消える**
 #   事故   … 汎用 op (tube / box …) を「別カーネルが作る」前提で使っている。
-#            名指し (`"manifold"::tube(...)`) に直す — リストに足してはいけない
+#            名指し (`"manifold"::tube_ruled(...)`) に直す — リストに足してはいけない
 #
 # 検査: python3 tools/audit_routing_dependency.py --check
 #       (ctest の srava_routing_dependency が呼ぶ)
@@ -29,14 +29,28 @@ srava_geogram.sh   manifold   solidify
 srava_nef.sh       cgal       complement,minkowski
 srava_nef.sh       geogram    minkowski,offset
 srava_nef.sh       manifold   complement
-srava_nef.sh       manifold   complement,minkowski
+# ★ 2026-09-12 (#3511): この行は **complement,minkowski から complement だけ**になった。
+#   manifold に minkowski を配線したため (Manifold::MinkowskiSum は凸分解を使わない別実装)。
+#   ⚠ manifold の sig は **自型 (mf,mf) だけ**なので、ここで見ている混成 (mf,cg) と
+#     cgal 由来 (cg,cg) の minkowski は従来どおり nef へ落ちる = 検査の意味は残っている。
+#   ⚠ 一方で **純粋な (mf,mf) の minkowski は manifold が受けるようになった** (priority 10 > 5)。
+#     nef に行かせたい式は "nef_snc"::minkowski(...) と名指しすること。
+srava_nef.sh       manifold   complement
 
 # --- nonmani (2026-09-06): 非 2-多様体の値を **cgal / manifold に読ませる**のが主題なので
-#     両方を上げている。complement (負の対照の非有界) と nparts (塊の数) は nef 固有なので
-#     持ち主へ落ちる。名指しに直すと「他カーネルを上げても nef 固有 op は落ちる」という
-#     検査そのものが消えるため、意図的な依存として承認する。
-srava_nef.sh       cgal       complement,nparts
-srava_nef.sh       manifold   complement,nparts
+#     両方を上げている。complement (負の対照の非有界) は nef 固有なので持ち主へ落ちる。
+#     名指しに直すと「他カーネルを上げても nef 固有 op は落ちる」という検査そのものが
+#     消えるため、意図的な依存として承認する。
+# ★ 2026-09-13 (#3514): この 2 行は **complement,nparts から complement だけ**になった。
+#   cgal / manifold / geogram に nparts を配線したため。
+#   ⚠ この現場では nef を priority 99 で上げているので **実行者は nef のまま**で、
+#     見ているもの (非 2-多様体の全シェルを数える) は変わっていない。
+#   ⚠⚠ ただし **nef を上げていない式では実行者が入れ替わる**。約束は揃えてある
+#     (塊 = SNC の marked volume = 符号つき体積が正のシェル) ので数は同じはずだが、
+#     nef だけが答えられるのは **非有界な値** (complement の結果) — メッシュ系は
+#     境界を持てないので、そこは従来どおり nef へ落ちる。
+srava_nef.sh       cgal       complement
+srava_nef.sh       manifold   complement
 
 # --- openvdb 固有: 入力メッシュを各カーネルに作らせ、voxels は openvdb へ落ちること
 srava_openvdb.sh   cgal       voxels
@@ -45,3 +59,27 @@ srava_openvdb.sh   manifold   voxels
 
 # --- cgal 固有: perimeter / repair は cgal だけが持つ。manifold を上げても cgal へ落ちる
 srava_parse.sh     manifold   perimeter,repair
+
+# ---- #3527 段 3: 素性 op を geomutils.so (gu) へ寄せたことによる依存 (2026-09-17) ----
+# ★ nverts / nfaces / valid / bbox / area / centroid / nshells / nparts / genus は
+#   manifold / geogram / cherchi から **gu へ移した** (中身は元から common/meshprops.h の
+#   1 実装を通っていたので答えは変わらない — 移送前後の bit 一致を実測で確認)。
+# ⇒ カーネル X を priority 99 で上げているテストで、これらの op は **gu へ落ちる**。
+#   これは事故ではなく *所有者が変わった* 結果なので、名指し ("geomutils"::nverts(...)) には
+#   直さない — 直すと全テストが冗長になり、しかも「gu が持ち主」という設計を隠すことになる。
+# ⚠ srava_nef.sh の nparts は convex_decomposition の結果 (nf-mesh3d) に対する呼び出しなので、
+#   実際には nef が答える (gu は nf-mesh3d を名乗らない)。ここは静的監査の粒度の問題。
+srava_cherchi.sh   cherchi    nfaces,nverts
+srava_geogram.sh   geogram    nfaces,nverts
+srava_nef.sh       manifold   complement,nparts
+srava_parse.sh     manifold   valid
+
+# --- #3581: 点群と B-rep の積と差 + **3 モジュール一致**の検定 -----------------------
+# ⚠ この 3 つは「openvdb が奪いうる op」では **ない**。検査がファイル単位なので出たもの:
+#     cast   … 目標型を明示して呼ぶ (cast("gu-mesh3d", …)) ので、行を選ぶのは
+#              pig_match_cast_target。openvdb は gu-mesh3d を産まないので候補にならない
+#     nverts … 引数が **点群型** (pt-cloud2d/3d)。openvdb は点群型を持たないので奪えない
+#     rect   … occt だけを載せた節での呼び出し。一致の検定 (openvdb を載せる節) には出てこない
+# ★ 一致の検定では、奪われると困るものは **すべて名指し**してある
+#   ("occt"::box / "manifold"::box)。⇒ 残りは名指しに直しても検査の中身が変わらない。
+srava_ptsplit_occt.sh   openvdb    cast,nverts,rect

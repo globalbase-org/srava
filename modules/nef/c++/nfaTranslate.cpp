@@ -7,7 +7,6 @@
 #include	"pig/c++/pigData.h"
 #include	"nf/c++/nfMesh.h"
 #include	"ts2/c++/stdString.h"
-#include	<CGAL/Aff_transformation_3.h>
 #include	"_ts2/c++/nfaTranslate_.h"
 
 CLASS_TINYSTATE(nf/c++/nfaTranslate,pig/c++/ptsCalcBody)
@@ -29,7 +28,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -43,7 +42,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -65,7 +64,7 @@ void
 nfaTranslate_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	if ( ! in.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("translate: needs a Nef mesh")));
 		return;
@@ -82,11 +81,13 @@ nfaTranslate_::compute()
 	for ( int k = 0 ; k < 3 && k < nd ; ++k )
 		t[k] = v->get_ix(thNEW(pigDataInteger,((INTEGER64)k)))->get_flt();
 
-	typedef CGAL::Aff_transformation_3<nfMesh::K> Aff;
-	Aff a(CGAL::TRANSLATION, nfMesh::K::Vector_3(t[0], t[1], t[2]));
-	nfMesh::Nef n = in->nef();
-	n.transform(a);
-	mesh = thNEW(nfMesh,(n));
+	/* ★ #3535②: 既にある nfNefMesh::apply_affine (行優先 3x4) を使う。⚠ ここで
+	 *   Aff_transformation_3 を組むと CGAL の可変大域状態の実体がこの .so にもできる。
+	 *   ★ 平行移動は 3x4 の右端列そのものなので、式は素直に書ける。 */
+	double e[12] = { 1,0,0, t[0],
+	                 0,1,0, t[1],
+	                 0,0,1, t[2] };
+	mesh = in->apply_affine(e);
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

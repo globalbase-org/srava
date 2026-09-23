@@ -240,6 +240,22 @@ ptsAgentApplication_::forward_packet(sPtr<ptsWirePacket> pkt)
 	uint32_t        idx = 0;
 
 	switch ( type ) {
+	case W_EOF:
+		/* ★★ #3417 (2026-09-06): **planner が消えた**。返す先が無いので実行体を畳む。
+		 *   これが「計算中の実行体へ中断を届ける唯一の非シグナル経路」。
+		 *   従来は agent が DRAIN に居て stdin を読んでおらず、planner が wfd を閉じても
+		 *   誰も気づかなかった (実測で 38 秒間まったく反応しなかった)。
+		 *   ⚠ W_END では **絶対にここへ来ない**。W_END は要求と同時に届く正常な合図で、
+		 *     それで destroy すると計算開始の瞬間に自分を殺す (pigwire.h の W_EOF 参照)。
+		 *   ⚠ 実行体が calc を別オブジェクトに持っていれば (ptsGenericAgent / ptsCalcBody)
+		 *     ここから calc->destroy() までリレーされ、モジュールが協力すれば計算が止まる。 */
+		/* ★ agent プロセス側の撤収は **ここしか観測点が無い**。planner 側 (PIG_DBG_TD) と
+		 *   同じ作法で 1 行出す。⚠ agent の stderr は ptsErrSink に吸われてエラー合成にしか
+		 *   使われないので、素で走らせても人目には触れない (srava_agent を直に起動すると見える)。 */
+		if ( osglue_env_int("PIG_DBG_TD", 0) )
+			::fprintf(stderr, "[td] agentapp: W_EOF -> agent->destroy()\n");
+		agent->destroy();
+		return;
 	case C_OP:
 		str = ( n > 0 )
 		    ? sPtr<stdString>(thNEW(stdString,((const char*)&pkt->payload[0], 0, n)))
@@ -335,8 +351,12 @@ TS_STATE(ACT_START)
 		 * 暗黙に頼れていたから。§5.4 で tsSignal を登録した途端その前提が崩れ、
 		 * agent process が終わらず **継承した stdout を握ったまま**になって
 		 * ctest が EOF を待ち続けた (srava_planner_sigint 等が Timeout)。 */
-		if ( ev->source == pipe && pipe.is_notNull() && ev->type == TSE_RETURN )
+		if ( ev->source == pipe && pipe.is_notNull() && ev->type == TSE_RETURN ) {
+			/* ★ #3417 (2026-09-06): agent プロセス側にも撤収の観測点を置く。
+			 *   planner 側 (PIG_DBG_TD) と同じ作法。ここが見えないと
+			 *   「stdin EOF が届いたのか」すら分からない。 */
 			pipe = thNULL;
+		}
 		/* 実行体の結果 (pigDataCache / pigDataError)。ここから保存の見届けに入る。 */
 		if ( ev->source == agent && ev->type == TSE_RETURN ) {
 			agentResult = sPtr<pigData>::d_cast(ev->msg_obj);

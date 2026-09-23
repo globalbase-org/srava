@@ -11,6 +11,7 @@
 #include	"vd/c++/vdArena.h"   /* #3441: op あたりの TBB 予算 */
 #include	"common/solids.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	<string>
 #include	"_ts2/c++/vdaPrism_.h"
 
@@ -79,7 +80,8 @@ vdaPrism_::compute()
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	double r = ( na > 2 ) ? (*args)[2]->get_flt() : 1.0;
 	double dx = ( na > 3 ) ? (*args)[3]->get_flt() : 0.0;
-	if ( !(n >= 3) ) { result = vda_err(thNEW(stdString,("prism: n must be >= 3"))); return; }
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = vda_err(thNEW(stdString,(srava_geo::sides_error("prism").c_str()))); return; }
 	if ( !(h > 0) ) { result = vda_err(thNEW(stdString,("prism: height must be > 0"))); return; }
 	if ( !(r > 0) ) { result = vda_err(thNEW(stdString,("prism: radius must be > 0"))); return; }
 	if ( !(dx > 0) ) { result = vda_err(thNEW(stdString,("prism: last argument is dx (voxel size in world units) and must be > 0"))); return; }

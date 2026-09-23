@@ -43,7 +43,11 @@ extern const pigModuleType occt_mf_provides[];
 const pigModuleType occt_mf_provides[] = {
 	{ &ocGeom::WIRE, OC_TYPE,
 	  OC_TAG },
-	{ &mfGeom::WIRE, "mf-mesh3d",
+	/* ★ #3533: polygonize が mf-face3d を作る。
+	 * ★★ #3544: occt の 2D が 2 型になり、**z=0 の面は mf-cross2d を作る**ようになった。
+	 *   ⚠ ここに書き忘れると型が登録されず、routing が入力型を "none" と読んで
+	 *     「no module can execute op ... on input types (none)」になる (occt 側で実際に踏んだ)。 */
+	{ &mfGeom::WIRE, "mf-mesh3d,mf-face3d,mf-cross2d",
 	  "MFM3" },
 	{ 0, 0, 0 },
 };

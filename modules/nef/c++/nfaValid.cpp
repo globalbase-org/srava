@@ -65,7 +65,7 @@ void
 nfaValid_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	if ( ! in.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("valid: needs a Nef mesh")));
 		return;

@@ -8,6 +8,7 @@
 #include	"pig/c++/pigData.h"
 #include	"oc/c++/ocShape.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/ocaNgon_.h"
 
 #include	<BRepBuilderAPI_MakePolygon.hxx>
@@ -79,7 +80,8 @@ ocaNgon_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double r = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
-	if ( !(n >= 3) ) { result = oca_err(thNEW(stdString,("ngon: n must be >= 3"))); return; }
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = oca_err(thNEW(stdString,(srava_geo::sides_error("ngon").c_str()))); return; }
 	if ( !(r > 0) ) { result = oca_err(thNEW(stdString,("ngon: radius must be > 0"))); return; }
 	try {
 		BRepBuilderAPI_MakePolygon poly;

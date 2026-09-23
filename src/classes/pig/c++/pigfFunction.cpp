@@ -83,9 +83,23 @@ TS_STATE(INI_ptsObject_START)   // ptsObject の INI gate を上書き: args コ
 		for ( int k = 0 ; k < n ; ++k )
 			args[k] = _front->arg(k);
 		env = parent->get_env();                  // 実態親の env を継承
+		/* ⚠ 実態親が env を持たないことがある (単体テストの app 等・ptsObject::get_env は thNULL)。
+		 * そのままだと配下の計算が **どの try にも属さない** ので、ここで根の env を立てる。
+		 * ★ #3482: 「env を作る場所は全部 try をリレーする」を **例外なく**成り立たせるため。 */
+		if ( ! env.is_notNull() ) {
+			env = thNEW(pigEnvironment,(thNULL));
+			if ( ptsApp.is_notNull() ) env->set_try( ptsApp->root_try() );
+		}
 	}
-	else
-		env = thNEW(pigEnvironment,(thNULL));      // ルート: 自前の env
+	else {
+		/* ルート: 自前の env。★★ #3482: **ここで根の見えない try を刺す**。
+		 * _front を持たない helper (単体テストのドライバ等) はここを通るので、刺さないと
+		 * その配下で起きた計算が **どの try にも属さない** = 台帳に穴が空く。
+		 * ⇒ env を作る場所は全部 try をリレーする、という不変条件をここで閉じる
+		 *   (他の 3 箇所は pigfSequence / pigfAsync / pigfApply)。 */
+		env = thNEW(pigEnvironment,(thNULL));
+		if ( ptsApp.is_notNull() ) env->set_try( ptsApp->root_try() );
+	}
 	return rDO|INI_pigfFunction_START;
 }
 TS_STATE(INI_pigfFunction_START)   // 派生がここを上書きして初期化を挿入する

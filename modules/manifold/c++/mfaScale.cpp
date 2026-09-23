@@ -8,6 +8,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"mf/c++/mfMesh.h"
+#include	"mf/c++/mfAffineDemote.h"   /* ★ #3554 段5 */
 #include	"common/affine.h"   /* アフィン変換の共通規約 (#3486) */
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
@@ -82,7 +83,21 @@ mfaScale_::compute()
 		mesh = thNEW(mfMesh,(manifold::Manifold()));
 		return;
 	}
+	/* ★★ #3526 (2026-09-13): **2D は枠 (平面) を持つようになった**ので、面外へ出す変換は
+	 *   もう断らない — mfCross::apply_affine が z 成分を **枠へ渡す**。
+	 *   ⚠ #3518 の 1 の但し書きとして 2940662 で「黙って射影する」のを明示エラーにしたが、
+	 *     それは *置き場所を持てなかった* からで、持てるなら断る理由は無い。
+	 *   ⚠ 線形部が退化して平面が線に潰れる場合だけ null が返る ⇒ 明示エラーにする。 */
 	mesh = ( in.is_notNull() ) ? in->apply_affine(e) : sPtr<mfGeom>();
+	mf_demote_if_flat(in, mesh, e);   /* ★ #3554 段5: xy に帰着するなら cross2d のまま */
+	if ( in.is_notNull() && ! mesh.is_notNull() ) {
+		result = mfa_err(thNEW(stdString,(
+		    "scale: this transform flattens the 2D region onto a line (its plane collapses)")));
+		mesh = thNEW(mfMesh,(manifold::Manifold()));
+		return;
+	}
+	/* ★ #3498: Manifold::Transform は **遅延**する (mfMesh.h の mf_eval_err の一覧)。 */
+	if ( (result = mf_eval_err(mesh, brk_, "scale")) != thNULL ) mesh = thNULL;
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

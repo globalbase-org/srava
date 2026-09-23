@@ -90,10 +90,12 @@ vdaSphere_::compute()
 		    "sphere: 2nd argument is dx (voxel size in world units) and must be > 0")));
 		return;
 	}
-	out = vdGrid::make_sphere(r, dx);
-	if ( ! out.is_notNull() )
+	out = vdGrid::make_sphere(r, dx, &brk_);   /* ★ #3498 */
+	if ( ! out.is_notNull() ) {
+		if ( (result = vd_abort_err(brk_, "sphere")) != thNULL ) return;
 		result = vda_err(thNEW(stdString,(
 		    "sphere: openvdb createLevelSetSphere failed")));
+	}
 	}, vdwhy) )
 		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

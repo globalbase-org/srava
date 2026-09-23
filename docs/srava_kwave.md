@@ -103,7 +103,7 @@ kspaceFirstOrder-CUDA -i input.h5 -o output.h5      # GPU 版
 
 ## ツールの所在と依存
 
-- srava: `export_vox` は **`openvdb_cg.so` モジュールが提供**（2026-09-01・#3468 で `cgal.so` から移設）。
+- srava: `export_vox` は **`openvdb_cg.so` モジュールが提供**（2026-09-01・ で `cgal.so` から移設）。
   ビルドには **HDF5** と、`SRAVA_MODULE_CGAL` / `SRAVA_MODULE_OPENVDB` / `SRAVA_MODULE_OPENVDB_CG_GPL`
   がすべて ON であることが必要（いずれも既定 ON）。
   ⚠ スクリプト側で `module("cgal.so",{})` だけを書いていた場合は **`module("openvdb_cg.so",{})` の追加が要る**。

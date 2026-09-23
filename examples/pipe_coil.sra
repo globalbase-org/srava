@@ -27,7 +27,7 @@ var sp = linspace(PI/ctr, 2*PI*N + PI/ctr, N*ctr);
 var coil = transpose([ cos(sp)*ctr_r, sin(sp)*ctr_r, linspace(-r/ctr, -2*r*N - r/ctr, N*ctr) ]);
 
 // 一定太さ → tube にはポリライン(制御点 + 半径)を直接渡す
-var pipe_of = \(c) { tube(map(c, \(p){ [p, r]; }), 32); };
+var pipe_of = \(c) { tube_ruled(map(c, \(p){ [p, r]; }), 32); };
 
 // ---- 分離(food cutting を gap>=DMIN に開く・端点固定のまま) -----------------
 print("BEFORE: min gap =", pipe_proximity(coil, r, 4*r)[0][0]);

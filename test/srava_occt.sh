@@ -20,21 +20,28 @@
 SRAVA="$1"
 MODE="${2:-exact}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 OC='module("occt.so",{priority:99});'
 
 case "$MODE" in
 exact)
 	rm -rf "$D-e"
-	R=$(SRAVA_CACHE_DIR="$D-e" SRAVA_SOURCE="$OC print(\"R\", volume(sphere(1,32)));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
+	R=$(SRAVA_CACHE_DIR="$D-e" SRAVA_SOURCE="$OC print(\"R\", volume(sphere(1)));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
 	[ -n "$R" ] || { echo "FAIL: 値が出ない"; exit 1; }
 	# 4/3*pi = 4.18879020478639... と 1e-12 以内で一致すること (内接多面体なら 4.09 前後になる)
 	ok=$(awk -v r="$R" 'BEGIN{ e=4.1887902047863905; d=r-e; if(d<0)d=-d; print (d<1e-12) ? 1 : 0 }')
 	[ "$ok" = "1" ] || { echo "FAIL: 球の体積が $R (期待 4.18879020478639 = 厳密球)"; exit 1; }
-	# 第 2 引数 (分割数) を変えても値が動かないこと = 近似していない証拠
-	R2=$(SRAVA_CACHE_DIR="$D-e2" SRAVA_SOURCE="$OC print(\"R\", volume(sphere(1,4)));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
+	# ★★ #3570 段3: occt は **分割数そのものを取らない**。以前は「受けるが無視する」
+	#   (#3530) だったので「32 と 4 で値が動かないこと」を見ていたが、原則が
+	#   「そのモジュールで必要のない引数は撤去する」に変わったので、いまは
+	#   **渡すと明示エラーになること**が同じ性質を守る (近似していないから分割数が無い)。
+	E=$(SRAVA_CACHE_DIR="$D-e2" SRAVA_SOURCE="$OC print(\"R\", volume(sphere(1,32)));" "$SRAVA" 2>&1)
 	rm -rf "$D-e2"
-	[ "$R" = "$R2" ] || { echo "FAIL: 分割数で値が変わった seg32=$R seg4=$R2 (近似している?)"; exit 1; }
-	echo "OCCT-EXACT-OK $R (分割数に依存しない)" ;;
+	echo "$E" | grep -q "no candidate takes 2 argument(s)" || {
+		echo "FAIL: occt の sphere が分割数を受けてしまう: $(echo "$E" | grep -i error | head -1)"; exit 1; }
+	echo "$E" | grep -q "^R " && { echo "FAIL: 分割数つきの呼びが値を返している"; exit 1; }
+	echo "OCCT-EXACT-OK $R (厳密球・分割数は取らない)" ;;
 steiner)
 	rm -rf "$D-s"
 	OUT=$(SRAVA_CACHE_DIR="$D-s" SRAVA_SOURCE="$OC var b = box(2,2,2);
@@ -60,8 +67,8 @@ tri)
 	#     打ち切っていたこと。ocMesh ごと撤去したので、どちらの順でも通る。
 	OUT=$(SRAVA_CACHE_DIR="$D-t" SRAVA_SOURCE="$OC module(\"manifold.so\",{}); module(\"occt_mf.so\",{});
 	  print(\"BOX\",  volume(cast(\"mf-mesh3d\", triangulate(box(2,2,2), 0.01))));
-	  print(\"C\",    volume(cast(\"mf-mesh3d\", triangulate(sphere(1,0), 0.01))));
-	  print(\"F\",    volume(cast(\"mf-mesh3d\", triangulate(sphere(1,0), 0.001))));" "$SRAVA" 2>&1)
+	  print(\"C\",    volume(cast(\"mf-mesh3d\", triangulate(sphere(1), 0.01))));
+	  print(\"F\",    volume(cast(\"mf-mesh3d\", triangulate(sphere(1), 0.001))));" "$SRAVA" 2>&1)
 	BX=$(echo "$OUT" | sed -n 's/^BOX //p')
 	C=$(echo "$OUT" | sed -n 's/^C //p'); F=$(echo "$OUT" | sed -n 's/^F //p')
 	if [ -z "$BX" ] || [ -z "$C" ] || [ -z "$F" ]; then echo "FAIL: 値が出ない BOX=$BX C=$C F=$F"; echo "$OUT"; exit 1; fi
@@ -82,8 +89,8 @@ prim)
 	#   (cylinder = 円筒 1 + 平面 2 = 3 / torus = トーラス面 1 枚 = 1)。
 	rm -rf "$D-p"
 	OUT=$(SRAVA_CACHE_DIR="$D-p" SRAVA_SOURCE="$OC
-	  print(\"CV\", volume(cylinder(1,2,32)));   print(\"CF\", nfaces(cylinder(1,2,32)));
-	  print(\"TV\", volume(torus(2,0.5,32)));    print(\"TF\", nfaces(torus(2,0.5,32)));" "$SRAVA" 2>&1)
+	  print(\"CV\", volume(cylinder(1,2)));   print(\"CF\", nfaces(cylinder(1,2)));
+	  print(\"TV\", volume(torus(2,0.5)));    print(\"TF\", nfaces(torus(2,0.5)));" "$SRAVA" 2>&1)
 	CV=$(echo "$OUT" | sed -n 's/^CV //p'); CF=$(echo "$OUT" | sed -n 's/^CF //p')
 	TV=$(echo "$OUT" | sed -n 's/^TV //p'); TF=$(echo "$OUT" | sed -n 's/^TF //p')
 	if [ -z "$CV" ] || [ -z "$TV" ]; then echo "FAIL: 値が出ない CV=$CV TV=$TV"; echo "$OUT"; exit 1; fi
@@ -160,6 +167,58 @@ step)
 	[ "$RSF" = "$SRCF" ] || { echo "FAIL: 往復で Face 数が変わった 元=$SRCF step=$RSF (三角形化された?)"; exit 1; }
 	rm -f "$F.step" "$F.brep"
 	echo "OCCT-STEP-OK src=$SRC step=$RS brep=$RB faces=$SRCF" ;;
+iges)
+	# ★ #3513: IGES の往復 + **STEP の精度をもう一段強く**固定する。
+	#
+	# ① IGES は **BRep モード**で書けていること — 往復して体積と Face 数が保たれる。
+	#    ⚠ OCCT の既定は Faces モード (theModecr=0) で、面をばらばらの IGES エンティティとして
+	#      並べるので **読み戻しても立体にならない (体積 0)**。そこを踏んでいないかの検定。
+	# ② ★★ **解析曲面のまま運べていること** — 球を出して読み戻し、体積が閉形式
+	#    4/3 pi r^3 と 16 桁で一致する。三角形化されていたら内接多面体の体積になるので
+	#    3 桁台で落ちる。STEP / IGES / .brep の 3 つとも見る。
+	#    ★ occt の球は Face 1 枚 (解析球面) なので、Face 数 1 が保たれることも見る。
+	rm -rf "$D-ig"; F="${D}-ig"
+	rm -f "$F.step" "$F.iges" "$F.brep"
+	OUT=$(SRAVA_CACHE_DIR="$D-ig" SRAVA_SOURCE="$OC
+	  var s = sphere(2);
+	  print(\"SRC\", volume(s)); print(\"SRCF\", nfaces(s));
+	  export(\"$F.step\", s, \"mm\"); export(\"$F.iges\", s, \"mm\"); export(\"$F.brep\", s, \"mm\");" "$SRAVA" 2>&1)
+	SRC=$(echo "$OUT" | sed -n 's/^SRC //p'); SRCF=$(echo "$OUT" | sed -n 's/^SRCF //p')
+	if [ -z "$SRC" ]; then echo "FAIL: 元の値が出ない"; echo "$OUT"; exit 1; fi
+	case "$OUT" in *"agent closed unexpectedly"*)
+		echo "FAIL: export が agent を殺した"; exit 1 ;;
+	esac
+	for e in step iges brep; do
+		[ -s "$F.$e" ] || { echo "FAIL: $e が書けていない"; echo "$OUT"; exit 1; }
+	done
+	rm -rf "$D-ig2"
+	OUT2=$(SRAVA_CACHE_DIR="$D-ig2" SRAVA_SOURCE="$OC
+	  print(\"RS\", volume(import(\"$F.step\"))); print(\"RSF\", nfaces(import(\"$F.step\")));
+	  print(\"RI\", volume(import(\"$F.iges\"))); print(\"RIF\", nfaces(import(\"$F.iges\")));
+	  print(\"RB\", volume(import(\"$F.brep\")));" "$SRAVA" 2>&1)
+	RS=$(echo "$OUT2" | sed -n 's/^RS //p');  RSF=$(echo "$OUT2" | sed -n 's/^RSF //p')
+	RI=$(echo "$OUT2" | sed -n 's/^RI //p');  RIF=$(echo "$OUT2" | sed -n 's/^RIF //p')
+	RB=$(echo "$OUT2" | sed -n 's/^RB //p')
+	if [ -z "$RS" ] || [ -z "$RI" ] || [ -z "$RB" ]; then
+		echo "FAIL: 読み戻せない step=$RS iges=$RI brep=$RB"; echo "$OUT2"; exit 1; fi
+	# ② 閉形式 4/3 pi 2^3 = 33.510321638291124 と 16 桁 (相対 1e-15) で一致すること
+	ok=$(awk -v s="$SRC" -v a="$RS" -v b="$RI" -v c="$RB" 'BEGIN{
+		w = 4.0/3.0*atan2(0,-1)*8;   # 4/3 pi r^3 (r=2)
+		bad = 0;
+		for (i = 0; i < 4; i++) {
+			v = (i==0 ? s : (i==1 ? a : (i==2 ? b : c)));
+			d = (v - w) / w; if (d < 0) d = -d;
+			if (d > 1e-15) bad = 1;
+		}
+		print (bad == 0) ? 1 : 0 }')
+	[ "$ok" = "1" ] || { echo "FAIL: 解析曲面のまま運べていない (閉形式 4/3 pi r^3 = 33.510321638291124 と 1e-15 で一致しない) 元=$SRC step=$RS iges=$RI brep=$RB"; exit 1; }
+	# ① Face 数 (解析球面 1 枚) が保たれること
+	[ "$SRCF" = "1" ] || { echo "FAIL: 元の球の Face 数が $SRCF (期待 1 = 解析球面)"; exit 1; }
+	[ "$RSF" = "1" ]  || { echo "FAIL: STEP 往復で Face 数が $RSF (期待 1・三角形化された?)"; exit 1; }
+	[ "$RIF" = "1" ]  || { echo "FAIL: IGES 往復で Face 数が $RIF (期待 1・Faces モードで書いた? 三角形化?)"; exit 1; }
+	rm -f "$F.step" "$F.iges" "$F.brep"
+	echo "OCCT-IGES-OK sphere(2) src=$SRC step=$RS iges=$RI brep=$RB faces=$RIF" ;;
+
 place)
 	# ★ #3474 (2026-09-05): occt の基本立体の **置き場所** を閉形式で固定する。
 	#   体積は平行移動で変わらないので、素の volume を比べる kernel_agree では
@@ -185,10 +244,10 @@ place)
 	chk 'prism(6,2,1) &&& box(10,10,10)' 1.2990381056766580 "prism の底面が z=0"
 	chk 'pyramid(6,2,1) &&& box(10,10,10)' 0.4330127018922193 "pyramid の底面が z=0"
 	# 以下は原点中心。+++ 八分空間で切ると閉形式になる
-	chk 'sphere(1,32) &&& box(10,10,10)'      0.5235987755982988  "sphere が原点中心 (pi/6)"
-	chk 'cylinder(1,2,32) &&& box(10,10,10)'  0.7853981633974483  "cylinder が原点中心 (pi/4)"
-	chk 'cone(1,2,32) &&& box(10,10,10)'      0.0654498469497874  "cone が原点中心 (pi/48)"
-	chk 'torus(2,0.5,32) &&& box(10,10,10)'   1.2337005501361697  "torus が原点中心 (pi^2/8)"
+	chk 'sphere(1) &&& box(10,10,10)'      0.5235987755982988  "sphere が原点中心 (pi/6)"
+	chk 'cylinder(1,2) &&& box(10,10,10)'  0.7853981633974483  "cylinder が原点中心 (pi/4)"
+	chk 'cone(1,2) &&& box(10,10,10)'      0.0654498469497874  "cone が原点中心 (pi/48)"
+	chk 'torus(2,0.5) &&& box(10,10,10)'   1.2337005501361697  "torus が原点中心 (pi^2/8)"
 	chk 'tetrahedron(1) &&& box(10,10,10)'    0.0962250448649376  "tetrahedron が原点中心"
 	# ★ #3474 続き: 2D プリミティブ。circle は **厳密な円** なので閉形式 πr² と一致する
 	#   (メッシュ系の内接正多角形とは構造的に違うので kernel_agree に入れられない)。
@@ -210,7 +269,7 @@ fatal)
 	#     始まる**」こと (OCCT が将来この形を通せるようになったら成功でも合格)。
 	#   ★ #3475: 文言が "occt/fillet: ..." になった (どのカーネルが失敗したかを名乗る)。
 	OK=1
-	for EXPR in "fillet(sphere(1,20), 0.5)" "chamfer(sphere(1,20), 0.3)"; do
+	for EXPR in "fillet(sphere(1), 0.5)" "chamfer(sphere(1), 0.3)"; do
 		rm -rf "$D-ft"
 		OUT=$(SRAVA_CACHE_DIR="$D-ft" SRAVA_SOURCE="module(\"occt.so\",{priority:99});
 		      print(volume($EXPR));" "$SRAVA" 2>&1)
@@ -245,9 +304,17 @@ contact)
 	#     area は 2*4*pi*r^2 = 56.548668 のまま**正しく見える**。体積かレンズの突きが要る。
 	#
 	#   ★ このモードは OCCT 側の欠陥を **静かな誤値ではなくテスト失敗**にするためにある。
-	#     OCCT 7.9.3 (macOS/Homebrew) では 7 ケース全て正しいことを確認済み (2026-09-06)。
-	#     #3490 を報告したビルドでは 1 番が 25.019963 / valid=0 になっていた
+	#     OCCT 7.9.3 (macOS/Homebrew) では正しいことを確認済み (2026-09-06)。
+	#     #3490 を報告したビルドでは 1 番が 25.019963 になっていた
 	#     ⇒ ここが落ちたら **まず OCCT のバージョンを疑う**。
+	#
+	#   ⚠⚠ **valid を「形が壊れていないか」の代理に使ってはいけない** (#3543・2026-09-15)。
+	#     起票時 (09-06) はここに `valid(x) == 1` を置いていた — 壊れたビルドで 0 が出たのを
+	#     見て「壊れると 0 になる」と読んだため。だが **xor は正しく出来ても非多様体**
+	#     (2 つの三日月が交線の円だけで接する) なので、共通定義 (#3487) の ② から
+	#     **正しい答えは 0**。同じ機体で 7.8.1 と 7.9.3 の検定器に両方の形を食わせると、
+	#     答えは **形だけで決まり版には依らない** = valid は壊れた形と正しい形を区別しない。
+	#     ⇒ 形の証人は **体積とレンズ突き** (下の 1・2 番)。valid はそれとは別の性質を見る。
 	#
 	#   閉形式 (r=1.5・中心間 d=sqrt(3)):
 	#       V(球)  = 4/3*pi*1.5^3                    = 14.137166941154069
@@ -264,22 +331,24 @@ contact)
 		[ "$ok" = "1" ] || { echo "FAIL: $3 が $V (期待 $2 ± 相対 $T)"; OK=0; }
 	}
 	# (1) 三日月 2 つ = 交線の円だけで接する ← #3490 の症例そのもの
-	XOR='var a = sphere(1.5,32); var b = translate(sphere(1.5,32),[1,1,1]);
+	XOR='var a = sphere(1.5); var b = translate(sphere(1.5),[1,1,1]);
 	     var x = (a --- b) ||| (b --- a);'
 	oc_chk "$XOR print(\"VAL\", volume(x));" 21.765592372748237 "三日月 2 つの融合 (xor)"
 	# ★ レンズの中を小球で突く。25.02 に化けているとここが小球まるごとになる
-	oc_chk "$XOR print(\"VAL\", volume(x &&& translate(sphere(0.2,16),[0.5,0.5,0.5])));" \
+	oc_chk "$XOR print(\"VAL\", volume(x &&& translate(sphere(0.2),[0.5,0.5,0.5])));" \
 	       0 "xor のレンズ内部が空 (材料になっていない)"
-	oc_chk "$XOR print(\"VAL\", valid(x));" 1 "xor が正しい立体"
+	# ★ #3543: 非多様体なので **0 が正しい** (上の ⚠⚠ を参照)。7.9.3 で xor が直った途端に
+	#   1 に化けていたのを occt の valid 側で塞いだ。その回帰。
+	oc_chk "$XOR print(\"VAL\", valid(x));" 0 "xor は非多様体なので valid=0 (#3487 の ②)"
 	# (2)-(4) 面 / 稜 / 頂点だけで接する 2 箱。どれも体積 2
 	oc_chk 'print("VAL", volume(box(1,1,1) ||| translate(box(1,1,1),[1,0,0])));' 2 "面で接する 2 箱"
 	oc_chk 'print("VAL", volume(box(1,1,1) ||| translate(box(1,1,1),[1,1,0])));' 2 "稜だけで接する 2 箱"
 	oc_chk 'print("VAL", volume(box(1,1,1) ||| translate(box(1,1,1),[1,1,1])));' 2 "頂点だけで接する 2 箱"
 	# (5) 1 点で外接する 2 球
-	oc_chk 'print("VAL", volume(sphere(1,32) ||| translate(sphere(1,32),[2,0,0])));' \
+	oc_chk 'print("VAL", volume(sphere(1) ||| translate(sphere(1),[2,0,0])));' \
 	       8.377580409572782 "1 点で外接する 2 球"
 	# (6) 中空の殻 = 内側シェルを void として持てること (表現能力の裏づけ)
-	oc_chk 'print("VAL", volume(sphere(1.5,32) --- sphere(1.0,32)));' \
+	oc_chk 'print("VAL", volume(sphere(1.5) --- sphere(1.0)));' \
 	       9.948376736367678 "中空の殻 (内側シェルが void)"
 	# (7) n 項の経路 (SetArguments/SetTools) も同じ答えを出すこと
 	# ⚠ n 項 (SetArguments/SetTools を 1 回の BOP へ) は二項の畳み込みと **同じ交差計算では
@@ -288,6 +357,82 @@ contact)
 	oc_chk "$XOR print(\"VAL\", volume(union(a --- b, b --- a, translate(box(1,1,1),[10,10,10]))));" \
 	       22.765592372748237 "n 項の融合でも xor が保たれる" 1e-7
 	[ "$OK" = "1" ] && echo "OCCT-CONTACT-OK" ;;
+lossy)
+	# ★ #3501 (2026-09-07): **BOPAlgo が黙って材料を落とす**融合を、静かな誤値ではなく
+	#   明示エラーにすること。半径 1 の球を 0.8 刻みで格子状に並べた union で起きる。
+	#
+	#   OCCT 7.9.3 は IsDone() を真・HasErrors() を偽にしたまま
+	#   BOPAlgo_AlertUnableToOrientTheShape を **警告**として上げ、材料を落とした形を返す。
+	#   利用者には普通の数値として届き、**キャッシュに焼き付いていた**。
+	#
+	#   ⚠⚠ **警告そのものを失敗の指標にしてはいけない** — 実測では警告 37 件のうち破綻は 6 件で、
+	#     31 件は正しい結果だった。モジュール側の検出は bbox の包含 (a∪b は a も b も含む)。
+	#
+	#   ★★ ここでの判定は **カーネル間の不変条件**で行う (固定値を焼き込まない):
+	#
+	#         occt の union >= cgal の union
+	#
+	#     occt の球は **厳密な球面**、cgal の sphere(1) は **内接多面体**なので、同じ式で
+	#     occt は必ず cgal 以上になる (実測の比 n=8:1.015 / n=18:1.012 / n=48:1.009)。
+	#     ⇒ occt が cgal を **下回ったら材料を落としている**。版にも fold 順にも依存せず、
+	#     しかも **bbox 検査が見逃す小さな損失まで捕まえる**。
+	#     ⚠ 実際 5x5x4 (100 個) の occt は 99.745510 を返しており、cgal の 102.503213 を
+	#       下回っていた = *あれも既に誤っていた* (起票時に「正常」と誤読した)。
+	#
+	#   ★ 2 つを対で見る:
+	#     (1) 4x4x3 (48 個) … **値が返り、かつ cgal 以上**であること
+	#         = 検査が正しい結果を潰していないこと
+	#     (2) 8x8x5 (320 個) … **黙って誤らない**こと。明示エラーか、cgal 以上の正しい値か。
+	#     (1) が無いと「全部エラーにする」実装が通ってしまう。
+	#
+	#   ⚠ OCCT が将来この配置を解けるようになったら (2) は値を返す。それは改善なので、
+	#     不変条件を満たす限り合格にする。
+	#   ⚠ 版差に注意 — #3490 と同じく OCCT のバージョンで挙動が変わりうる (OCCT 7.9.3 で確認)。
+	#   ⚠ n 項の畳み方 (#3500) が変わると木の形が変わるが、上の不変条件は木の形に依らない。
+	OK=1
+	# nx ny nz -> union 式
+	gen() {
+		awk -v nx="$1" -v ny="$2" -v nz="$3" 'BEGIN{
+			s="";
+			for(i=0;i<nx;i++)for(j=0;j<ny;j++)for(k=0;k<nz;k++){
+				if(s!="") s=s",";
+				s=s sprintf("translate(s,%g,%g,%g)", i*0.8, j*0.8, k*0.8);
+			}
+			printf "var s = sphere(1); print(\"VAL\", volume(union(%s)));", s;
+		}'
+	}
+	# $1=.so $2..$4=格子 → 値 (返らなければ空)
+	val() {
+		rm -rf "$D-lv"
+		SRAVA_CACHE_DIR="$D-lv" SRAVA_SOURCE="module(\"$1\",{priority:99}); $(gen $2 $3 $4)" "$SRAVA" 2>&1 | sed -n 's/^VAL //p'
+	}
+	# (1) 48 球 — 検査が正しい結果を潰していないこと
+	REF48=$(val cgal.so 4 4 3)
+	[ -n "$REF48" ] || { echo "FAIL: 参照の cgal 48 球が値を返さない"; OK=0; }
+	OC48=$(val occt.so 4 4 3)
+	if [ -z "$OC48" ]; then
+		echo "FAIL: 48 球で occt が値を返さない (検査が正しい結果を潰している)"; OK=0
+	else
+		ok=$(awk -v a="$OC48" -v b="$REF48" 'BEGIN{ if(b==""){print 0; exit} print (a >= b*(1-1e-9)) ? 1 : 0 }')
+		[ "$ok" = "1" ] || { echo "FAIL: 48 球 occt=$OC48 が cgal=$REF48 を下回った (材料を落としている)"; OK=0; }
+		[ "$ok" = "1" ] && echo "  ok 48 球 occt=$OC48 >= cgal=$REF48"
+	fi
+	# (2) 320 球 — 黙って誤らないこと
+	REF320=$(val cgal.so 8 8 5)
+	rm -rf "$D-l3"
+	OUT=$(SRAVA_CACHE_DIR="$D-l3" SRAVA_SOURCE="$OC $(gen 8 8 5)" "$SRAVA" 2>&1)
+	V=$(echo "$OUT" | sed -n 's/^VAL //p')
+	if [ -n "$V" ]; then
+		ok=$(awk -v a="$V" -v b="$REF320" 'BEGIN{ if(b==""){print 0; exit} print (a >= b*(1-1e-9)) ? 1 : 0 }')
+		[ "$ok" = "1" ] || { echo "FAIL: 320 球が黙って $V を返した (cgal=$REF320 を下回る = 材料喪失)"; OK=0; }
+		[ "$ok" = "1" ] && echo "  ok 320 球 (★上流が解けるようになった: $V >= $REF320)"
+	else
+		echo "$OUT" | grep -q 'lost material' || {
+			echo "FAIL: 320 球が値も返さず、材料喪失の診断も出ていない"; echo "$OUT" | tail -5; OK=0; }
+		[ "$OK" = "1" ] && echo "  ok 320 球は明示エラー (以前は 4.1888 を黙って返していた)"
+	fi
+	rm -rf "$D-l3" "$D-lv"
+	[ "$OK" = "1" ] && echo "OCCT-LOSSY-OK" ;;
 *)
 	echo "unknown mode: $MODE"; exit 1 ;;
 esac

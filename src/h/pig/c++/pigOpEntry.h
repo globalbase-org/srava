@@ -16,6 +16,7 @@
 #include "ts2/c++/sArray.h"
 #include "pig/c++/pigCacheCodec.h"   /* pigCacheReaderFn (配線が持つ stream reader) */
 #include <stdint.h>
+#include <string.h>
 
 class ptsCalcBody;
 class ptsObject;
@@ -115,6 +116,64 @@ template<class Calc, class... In> struct pigOpWire {
 };
 #define OPWIRE(Calc, ...) (&pigOpWire<Calc __VA_OPT__(,) __VA_ARGS__>::WIRING)
 
+/* ★★ #3554 段1 (2026-09-19): **op の行は `op` と `op#変種` の 2 形**。
+ *   routing は基底名で引くとき `op` と `op#…` を **前方一致で集め**、OPS に書かれた順に
+ *   照合して **最初に成立した 1 行**を採り、*その行名をそのまま C_OP に載せる*。
+ *   ⇒ agent 側の lookup_op は完全一致のままで当たる (名前が別なので「先勝ちで 2 行目が
+ *     静かに死ぬ」罠が構造的に消える) / 行ごとに sig・wiring・in[] を持てる /
+ *     op 名は結果ハッシュの先頭に混ざるので **キャッシュキーが自動で分かれる**。
+ *   ⚠ `#` は利用者には書けない (識別子は [A-Za-z_][A-Za-z0-9_]*)。**書けないが、隠さない**。
+ *   ★★ 表示規約 (ひさ 2026-09-19 確定): 勝った行名は @ps@ ・ 診断 ・ キャッシュキーに
+ *     **そのまま出す**。`cast#cg-cross2d` / `transform#xy` が利用者の目に触れてよい。
+ *     ⇒ 畳んで基底名 (`cast`) に見せると、*どの行が選ばれたか* を外から確かめる手段が無くなる —
+ *       値の中身で配線が変わる機能 (AK_MATCH) では、そこが唯一の観測点になる。
+ *     ⚠ 「書けない名前を見せるのは不親切」より **「実際に走ったものを名乗る」**を採る。
+ *   ★ なおエラー文の前置き (`cgal/cast: ...`) はここではなく **op 本体が書いた文字列**なので、
+ *     行名は出ない (2026-09-19 実測)。*名乗り方が 2 通りある*ことを承知しておくこと。
+ *   ⚠ **無条件の行は常に成立するので、変種より前に置くと覆い隠す** ⇒ 記述子のロード時に
+ *     静的検査で弾く (pig_descriptor_violation)。
+ *   ★ 行数に **上限は無い** — routing は registry の op_row() で 1 行ずつ引く。 */
+/* 行名 row が 基底名 base の行か: `base` そのもの、または `base#…`。 */
+inline int
+pig_op_row_is(const char *row, const char *base)
+{
+	if ( row == 0 || base == 0 ) return 0;
+	size_t bl = ::strlen(base);
+	if ( ::strncmp(row, base, bl) != 0 ) return 0;
+	return ( row[bl] == '\0' || row[bl] == '#' ) ? 1 : 0;
+}
+
+/* 行名の `#` の位置 (無ければ 0)。変種名を読む側はここから後ろを見る。 */
+inline const char *
+pig_op_variant_of(const char *row)
+{
+	if ( row == 0 ) return 0;
+	const char *h = ::strchr(row, '#');
+	return ( h != 0 ) ? h + 1 : 0;
+}
+
+/* ★★ #3554 段2 (2026-09-19): **引数の値の中身を見るマッチ関数** (AK_MATCH)。
+ *   sig は *幾何引数の型* しか見ないので、「値の中身で行き先を変える」がこれまで書けなかった
+ *   (@transform(cross2d, mx)@ の mx が xy 平面に帰着するか / @export@ の拡張子 / @cast@ の目標型)。
+ *
+ *   int match(d, e, argNo, arg);   マッチ 1 / 非マッチ 0
+ *
+ *   ★ @e@ (行そのもの) が効く — @e->op@ の @#@ の後ろを読めば **1 本の汎用関数で全変種を
+ *     賄える** (@export#stl@ / @cast#cg-mesh3d@ …)。無いと変種ごとに C の関数が 1 本ずつ要る。
+ *     (既存の @pig_wire_match@ が引数を取らないのは *テンプレートでクラスごとに生成される*から。
+ *      **共有される関数は文脈を引数で貰うしかない**。)
+ *   ★ @d@ … モジュール名 (診断) と設定。routing のループは記述子を持っているのでただで渡せる。
+ *   ★ @argNo@ … 同じ関数を複数スロットに付けたとき / 可変長の尾部 / 「argument N が…」の文言。
+ *
+ *   ⚠⚠ **純粋であること** (副作用なし・値を読むだけ)。候補ごとに *何度でも呼ばれうる*。
+ *   ⚠⚠ 値は **@compact()@ して読む。決まらなければ決まるまで待つ** — 「読めたときだけ見る」は
+ *     *キャッシュの温度で routing が変わる*ので採らない (2026-08-19 に 4CC フォールバックで
+ *     同じ轍を踏んでいる)。⇒ routing は TS_STATE の中なので yield しても状態が再走するだけ。
+ *     ★ ただし **再走に耐える書き方**でなければならない (2026-09-18 の #3511 の件)。
+ *   ⚠ 待つのは @pigDataDelay@ (評価待ち) であって、継続 pair (キャッシュ実体待ち) ではない。 */
+typedef int (*pigOpMatchFn)(const struct srava_module_descriptor *d, const struct pigOpEntry *e,
+                            int argNo, sPtr<pigData> arg);
+
 /* op 名 → 入力型列 / 出力型 / 計算本体生成子 の対応 1 行。 */
 struct pigOpEntry {
 	const char*       op;        /* 演算子名(キー) */
@@ -188,6 +247,36 @@ struct pigOpEntry {
 	 *   検査: n > nin → too many / n < (nreq ? nreq : nin) → too few / その間は OK。
 	 *   ⚠ **必ず末尾に足すこと** (OPS[] は位置指定初期化子・commutative / vtail_value と同じ理由)。 */
 	int               nreq;
+
+	/* ★★ #3554 段2 (ABI v32): **この行のマッチ関数** (1 本)。0 = 値の中身を見ない = *無条件の行*。
+	 *   非 0 なら **引数 1 個ずつについて呼ばれ**、*全部真ならその行が成立*する。
+	 *   ⇒ 見たくないスロットは @argNo@ で分岐して 1 を返す:
+	 *       static int ext_stl(d,e,argNo,arg) { return (argNo != 0) ? 1 : …拡張子判定…; }
+	 *   ★ **配列にしない理由** (ひさ 2026-09-19): スロットごとの配列にすると
+	 *     ① @in[]@ と長さがずれても **誰も検査できない** (ポインタなので要素数が分からない)
+	 *     ② @variadic@ の尾部に当てられない (@nin@ 個しか無いため)
+	 *     1 本 + @argNo@ 分岐なら **どちらも起きない**。しかも「1 本の汎用関数で全変種を賄う」
+	 *     (@e->op@ の @#@ の後ろを読む) という設計と一貫する。
+	 *   ⚠ **必ず末尾に足すこと** (OPS[] は位置指定初期化子)。既存の行は 0 のままで意味不変。
+	 *   ⚠ routing は「**マッチ関数 ∧ sig**」で行を選ぶ。どちらか一方でも外れればその行は不成立。 */
+	pigOpMatchFn      match;
 };
+
+/* ★★ #3570 段4 / #3572: 行が **何も申告していない** か = *sig だけの行*。
+ *   @in[]@ も @nin@ も無く、計算本体の配線 (@wiring@) も持たず、可変長でもない
+ *   (テスト fixture の @{ "box", 0, 0, (pigArgKind)0, 0, 0, "->cg-mesh3d" }@ 等)。
+ *
+ *   ⚠⚠ **申告していないものを申告 0 と読んではいけない**。そう読むと
+ *     引数の数    … 「0 引数だけを受ける行」になって routing から落ちる (#3570 段4)
+ *     出力の種別  … @out@ が 0 = AK_INLINE = 「値を返す」になり、キャッシュ出力が消える
+ *                   (#3572 の out_cache 決め直しで cgatsagent の fixture が全滅した)
+ *   ⚠ 本当に 0 引数の op (@empty2d@ / @empty3d@) とは **wiring の有無**で分かれる —
+ *     あちらは @OPWIRE(cgaEmpty3D)@ を持つので「0 個だけを受ける」が正しい申告になる。
+ *   ★ 判定をこの 1 本に寄せてある。増やすと「申告の読み方」が場所ごとに割れる。 */
+inline int
+pig_op_row_declares_nothing(const pigOpEntry *e)
+{
+	return ( e != 0 && e->in == 0 && e->nin == 0 && e->wiring == 0 && ! e->variadic ) ? 1 : 0;
+}
 
 #endif

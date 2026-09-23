@@ -9,6 +9,7 @@
 #include	"mf/c++/mfMesh.h"
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/affine.h"   /* ★ #3533: 平面 → 枠 の表は plane_frame() 1 箇所 */
 #include	<cmath>
 #include	"_ts2/c++/mfaSection_.h"
 
@@ -123,6 +124,29 @@ mfaSection_::compute()
 	else if ( mode < 0 ) zcut = ::nextafter(P[2], -1e308);
 	manifold::Polygons ps = in->manifold().Slice(zcut);
 	cross = thNEW(mfCross,(manifold::CrossSection(ps, manifold::CrossSection::FillRule::NonZero)));
+	/* ★★ #3526: **切った場所に返す**。断面の枠 (平面) を切断平面にする。
+	 *   ⚠ これが無いと断面が **黙って z=0 に戻る** — extrude し直したり export したりすると
+	 *     *切った高さの情報が消えている*。#3526 で 2D が枠を持つようになるまでは置き場所を
+	 *     持てなかったので z=0 に落としていたが、持てるなら落とす理由は無い。
+	 *   ★ 局所座標は **そのまま** (Slice は world の x,y をそのまま返す) なので、面積も
+	 *     輪の形も 1 ビットも変わらない。変わるのは「どこに居るか」だけ。
+	 *   ★ 切った高さが 0 なら枠は既定 = **codec の blob も従来とバイト単位で同じ**。
+	 *   ⚠ Manifold::Slice は Z 法線だけなので、軸は常に n∥z の行。N が −Z でも Slice は同じ
+	 *     向きの輪を返すので枠も同じにする (法線の符号で局所座標の取り方を変えると、同じ平面の
+	 *     断面が 2 通りの表現になってしまう) ⇒ **正準** (符号を見ない) でよい。
+	 *   ★★ #3533: 軸の表は **@src/h/common/affine.h@ に 1 つだけ**。ここに n∥z の行を手書きして
+	 *     いたのを borrow に変えた — 1 行しか要らないので「たまたま合っている」状態だったが、
+	 *     表が 3 箇所に散っていること自体が危険だった (片方だけ直されても検査で気づけない)。 */
+	if ( zcut != 0.0 ) {
+		const double nz[3] = { 0, 0, 1 }, pt[3] = { 0, 0, zcut };
+		double o[3], u[3], v[3];
+		if ( srava_affine::plane_frame_canonical(nz, pt, o, u, v) )
+			cross->set_frame(o, u, v);
+	}
+	/* ★ #3533: @section@ の出力は **常に face3d** (切断平面に置かれている)。z=0 で切った
+	 *   場合も同じ — 「たまたま既定の平面だった」だけで、型は切り方に依らない
+	 *   (sig が (mf-mesh3d)->mf-face3d 1 行で済む根拠)。 */
+	cross->set_placed(1);
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

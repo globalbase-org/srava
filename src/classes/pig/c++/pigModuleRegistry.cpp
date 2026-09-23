@@ -36,9 +36,33 @@ int csv_index_of(const char *csv, const char *name)
   }
 }
 
+
+}
+
+/* ★★ #3554 最後の段 (2026-09-19): **マッチ関数から使うので無名 namespace の外に出した**。
+ *   拡張子の判定を CSV 1 つを根拠にできる ⇒ 行名との二重帳簿にならない (ひさ)。 */
 /* CSV に ext (先頭 '.' 付き想定、大小無視) が含まれるか。
  * ★ rev4 Phase C: セグメントは "stl" (無型) でも "stl:cg-mesh3d" (型付き・import 用) でもよい。
- *   ext との照合は ':' より前 (拡張子部) のみで行う (型付きでも can_import_ext が従来通り効く)。 */
+ *   ext との照合は ':' より前 (拡張子部) のみで行う (型付きの CSV でもそのまま効く)。 */
+/* ★ #3554 最後の段: 型付き CSV から **出力型**を引く (旧 pigfModuleAgent::ext_type_in_csv)。
+ *   一致 ext の ':' 以降。無型 / 未一致は空。 */
+std::string pig_ext_out_type(const char* csv, const char* ext) {
+  if (csv == 0 || ext == 0) return std::string();
+  if (*ext == '.') ++ext;
+  size_t el = std::strlen(ext);
+  for (const char* p = csv; *p; ) {
+    const char* c = std::strchr(p, ',');
+    size_t seg = c ? (size_t)(c - p) : std::strlen(p);
+    const char* colon = (const char*)::memchr(p, ':', seg);
+    size_t extlen = colon ? (size_t)(colon - p) : seg;
+    if (extlen == el && ::strncasecmp(p, ext, el) == 0)
+      return colon ? std::string(colon + 1, (p + seg) - (colon + 1)) : std::string();
+    if (!c) break;
+    p = c + 1;
+  }
+  return std::string();
+}
+
 bool csv_has_ext(const char* csv, const char* ext) {
   if (csv == 0 || ext == 0) return false;
   if (*ext == '.') ++ext;                 /* 先頭ドットを外す */
@@ -55,8 +79,7 @@ bool csv_has_ext(const char* csv, const char* ext) {
   }
   return false;
 }
-
-}   /* anonymous namespace */
+   /* anonymous namespace */
 
 /* ★ 2026-08-28 (ひさ設計): 非幾何型の**唯一の定義**。宣言の解説はヘッダを参照。
  *   旧実装は「op を 1 つも持たないモジュールが申告する型」という**構造の判定**
@@ -126,6 +149,8 @@ pigModuleRegistry::ensure_ovr(int id)
   if ((size_t)id >= execOvr_v.size()) execOvr_v.resize(id + 1, -1);
   if ((size_t)id >= seq_v.size())     seq_v.resize(id + 1, 0);
   if ((size_t)id >= arityOvr_v.size()) arityOvr_v.resize(id + 1, 0);   /* 0 = 未設定 */
+  if ((size_t)id >= graceOvr_v.size()) graceOvr_v.resize(id + 1, INT_MIN);   /* ★ #3503 未設定 */
+  if ((size_t)id >= panicOvr_v.size()) panicOvr_v.resize(id + 1, INT_MIN);   /* ★ #3503 未設定 */
   if ((size_t)id >= optsOvr_v.size())  optsOvr_v.resize(id + 1);        /* thNULL = 未設定 */
 }
 
@@ -203,8 +228,11 @@ pigModuleRegistry::supports_op(int module_id, const char *op) const
 {
   const srava_module_descriptor* d = descriptor(module_id);
   if (d == 0 || d->ops == 0 || d->n_ops <= 0) return -1;   /* 不明 (万能フォールバック扱い) */
+  /* ★ #3554 段1: `op` と `op#変種` の **どちらでも**「その op を持つ」と答える。
+   *   ⚠ ここが完全一致のままだと、変種行しか持たないモジュールの op が
+   *     **パース時に「未定義の変数」になる** (2026-09-19 に demo_pick で踏んだ)。 */
   for (int i = 0; i < d->n_ops; ++i)
-    if (d->ops[i].op && op && ::strcmp(d->ops[i].op, op) == 0) return 1;
+    if (pig_op_row_is(d->ops[i].op, op)) return 1;
   return 0;
 }
 
@@ -213,9 +241,30 @@ pigModuleRegistry::op_entry(int module_id, const char *op) const
 {
   const srava_module_descriptor* d = descriptor(module_id);
   if (d == 0 || d->ops == 0 || d->n_ops <= 0 || op == 0) return 0;
+  /* ★ #3554 段1: 基底名で引かれたら **最初の候補行** (= 先勝ちの規則と同じ順)。
+   *   行名そのもの (`op#変種`) で引けば完全一致でその行が返る。 */
   for (int i = 0; i < d->n_ops; ++i)
-    if (d->ops[i].op && ::strcmp(d->ops[i].op, op) == 0) return &d->ops[i];
+    if (pig_op_row_is(d->ops[i].op, op)) return &d->ops[i];
   return 0;
+}
+
+/* ★ #3554 段1: 基底名 base の候補行を **OPS の並び順**で 1 つずつ返す (`base` と `base#…`)。
+ *   ⚠ 並び順に意味がある (routing は頭から先勝ち)。
+ *   ★ 受け皿を持たない = **行数に上限が要らない**。配列に集める形にすると上限を超えたときに
+ *     黙って切れるうえ、それを塞ぐための検査まで要る (2026-09-19 に一度そう書いて、
+ *     「上限はなぜ必要なのか」で気づいた)。 */
+const pigOpEntry *
+pigModuleRegistry::op_row(int module_id, const char *base, int idx) const
+{
+  const srava_module_descriptor* d = descriptor(module_id);
+  if (d == 0 || d->ops == 0 || d->n_ops <= 0 || base == 0 || idx < 0) return 0;
+  int n = 0;
+  for (int i = 0; i < d->n_ops; ++i) {
+    if (!pig_op_row_is(d->ops[i].op, base)) continue;
+    if (n == idx) return &d->ops[i];
+    ++n;
+  }
+  return 0;   /* 終端 */
 }
 
 const char*
@@ -223,8 +272,10 @@ pigModuleRegistry::op_sig(int module_id, const char *op) const
 {
   const srava_module_descriptor* d = descriptor(module_id);
   if (d == 0 || d->ops == 0 || d->n_ops <= 0 || op == 0) return 0;
+  /* ★ #3554 段1: 基底名なら最初の候補行の sig。⚠ **複数行を見たい呼び手は op_row() で 1 行ずつ引く**
+   *   (op_takes_array / op_is_decomposable など「どれかの行が…」を問うもの)。 */
   for (int i = 0; i < d->n_ops; ++i)
-    if (d->ops[i].op && ::strcmp(d->ops[i].op, op) == 0) return d->ops[i].sig;   /* 未注釈は sig=0 */
+    if (pig_op_row_is(d->ops[i].op, op)) return d->ops[i].sig;   /* 未注釈は sig=0 */
   return 0;
 }
 
@@ -253,26 +304,10 @@ pigModuleRegistry::op_out_is_mesh(const char *op) const
     const srava_module_descriptor* d = descs_v[i];
     if (d == 0 || d->ops == 0) continue;
     for (int k = 0; k < d->n_ops; ++k)
-      if (d->ops[k].op && ::strcmp(d->ops[k].op, op) == 0)
+      if (pig_op_row_is(d->ops[k].op, op))            /* ★ #3554 段1: 変種行でも答える */
         return (d->ops[k].out == AK_CACHE) ? 1 : 0;   /* mesh=1 / value=0 */
   }
   return -1;   /* 不明 (どの記述子にも無い) */
-}
-
-int
-pigModuleRegistry::can_import_ext(int module_id, const char *ext) const
-{
-  const srava_module_descriptor* d = descriptor(module_id);
-  if (d == 0 || d->import_exts == 0) return -1;   /* 不明 */
-  return csv_has_ext(d->import_exts, ext) ? 1 : 0;
-}
-
-int
-pigModuleRegistry::can_export_ext(int module_id, const char *ext) const
-{
-  const srava_module_descriptor* d = descriptor(module_id);
-  if (d == 0 || d->export_exts == 0) return -1;   /* 不明 */
-  return csv_has_ext(d->export_exts, ext) ? 1 : 0;
 }
 
 int
@@ -314,6 +349,53 @@ pigModuleRegistry::set_exec_default(int module_id, int exec)
   if (module_id < 0) return;
   ensure_ovr(module_id);
   execOvr_v[(size_t)module_id] = exec;
+}
+
+/* ★ #3503: 実効 grace_ms。env > module() > 記述子。
+ * ⚠ env を最優先にしてあるのは **救済**のため — grace=-1 のモジュールが止まらない op に
+ *   入ってハングしたとき、再ビルドせずに抜ける手が要る。測定で 0 に固定する用途も兼ねる。 */
+int
+pigModuleRegistry::grace_ms(int module_id) const
+{
+  const char *e = ::getenv("SRAVA_AGENT_GRACE_MS");
+  if (e != 0 && *e != '\0') return ::atoi(e);
+  if (module_id >= 0 && (size_t)module_id < graceOvr_v.size()
+      && graceOvr_v[(size_t)module_id] != INT_MIN)
+    return graceOvr_v[(size_t)module_id];         /* module() 上書き */
+  const srava_module_descriptor* d = descriptor(module_id);
+  return d ? d->grace_ms : 0;                     /* 未指定 = 0 = 即 kill */
+}
+
+void
+pigModuleRegistry::set_grace_ms(int module_id, int ms)
+{
+  if (module_id < 0) return;
+  ensure_ovr(module_id);
+  graceOvr_v[(size_t)module_id] = ms;
+}
+
+/* ★ #3503: in-proc の abort 猶予。grace_ms と同じ優先順 (env > module() > 記述子)。
+ * ⚠ 既定は 0 = 無効。in-proc のハングは利用者が回復できる (居残る agent が無いので planner を
+ *   kill すれば終わる) 一方、abort はセッション全体を確実に失うので、宣言したモジュールだけが
+ *   撃たれるようにしてある。 */
+int
+pigModuleRegistry::panic_ms(int module_id) const
+{
+  const char *e = ::getenv("SRAVA_INPROC_PANIC_MS");
+  if (e != 0 && *e != '\0') return ::atoi(e);
+  if (module_id >= 0 && (size_t)module_id < panicOvr_v.size()
+      && panicOvr_v[(size_t)module_id] != INT_MIN)
+    return panicOvr_v[(size_t)module_id];         /* module() 上書き */
+  const srava_module_descriptor* d = descriptor(module_id);
+  return d ? d->panic_ms : 0;                     /* 未指定 = 0 = 無効 */
+}
+
+void
+pigModuleRegistry::set_panic_ms(int module_id, int ms)
+{
+  if (module_id < 0) return;
+  ensure_ovr(module_id);
+  panicOvr_v[(size_t)module_id] = ms;
 }
 
 /* ★ モジュール専用の大域データ (ひさ設計 2026-08-26)。registry は **中身を知らない**
@@ -416,8 +498,10 @@ pigModuleRegistry::op_commutative(const char *op) const
   for (size_t i = 1; i < descs_v.size(); ++i) {
     const srava_module_descriptor* d = descs_v[i];
     if (d == 0 || d->ops == 0) continue;
+    /* ⚠ ここは **全行を見る** (「どれかが申告していれば可換」)。#3554 段1 で行が増えても
+     *   同じ意味になるよう、前方一致で数える。 */
     for (int j = 0; j < d->n_ops; ++j)
-      if (d->ops[j].op != 0 && ::strcmp(d->ops[j].op, op) == 0 && d->ops[j].commutative)
+      if (pig_op_row_is(d->ops[j].op, op) && d->ops[j].commutative)
         return 1;
   }
   return 0;
@@ -513,22 +597,11 @@ pigModuleRegistry::type_is_known(const char *name) const
  *   旧 pigCacheCodec (派生テーブル) の置き換え。組込 (D_REF) も "pig" 記述子として同じ経路に乗る。
  *   走査は module id 昇順で先勝ち (旧 register_codec も name 重複は先勝ちだった)。
  * ================================================================== */
-namespace {
-/* tags CSV でこの 4CC が何番目 (0 始まり) か。無ければ -1。 */
-int csv_tag_index(const char *tags, const unsigned char tag[4])
-{
-  if (tags == 0) return -1;
-  const char *p = tags;
-  int i = 0;
-  while (*p) {
-    if (std::strncmp(p, (const char*)tag, 4) == 0) return i;
-    const char *c = std::strchr(p, ',');
-    if (c == 0) break;
-    p = c + 1; ++i;
-  }
-  return -1;
-}
-}   /* anonymous namespace */
+/* ⚠ 2026-09-19 (ひさ承認): ここに在った csv_tag_index (tags CSV の中で 4CC が何番目か) を
+ *   **撤去**した。2026-08-28 の ABI v13 で「タグ → 型」を *表の位置対応で引く* のをやめ、
+ *   create_for_meta に実際に試させる形 (下の types_readable_from_tag) にした時点で
+ *   利用者が消えていた。⇒ 毎ビルド -Wunused-function が出ており、**新しい警告が埋もれる**。
+ *   ★ #3554 とは無関係の掃除 (見つけたのは最後の段 5/5 の死体掃除のとき)。 */
 
 /* ★ 2026-08-28 (ABI v13): 「この形式は何として読めるか」を **申告から引かず、実際に試す**。
  *   各 wire クラスの create_for_meta にタグを渡し、受理したら返ってきた具象の type_name() を採る。
@@ -578,7 +651,8 @@ pigModuleRegistry::writer_for_body(sPtr<pigData> body) const
 
 /* ==================================================================
  * ★ #3439 ⑦: 記述子の自己矛盾を検出する (違反は load_file が ABI 不一致と同じく拒否する)。
- *   routing は import/export を **拡張子**で振る (can_import_ext / can_export_ext)。op を持つのに
+ *   routing は import/export を **拡張子**で振る (#3554 以降は行のマッチ関数が csv_has_ext /
+ *   pig_ext_out_type で引く)。op を持つのに
  *   対応する exts を申告しないと、その形式を「誰も扱えない」のに一般ロジックへ落ちて、実行時に
  *   的外れなエラー (例: "export: no mesh to write") になる。申告漏れは仕様違反なので黙認しない。
  *   ※ export_vox は拡張子 routing の対象外 (専用 op) なので検査しない。
@@ -591,11 +665,77 @@ pig_descriptor_violation(const srava_module_descriptor *d)
   bool hasExport = false, hasImport = false;
   for (int i = 0; i < d->n_ops; ++i) {
     if (d->ops[i].op == 0) continue;
-    if (std::strcmp(d->ops[i].op, "export") == 0) hasExport = true;
-    if (std::strcmp(d->ops[i].op, "import") == 0) hasImport = true;
+    /* ⚠⚠ #3554 最後の段 3/5: ここは **strcmp の完全一致**だった。import を出力型ごとの
+     *   変種行 (`import#cg-cross2d` 等) に分けた瞬間、cgal / occt は「import op を持たない」
+     *   ことになり、下の「exts 未申告は拒否」が *何も検査しなくなる* (黙って緑)。
+     *   ⇒ 基底名で数える。 */
+    if (pig_op_row_is(d->ops[i].op, "export")) hasExport = true;
+    if (pig_op_row_is(d->ops[i].op, "import")) hasImport = true;
   }
   const char *nm = (d->name != 0) ? d->name : "(null)";
   char buf[224];
+
+  /* ★★ #3554 段1: **`op` (無条件の行) を `op#変種` より前に置いてはいけない**。
+   *   routing は頭から先勝ちで照合するので、無条件の行が前に在ると **変種が永久に選ばれない**
+   *   (しかも動くので気づけない)。これは記述子だけで判定できるのでここで弾く。
+   *   ⚠ マッチ関数どうしの重なりは静的に判定できないので、そちらは検査しない
+   *     (「先勝ち + 順序が意味を持つ」ことを規約として文書に書く)。 */
+  for (int i = 0; i < d->n_ops; ++i) {
+    const char *a = d->ops[i].op;
+    /* ★ 見るのは **無条件の基底行**だけ。⚠ #3554 最後の段 2/5: 基底名のままマッチ関数を
+     *   持つ行が現れた (cast の出力型が 1 つしかないモジュールは分ける理由が無い) ので、
+     *   「基底名 = 無条件」という前提はもう成り立たない ⇒ match も見る。 */
+    if (a == 0 || ::strchr(a, '#') != 0 || d->ops[i].match != 0) continue;
+    size_t al = std::strlen(a);
+    for (int j = i + 1; j < d->n_ops; ++j) {
+      const char *b = d->ops[j].op;
+      if (b == 0) continue;
+      const char *h = ::strchr(b, '#');
+      if (h == 0 || (size_t)(h - b) != al || std::strncmp(a, b, al) != 0) continue;
+      ::snprintf(buf, sizeof buf,
+                 "module '%s': op '%s' is declared before its variant '%s' "
+                 "(the unconditional row always matches, so the variant would never be chosen; "
+                 "put variants first)", nm, a, b);
+      return std::string(buf);
+    }
+  }
+  /* ★★ #3554 最後の段 2/5・3/5 (2026-09-19): **cast / import の行は 1 行 1 出力型**。
+   *   振り分けは行のマッチ関数 (cast = 目標型を産む行か / import = 拡張子が産む型を産む行か)
+   *   が決めるが、実際に名乗る出力型は sig_dispatch が **入力型で先に当たった sigline** から採る。
+   *   1 行に出力型が 2 つあると *この 2 つが食い違い*、要求と違う型が黙って返る
+   *   (実測: 1 行に戻した cgal で area(cast("cg-cross2d", box)) が 24 = 3D の表面積)。
+   *   ⇒ 出力型ごとに行を分ける (cast#cg-cross2d / import#cg-cross2d 等)。ロード時に弾く。
+   *   ⚠ 根拠は **sig** であって行名ではない (名前の `#` の後ろは誰も読んでいない)。 */
+  for (int i = 0; i < d->n_ops; ++i) {
+    const pigOpEntry &e = d->ops[i];
+    if (e.op == 0 || e.sig == 0) continue;
+    /* ★ 対象は **マッチ関数が sig の出力型で行を選ぶ op** = cast (目標型) と import (拡張子)。
+     *   op 名で書いているのは、この性質が記述子だけからは読めないため (hasExport/hasImport と同じ立て付け)。 */
+    if (!pig_op_row_is(e.op, "cast") && !pig_op_row_is(e.op, "import")) continue;
+    const char *base = pig_op_row_is(e.op, "cast") ? "cast" : "import";
+    std::string outs;                      /* 見つけた出力型 (1 つ目) */
+    std::string all = e.sig; size_t sp = 0;
+    while (sp <= all.size()) {
+      size_t sc = all.find(';', sp);
+      std::string one = all.substr(sp, (sc == std::string::npos ? all.size() : sc) - sp);
+      pigSigLine L; parse_sigline(one, L);
+      if (!L.bad && !L.out.empty()) {
+        if (outs.empty()) outs = L.out;
+        else if (outs != L.out) {
+          ::snprintf(buf, sizeof buf,
+                     "module '%s': op '%s' declares two output types ('%s' and '%s') "
+                     "(its row is chosen by output type, so it must produce exactly one: "
+                     "split it per type, e.g. %s#%s / %s#%s)",
+                     nm, e.op, outs.c_str(), L.out.c_str(),
+                     base, outs.c_str(), base, L.out.c_str());
+          return std::string(buf);
+        }
+      }
+      if (sc == std::string::npos) break;
+      sp = sc + 1;
+    }
+  }
+
   if (hasExport && (d->export_exts == 0 || d->export_exts[0] == '\0')) {
     ::snprintf(buf, sizeof buf,
                "module '%s': has an export op but declares no export_exts "
@@ -607,6 +747,47 @@ pig_descriptor_violation(const srava_module_descriptor *d)
                "module '%s': has an import op but declares no import_exts "
                "(routing dispatches by file extension, so the declaration is required)", nm);
     return std::string(buf);
+  }
+
+  /* ★★ #3554 最後の段 3/5 (2026-09-19): **import_exts が申告する型を、どれかの import 行が産むこと**。
+   *   routing は「拡張子 → 型」(import_exts) と「行 → 出力型」(sig) を *突き合わせて* 行を選ぶので、
+   *   両者がずれると **その拡張子は永久に読めない** — しかも症状は「拡張子 'svg' を読める
+   *   モジュールが無い」という *別の原因を指す文言*になる (読めないのではなく申告が食い違っている)。
+   *   ⇒ 記述子だけで突き合わせられるので、ロード時に弾く。
+   *   ⚠ **無型の申告も弾く** ("svg" のように型を書かない形)。マッチ関数は型で照合するので、
+   *     無型のエントリは拡張子表に載っているのに誰も選べない = 同じ嘘になる。
+   *     (export_exts は出力が常に ref なので型を書かない。こちらは import_exts だけの規則。) */
+  if (hasImport && d->import_exts != 0) {
+    for (const char *p = d->import_exts; *p; ) {
+      const char *c = std::strchr(p, ',');
+      size_t seg = c ? (size_t)(c - p) : std::strlen(p);
+      const char *colon = (const char *)std::memchr(p, ':', seg);
+      std::string ext(p, colon ? (size_t)(colon - p) : seg);
+      std::string ty  = colon ? std::string(colon + 1, (p + seg) - (colon + 1)) : std::string();
+      bool produced = false;
+      if (! ty.empty()) {
+        for (int i = 0; i < d->n_ops && ! produced; ++i) {
+          const pigOpEntry &e = d->ops[i];
+          if (e.op == 0 || e.sig == 0 || ! pig_op_row_is(e.op, "import")) continue;
+          if (pig_sig_produces(e.sig, ty.c_str())) produced = true;
+        }
+      }
+      if (! produced) {
+        if (ty.empty())
+          ::snprintf(buf, sizeof buf,
+                     "module '%s': import_exts entry '%s' declares no output type "
+                     "(write it as \"%s:<type>\" - routing matches the extension's type "
+                     "against each import row's sig)", nm, ext.c_str(), ext.c_str());
+        else
+          ::snprintf(buf, sizeof buf,
+                     "module '%s': import_exts says '%s' produces '%s', but no import row's sig "
+                     "produces that type (the declaration and the sig must agree, or the "
+                     "extension can never be routed)", nm, ext.c_str(), ty.c_str());
+        return std::string(buf);
+      }
+      if (! c) break;
+      p = c + 1;
+    }
   }
 
   /* ★ #3436 P4 §6.1: sig の記法と、記述子の中で **突き合わせられる**申告の整合を見る。
@@ -639,11 +820,21 @@ pig_descriptor_violation(const srava_module_descriptor *d)
                          nm, e.op, L.set[a].c_str());
               return std::string(buf);
             }
-        /* 出力は必ず主型 (§3.3)。ref/value を返す op は fold 形を使わない。 */
-        if (L.out != L.set[0]) {
+        /* 出力は主型 (§3.3)。⚠ ただし **分解する行だけ**。
+         * ★★ 2026-09-15 (#3533・ひさ指摘): この規則は「分解した木の中間結果が同じ行の入力として
+         *   戻ってくる」= *分解が 1 行の中で閉じている* ことの帰結であって、独立した規則ではない。
+         *   ⇒ "(N!)" (#3528 で入れた **分解禁止**) の行には当たらない — 畳まないなら閉じる必要が
+         *     無いので、入力の表現と出力の表現が違ってよい。
+         *   ⚠ #3528 で `!` を入れたとき、ここが **追随していなかった** (cgHull.cpp の冒頭には
+         *     「2026-09-13 に撤去した」と書いてあるのに、検査は入ったまま残っていた)。当時は
+         *     繰り返し形 {…}… で迂回していたが、それは **主型を失う** ので振り分けが priority
+         *     決着に落ちる。⇒ 申し送りの方に実装を合わせる。
+         *   ★ ref/value を返す op は fold 形を使わない (§3.4) のは従来どおり。 */
+        if (! L.nosplit && L.out != L.set[0]) {
           ::snprintf(buf, sizeof buf,
                      "module '%s': op '%s' fold-form output '%s' differs from the principal type '%s' "
-                     "(use the repeat form {...}... if this op does not fold)",
+                     "(a row that folds must close: use (N!) if it does not fold, "
+                     "or the repeat form {...}...)",
                      nm, e.op, L.out.c_str(), L.set[0].c_str());
           return std::string(buf);
         }

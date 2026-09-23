@@ -2,46 +2,16 @@
  * nfCacheCodec — Nef カーネルのキャッシュコーデック定義 TU (#3433 P1)。
  * descriptor.codecs (nf_codecs) を extern 公開し、ローダが owner=nef id で登録する。
  * cgCacheCodec.cpp / mfCacheCodec.cpp のミラー。
+ *
+ * ★★ #3559: **この TU はモジュール側** (nef_snc.so / nef_hybrid.so) に残る。
+ *   表の中身が変種ごとに違う (自分の型名 1 本) ためで、幾何ライブラリ (libsrava_cg) には
+ *   持てない。⇒ WIRE の *定義* と reader/writer の生成子は幾何ライブラリ側 (nfWire.cpp) に
+ *   在り、ここはそれを **並べるだけ**。
  */
 #include	"pig/c++/pigCacheCodec.h"
 #include	"pig/c++/pigModule.h"
 #include	"pig/c++/pigData.h"
-#include	"pig/c++/ptsObject.h"
-#include	"pig/c++/ptsApplication.h"
 #include	"nf/c++/nfMesh.h"
-#include	"nf/c++/ptsnfWireCacheStreamReaderMesh.h"
-#include	"nf/c++/ptsnfWireCacheStreamWriterMesh.h"
-
-static sPtr<tinyState>
-nf_mk_reader(sPtr<ptsObject> parent, sPtr<stdString> path)
-{
-	return sPtr<tinyState>::d_cast(thNEW(ptsnfWireCacheStreamReaderMesh,(parent, path)));
-}
-
-static sPtr<tinyState>
-nf_mk_writer(sPtr<ptsObject> parent, sPtr<stdString> path, sPtr<pigData> body)
-{
-	return sPtr<tinyState>::d_cast(
-	    thNEW(ptsnfWireCacheStreamWriterMesh,(parent, path, sPtr<nfGeom>::d_cast(body))));
-}
-
-static int
-nf_match(sPtr<pigData> body)
-{
-	return sPtr<nfGeom>::d_cast(body).is_notNull();
-}
-
-/* 読取専用 codec 用の match: 書きは相手モジュールに任せ、この codec は writer を出さない。 */
-static int
-nf_match_never(sPtr<pigData>)
-{
-	return 0;
-}
-
-/* ★ descriptor.codecs が指す配列 (name==0 番兵終端)。nftsAgent.cpp が extern 参照。 */
-/* ★ 2026-08-28 (ABI v12): この階層への配線先。reader は下の codec 行が使うものと同一 —
- *   どの行 (自型読み / foreign 昇格読み) でも reader は 1 本で、階層に帰属するため。 */
-PIG_WIRE_DEF(nfGeom, nf_mk_reader, nf_mk_writer);
 
 /* ★ 2026-08-28 (ひさ設計・ABI v16): このモジュールが提供するもの。
  *   1 行 = (本体クラス階層, その階層について名乗る型名, 扱う 4CC)。
@@ -51,8 +21,7 @@ PIG_WIRE_DEF(nfGeom, nf_mk_reader, nf_mk_writer);
  *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
 extern const pigModuleType nef_provides[];
 const pigModuleType nef_provides[] = {
-	{ &nfGeom::WIRE, NF_TYPE,
+	{ &NF_MESH::WIRE, NF_TYPE,
 	  NF_TAG "," NF_OTHER_TAG ",MESH,MFM3" },
 	{ 0, 0, 0 },
 };
-

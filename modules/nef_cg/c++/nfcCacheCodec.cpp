@@ -23,7 +23,7 @@ extern const pigModuleType nef_cg_provides[];
 const pigModuleType nef_cg_provides[] = {
 	/* 入力: nef_snc の SNC。★ NEFB (hybrid) は名乗らない — 実体が別ライブラリなので
 	 *   受けても d_cast が通らない (nfctsAgent.cpp の冒頭参照)。 */
-	{ &nfGeom::WIRE, "nf-mesh3d", "NEF3" },
+	{ &nfMeshSnc::WIRE, "nf-mesh3d", "NEF3" },
 	/* 出力: cg の厳密境界。 */
 	{ &cgMesh::WIRE, "cg-mesh3d", "MESH" },
 	{ 0, 0, 0 },

@@ -68,7 +68,13 @@ TS_STATE(INI_pigfFunction_START)
 	 * env を一段深くする。block 内の `var`(DEF)はこの子 env に閉じ、`SET` は上方探索で外側に
 	 * 届く(ループ変数 i=i+1 等は外で定義された i を更新)。for-init の var もこの子 env に入り
 	 * ループ終了で破棄される(囲みに漏れない)。CACHE_DIR 等は親チェーンで引ける。 */
-	env = thNEW(pigEnvironment,(env));
+	{
+		/* ★ #3482: **囲む try を引き継ぐ**。get_try() は親チェーンを辿らない O(1) 読み出しなので
+		 * (#3450 で frozen env の親リンクを切ったため辿れない)、env を作る側が必ず写す。 */
+		sPtr<pigEnvironment> ne = thNEW(pigEnvironment,(env));
+		if ( env.is_notNull() ) ne->set_try( env->get_try() );
+		env = ne;
+	}
 	return rDO|ACT_START;
 }
 

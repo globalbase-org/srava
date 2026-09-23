@@ -18,4 +18,8 @@ a.out
 
 # 実行時キャッシュ dir (planner の既定 CACHE_DIR=$PWD/tmp)。7/22 に誤って cache が commit された掃除跡
 tmp/
-Testing/Temporary/
+**/Testing/Temporary/
+# ⚠ 先頭の "Testing/Temporary/" は **repo 直下にしか効かない** (パターンに / を含むと
+#   .gitignore の在る階層に固定されるため)。docs/ 配下で ctest を回した成果物が
+#   2026-09-18 に docs/Testing/Temporary/ として **追跡されてしまった** ので ** を付けた。
+#   ★ 追跡済みのファイルには .gitignore が効かない ⇒ 気づくのは push 直前の目視だけ。

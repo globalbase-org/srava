@@ -8,19 +8,7 @@
 #include	"oc/c++/ocShape.h"
 #include	"common/solids.h"   /* SOLID_PI (座標規約を共通ヘッダと共有) */
 
-#include	<BRepBuilderAPI_MakePolygon.hxx>
-#include	<BRepBuilderAPI_MakeFace.hxx>
-#include	<BRepBuilderAPI_Sewing.hxx>
-#include	<BRepBuilderAPI_MakeSolid.hxx>
-#include	<TopoDS.hxx>
-#include	<TopoDS_Shape.hxx>
-#include	<TopoDS_Face.hxx>
-#include	<TopoDS_Shell.hxx>
-#include	<TopoDS_Solid.hxx>
-#include	<TopoDS_Wire.hxx>
 #include	<TopAbs_ShapeEnum.hxx>
-#include	<gp_Pnt.hxx>
-#include	<Standard_Failure.hxx>
 #include	<vector>
 #include	<cmath>
 #include	<string>
@@ -85,33 +73,15 @@ ocaTetrahedron_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	if ( !(r > 0) ) { result = oca_err(thNEW(stdString,("tetrahedron: circumradius must be > 0"))); return; }
-	try {
-		/* ★ 正四面体も **平面 4 枚**なのでメッシュ系と厳密に一致する。
-		 *   common/solids.h の make_tetrahedron と同じ座標 (立方体の対角 4 頂点 × r/√3)。 */
-		const double s = r / std::sqrt(3.0);
-		gp_Pnt v[4] = { gp_Pnt( s,  s,  s), gp_Pnt( s, -s, -s),
-		                gp_Pnt(-s,  s, -s), gp_Pnt(-s, -s,  s) };
-		static const int F[4][3] = { {0,1,2}, {0,2,3}, {0,3,1}, {1,3,2} };
-		BRepBuilderAPI_Sewing sew(1.0e-7);
-		for ( int k = 0 ; k < 4 ; ++k ) {
-			BRepBuilderAPI_MakePolygon tri(v[F[k][0]], v[F[k][1]], v[F[k][2]], Standard_True);
-			BRepBuilderAPI_MakeFace f(tri.Wire());
-			if ( ! f.IsDone() ) { result = oca_err(thNEW(stdString,("tetrahedron: could not build a face"))); return; }
-			sew.Add(f.Face());
-		}
-		sew.Perform();
-		TopoDS_Shape sh = sew.SewedShape();
-		if ( sh.IsNull() || sh.ShapeType() != TopAbs_SHELL ) { result = oca_err(thNEW(stdString,("tetrahedron: the faces did not sew into a closed shell"))); return; }
-		BRepBuilderAPI_MakeSolid ms(TopoDS::Shell(sh));
-		if ( ! ms.IsDone() ) { result = oca_err(thNEW(stdString,("tetrahedron: the shell could not be closed into a solid"))); return; }
-		out = thNEW(ocShape,());
-		out->set_shape(ms.Solid());
-	} catch ( const Standard_Failure& e ) {
-		std::string m = std::string("tetrahedron: OCCT failed [") + e.DynamicType()->Name() + "] (" +
-		    ( ( e.GetMessageString() && e.GetMessageString()[0] ) ? e.GetMessageString() : "no message" ) + ")";
-		result = oca_err(thNEW(stdString,(m.c_str())));
+	/* ★ #3545 段 5: 幾何の組み立ては **幾何 lib 側**。⇒ この TU は OCCT を触らない
+	 *   (触ると投げうる inline を通っただけで RTTI の型インスタンスが .o に出る)。 */
+	char why[320]; why[0] = '\0';
+	out = ocShape::make_tetrahedron(r, why, (int)sizeof why);
+	if ( ! out.is_notNull() ) {
+		result = oca_err(thNEW(stdString,( why[0] ? why : "tetrahedron: failed" )));
 		return;
 	}
+
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して本体未設定で return するので

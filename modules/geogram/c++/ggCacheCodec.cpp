@@ -11,6 +11,7 @@
 #include	"gg/c++/ggMesh.h"
 #include	"gg/c++/ptsggWireCacheStreamReaderMesh.h"
 #include	"gg/c++/ptsggWireCacheStreamWriterMesh.h"
+#include	"pt/c++/ptCloud.h"   /* ★ #3528: 点群は中立の libsrava_pt が持つ (借りる) */
 
 static sPtr<tinyState>
 gg_mk_reader(sPtr<ptsObject> parent, sPtr<stdString> path)
@@ -52,6 +53,11 @@ extern const pigModuleType geogram_provides[];
 const pigModuleType geogram_provides[] = {
 	{ &ggGeom::WIRE, GG_TYPE,
 	  GG_TAG ",MESH" },
+	/* ★ #3528: **自前のクラスを作らず libsrava_pt のクラスをそのまま並べる** (occt_mf が mfGeom を
+	 *   借りるのと同じ作法)。estimate_normals が pt-cloud3d を読み書きするため、agent プロセスに
+	 *   geogram.so しか load されない process 実行でも codec がここから届く必要がある。
+	 *   ⚠ 2D は名乗らない — 法線推定は 3D だけ (points.so が pt-cloud2d を持つ)。 */
+	{ &ptCloud::WIRE, PT_TYPE_3D, PT_TAG_3D },
 	{ 0, 0, 0 },
 };
 

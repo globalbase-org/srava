@@ -117,6 +117,11 @@ TS_STATE(ACT_START)
 	 * mesh 引数の評価は継続を返すだけで非ブロッキング、if 分岐ガードで未使用枝の過剰評価もなし。
 	 * async で yield したら本状態が再走するが、評価はメモ化・ne 再構築は冪等。 */
 	sPtr<pigEnvironment> ne = thNEW(pigEnvironment,(l->env()));
+	/* ★★ #3482: try の帰属は **動的** = 呼び出し元から引き継ぐ。親(= lambda の捕捉 env)からでは
+	 * ない — ヘルパ lambda を try の外で定義して try の中で呼ぶのが最も普通の書き方で、
+	 * レキシカル(定義地点の try)だとそこが効かないため(C++ の例外と同じ直感)。
+	 * ★ ここ(ACT_START)の env はまだ **caller env** なので、その場で引ける。 */
+	if ( env.is_notNull() ) ne->set_try( env->get_try() );
 	for ( int i = 0 ; i < l->paramc() ; ++i ) {
 		sPtr<pigData> av = args[i+1];
 		if ( av->is_error() ) {            /* caller env で評価(副作用でメモ化)+ エラーなら伝播 */

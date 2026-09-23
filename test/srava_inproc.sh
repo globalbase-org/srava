@@ -20,6 +20,8 @@
 SRAVA="$1"
 MODE="${2:-value}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 T=/tmp
 if command -v cygpath >/dev/null 2>&1; then T=$(cygpath -m /tmp); D=$(cygpath -m "$D"); fi
 rm -rf "$D" "$D-ext" "$D-inp"

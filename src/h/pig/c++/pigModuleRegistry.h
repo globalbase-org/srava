@@ -55,6 +55,17 @@ struct pigOpEntry;                /* 完全型は pigOpEntry.h (★ #3436 P4 §6
  * ロードを拒否するのに使う。いまの規則: import/export op を持つなら対応する exts の申告が必須。 */
 std::string pig_descriptor_violation(const srava_module_descriptor *d);
 
+/* ★★ #3554 最後の段 (2026-09-19): **import_exts / export_exts の CSV を読む 2 本**。
+ *   これまで registry と pigfModuleAgent の中に閉じていたが、*マッチ関数から使う*ので公開する。
+ *   ⇒ 拡張子の判定が **CSV 1 つを根拠**にでき、行名との二重帳簿にならない (ひさ 2026-09-19)。
+ *
+ *   csv_has_ext       "stl,off,svg" / "stl:cg-mesh3d,svg:cg-cross2d" のどちらでも拡張子部で照合
+ *   pig_ext_out_type  ★ **型付き CSV から出力型を引く** ("svg:cg-cross2d" + "svg" → "cg-cross2d")。
+ *                     import は *出力型が拡張子で決まる* ので、sig だけでは決まらない。
+ *                     ⇒ マッチ関数はこの型が **自分の行の sig の出力型か**を見る。 */
+bool        csv_has_ext(const char* csv, const char* ext);
+std::string pig_ext_out_type(const char* csv, const char* ext);
+
 /* ★ 2026-08-28 (ひさ設計): **非幾何型のリストは libpig に 1 本だけ持つ**。
  *   非幾何型 = 計算の行き先にならない型 (値キャッシュ `value` / 外部ファイル参照 `ref`)。
  *   これは全モジュール共通・planner と agent でも共通なので、モジュールごとに申告させる理由が無い。
@@ -192,13 +203,20 @@ public:
 	/* ★ #3436 P4 §6.2: module の op 表の 1 行そのもの (in[]/nin/variadic を planner から見る)。
 	 *   未登録 = 0。sig が **型**を持つのに対し、こちらは全引数の **種別と個数**を持つ。 */
 	const pigOpEntry* op_entry(int module_id, const char *op) const;
+	/* ★ #3554 段1: **基底名 base に対する候補行**を OPS の並び順で 1 つずつ返す
+	 *   (`base` そのものと `base#…`)。idx は 0 から。もう無ければ 0 = 終端。
+	 *   ⚠ 並び順に意味がある — routing は **頭から先勝ち**で照合する。
+	 *   ★ 受け皿を持たないので **行数に上限が無い**。配列に集める形だと上限を超えたときに
+	 *     黙って切れる (= 静かに壊れる) ので、そちらは採らない。 */
+	const pigOpEntry* op_row(int module_id, const char *base, int idx) const;
 	/* op の出力型 (mesh=1 / value=0 / どの記述子にも無い=-1)。generic 受理の out_cache 決定用。 */
 	int         op_out_is_mesh(const char *op) const;
 	/* module id の exec_caps (未登録 = 0)。 */
 	unsigned    exec_caps(int module_id) const;
-	/* module id が拡張子を import/export できるか。exts 未登録は -1 (不明・万能扱い)。 */
-	int         can_import_ext(int module_id, const char *ext) const;
-	int         can_export_ext(int module_id, const char *ext) const;
+	/* ⚠ #3554 最後の段 5/5 (2026-09-19): can_import_ext / can_export_ext を **撤去**した。
+	 *   拡張子で振っていたのは import/export の専用ブロックだけで、3/5・4/5 でそれが
+	 *   行のマッチ関数へ移り、判定は @csv_has_ext@ / @pig_ext_out_type@ (上の 2 本) に
+	 *   一本化された。⇒ **同じ問いに口が 2 つある**状態を残さない。 */
 	/* module id の実効 priority (agent() 上書きがあればそれ・無ければ記述子・未登録 = 0)。 */
 	int         priority(int module_id) const;
 	/* module id の実効 exec_default (EXEC_THREAD/EXEC_PROCESS。agent() 上書き優先・未登録 = 0)。 */
@@ -207,6 +225,15 @@ public:
 	 * set_priority は「今ロードした扱い」= 後勝ちの tie-break も更新する。 */
 	void        set_priority(int module_id, int p);
 	void        set_exec_default(int module_id, int exec);
+	/* ★ #3503: 実効 grace_ms。優先順は env SRAVA_AGENT_GRACE_MS > module(so,{grace}) > 記述子。
+	 *   env を最優先にしてあるのは **救済**のため — grace=-1 のモジュールがハングしたときに
+	 *   再ビルドせず抜けられる必要がある (と、測定で 0 に固定したいため)。 */
+	int         grace_ms(int module_id) const;
+	void        set_grace_ms(int module_id, int ms);
+	/* ★ #3503: 実効 panic_ms (in-proc の abort 猶予)。grace_ms と同じ優先順
+	 *   (env SRAVA_INPROC_PANIC_MS > module(so,{panic}) > 記述子)。 */
+	int         panic_ms(int module_id) const;
+	void        set_panic_ms(int module_id, int ms);
 	/* ★ #3436 P4: module id の実効 **N'** (1 ノードあたり受け取りたい最大項数・policy)。
 	 *   module(so,{arity:k}) の上書き優先 → 記述子の arity → **既定 2**。docs/sig_grammar_design.md §5.4。 */
 	int         arity(int module_id) const;
@@ -258,9 +285,16 @@ public:
 	 *   場合は 0 を返して拒否する (1 モジュール名につき dlopen は 1 回 = #3425 の不変条件。
 	 *   黙って先勝ちにすると「指定したのに効いていない」になる)。conflict != 0 ならこの衝突か
 	 *   どうかを書き戻す — 呼び手が「見つからない」と区別して扱えるようにするため
-	 *   (module(so,{optional:1}) が飲み込んでよいのは前者だけ)。 */
+	 *   (module(so,{optional:1}) が飲み込んでよいのは前者だけ)。
+	 * ★★ #3558: **「入っていない」と「拒んだ」を区別する**。refused != 0 なら
+	 *   *ファイルは在るのに使えなかった* 場合に真を書き戻す:
+	 *     ・ABI 不一致  ・記述子違反 (pig_descriptor_violation)
+	 *     ・srava_module シンボルが無い / null を返した
+	 *     ・ファイルは在るのに dlopen が失敗した (未解決シンボル・アーキ違い 等)
+	 *   ⇒ optional:1 が飲み込んでよいのは **refused も conflict も立たなかったとき**だけ。
+	 *   ⚠ err の**文面**で判別してはいけない (文言を変えた瞬間に黙って壊れる)。 */
 	const srava_module_descriptor* load_file(const char *path, std::string *err, bool lazy = false,
-	                                         bool *conflict = 0);
+	                                         bool *conflict = 0, bool *refused = 0);
 	/* ★ #3431: **区切りを含まないモジュール名** ("nef_snc.so") を探索路上の実ファイルへ解決する。
 	 *   見つからなければ与えられた文字列をそのまま返す (dlopen 側の明示エラーに委ねる)。
 	 *   load_file が内部で通すので、通常は呼び手が意識する必要はない。 */
@@ -317,6 +351,8 @@ private:
 	std::vector<sPtr<stdObject> > data_v;
 	int                       configuringId_;   /* configure 呼び出し中のモジュール id (他は -1) */
 	std::vector<int>          arityOvr_v;   /* ★ #3436 P4: module(so,{arity:k}) の上書き (0=未設定) */
+	std::vector<int>          graceOvr_v;   /* ★ #3503: module(so,{grace:N}) の上書き (INT_MIN=未設定) */
+	std::vector<int>          panicOvr_v;   /* ★ #3503: module(so,{panic:N}) の上書き (INT_MIN=未設定) */
 	std::vector<sPtr<pigData> > optsOvr_v;  /* ★ #3441: module(so,{opts}) のハッシュ全体 (疎・未設定=thNULL) */
 	std::vector<long>         seq_v;
 	long                      seqN_;
@@ -334,7 +370,7 @@ private:
 	 * set_and_apply_opts が共有)。見つからなければ -1。 */
 	/* loader 内部 (pigModuleLoader.cpp で実装) */
 	const srava_module_descriptor* load_file_impl(const char *path, std::string *err,
-	                                              bool lazy, bool *not_a_module);
+	                                              bool lazy, bool *not_a_module, bool *refused);
 	void record(const char *path, const srava_module_descriptor *d,
 	            const std::string &err, bool not_a_module);
 	void record_shadowed(const std::string &path, const std::string &winner);
@@ -359,6 +395,13 @@ sPtr<ptsApplication> pig_current_app();
  *   worker _fn の実行中に呼ぶ。app 未解決 / registry 未生成なら thNULL
  *   (呼び側は「未登録」フォールバックへ)。実装は ptsApplication.cpp (完全型が要るため)。 */
 sPtr<pigModuleRegistry> pig_current_registry();
+
+/* ★★ #3570 段3.5 (2026-09-21): **いまの評価地点の env**。pigfOps の varref と同じ辿り方
+ *   (sCallSection の TLS → caller (ptsObject) → get_env) を 1 か所に置いたもの。
+ *   ⇒ pigData 層から「その名前は変数として束縛されているか」を訊ける。
+ *   ⚠ pigf 文脈の外では thNULL が返る (呼び手が既定を決める)。 */
+class pigEnvironment;
+sPtr<pigEnvironment> pig_current_env();
 /* ★ いま走っている op のモジュール id (無ければ -1)。実装は ptsApplication.cpp。
  * in-proc は caller 鎖の ptsMediatorInternal から、agent プロセスは「唯一のモジュール」から。 */
 int                     pig_current_module_id();

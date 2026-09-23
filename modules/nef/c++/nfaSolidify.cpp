@@ -45,7 +45,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -59,7 +59,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -86,7 +86,7 @@ nfaSolidify_::compute()
 		result = nfa_err(thNEW(stdString,("solidify: needs a mesh")));
 		return;
 	}
-	mesh = nfMesh::solidify_mesh(in);
+	mesh = nfNefMesh::solidify_mesh(in);
 	if ( ! mesh.is_notNull() )
 		result = nfa_err(thNEW(stdString,
 		    ("solidify: could not rebuild a solid from the given boundary")));

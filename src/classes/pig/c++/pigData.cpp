@@ -165,6 +165,86 @@ pigDataError::pigDataError(sPtr<stdString> m, sPtr<pigInfo> i, int cls, const ch
   : pigData(i), cls_(cls) {
   msg = pig_err_compose(m, cls, module);
 }
+/* ★★ #3482: エラーの中身 ⇄ ハッシュ の往復。**この 2 つだけが鍵の名前を知っている**。
+ * 片方だけ直すと `throw error();` が黙って別のエラーになるので、必ず対で読むこと。 */
+
+/* エラークラスの名前。整数 (PE_*) をそのまま出さないのは、値が歴史的に決まっていて
+ * (PE_FATAL=1 は既存コードの都合) 利用者向けの意味を持たないため。 */
+static const char *pig_err_class_name(int cls) {
+  return ( cls == PE_FATAL )   ? "fatal"
+       : ( cls == PE_DERIVED ) ? "derived"
+       : ( cls == PE_PANIC )   ? "panic" : "normal";
+}
+static int pig_err_class_of(const char *name) {
+  if ( name == 0 )                      return -1;
+  if ( ::strcmp(name, "normal")  == 0 ) return PE_NORMAL;
+  if ( ::strcmp(name, "fatal")   == 0 ) return PE_FATAL;
+  if ( ::strcmp(name, "derived") == 0 ) return PE_DERIVED;
+  if ( ::strcmp(name, "panic")   == 0 ) return PE_PANIC;
+  return -1;
+}
+
+/* 文言から属性タグ ([FATAL] / [DERIVED]) を落とす。★ タグは wire を渡るための表現で
+ * 利用者に見せるものではない (#3475) ので、ハッシュには **落とした形**を入れる。
+ * クラスは class キーが持つので情報は失われず、復元時に ctor が付け直す
+ * (pig_err_compose は二重付与を避けるので往復は冪等)。 */
+static sPtr<stdString> pig_err_strip_tag(sPtr<stdString> m) {
+  if ( ! m.is_notNull() ) return m;
+  const char *raw = m->get_str();
+  const char *tag = ( ::strncmp(raw, PIG_ERRTAG_FATAL,   ::strlen(PIG_ERRTAG_FATAL))   == 0 )
+                        ? PIG_ERRTAG_FATAL
+                  : ( ::strncmp(raw, PIG_ERRTAG_DERIVED, ::strlen(PIG_ERRTAG_DERIVED)) == 0 )
+                        ? PIG_ERRTAG_DERIVED : 0;
+  return ( tag != 0 ) ? thNEW(stdString, (raw + ::strlen(tag))) : m;
+}
+
+sPtr<pigData> pigDataError::to_hash() {
+  sPtr<pigDataHash> h = thNEW(pigDataHash,());
+  h->set_ix(thNEW(pigDataString,("message")),
+            thNEW(pigDataString,(pig_err_strip_tag(msg))));
+  h->set_ix(thNEW(pigDataString,("class")),
+            thNEW(pigDataString,(pig_err_class_name(cls_))));
+  /* 位置は無いこともある (info 未設定 / 行 0)。その場合は file="" ・ line=0 で揃える —
+   * ⚠ キー自体を落とすと利用者側が毎回「有るか」を書かねばならず、hash key not found が出る。 */
+  const char *fn = ( info.is_notNull() && info->get_filename().is_notNull() )
+                   ? info->get_filename()->get_str() : "";
+  INTEGER64 ln   = ( info.is_notNull() ) ? (INTEGER64)info->get_lineno() : (INTEGER64)0;
+  h->set_ix(thNEW(pigDataString,("file")), thNEW(pigDataString,(fn)));
+  h->set_ix(thNEW(pigDataString,("line")), thNEW(pigDataInteger,(ln)));
+  return h;
+}
+
+sPtr<pigData> pig_err_from_hash(sPtr<pigData> h, sPtr<pigInfo> fallbackInfo) {
+  /* ⚠ 型判定に d_cast を使わない (規約: docs/srava_module_design.md §5.1)。obt_hash で訊く。 */
+  sPtr<pigDataHash> hh = h.is_notNull() ? h->obt_hash() : sPtr<pigDataHash>(thNULL);
+  if ( ! hh.is_notNull() )
+    return thNEW(pigDataError,("throw: cannot rebuild an error from this value "
+                               "(expected the hash returned by error())", fallbackInfo));
+  sPtr<pigData> m = hh->get_ix(thNEW(pigDataString,("message")));
+  if ( ! m.is_notNull() || m->is_error() )
+    return thNEW(pigDataError,("throw: cannot rebuild an error from this value "
+                               "(no \"message\" key)", fallbackInfo));
+  /* class は省略可 = normal 扱い。★ 綴り違いは **黙って normal にしない** — 撤収するかどうかが
+   * 変わる (fatal は in-flight agent の即撤収) ので、分からない値は復元失敗にする。 */
+  int cls = PE_NORMAL;
+  sPtr<pigData> c = hh->get_ix(thNEW(pigDataString,("class")));
+  if ( c.is_notNull() && ! c->is_error() ) {
+    cls = pig_err_class_of(c->get_str()->get_str());
+    if ( cls < 0 )
+      return thNEW(pigDataError,("throw: cannot rebuild an error from this value "
+                                 "(unknown \"class\")", fallbackInfo));
+  }
+  /* 位置は元のものを優先する (エラーは **落ちた場所**を指すべきで、throw を書いた場所ではない)。 */
+  sPtr<pigInfo> inf = fallbackInfo;
+  sPtr<pigData> f = hh->get_ix(thNEW(pigDataString,("file")));
+  sPtr<pigData> l = hh->get_ix(thNEW(pigDataString,("line")));
+  if ( l.is_notNull() && ! l->is_error() && l->get_int() > 0 ) {
+    sPtr<stdString> fnm = ( f.is_notNull() && ! f->is_error() ) ? f->get_str() : thNEW(stdString,("?"));
+    inf = thNEW(pigInfo,(fnm, (int)l->get_int()));
+  }
+  return thNEW(pigDataError,(m->get_str(), inf, cls));
+}
+
 sPtr<stdString> pigDataError::get_str() {
   /* ソース位置(file,line)が刻まれていれば ERROR[file,line] msg、無ければ従来の ERROR: msg。
    * ★ #3475: **表示では属性タグを落とす** ([FATAL] / [DERIVED] は wire を跨ぐための表現で、
@@ -811,6 +891,13 @@ sPtr<stdString> pigDataHash::print() {
 /* Environment                                                         */
 /* ------------------------------------------------------------------ */
 
+/* ★★ #3564: 囲む try の出し入れ。⚠ ヘッダに書けない — pigEnvironment の宣言の時点では
+ *   @pigDataTryCatch@ がまだ不完全型で、@sPtr@ の代入・破棄 (relref) が実体化できないため。
+ * ★ 強参照にしてよい理由と、それでも環が残らない仕掛けは pigData.h の set_try のところ。 */
+void pigEnvironment::set_try(sPtr<pigDataTryCatch> t) { tryPtr = t; }
+sPtr<pigDataTryCatch> pigEnvironment::get_try()       { return tryPtr; }
+pigEnvironment::~pigEnvironment() {}
+
 int pigEnvironment::find_local(sPtr<stdString> name) {
   for (int i = 0; i < names.length(); ++i)
     if (names[i]->cmp(name) == 0) return i;
@@ -827,6 +914,10 @@ sPtr<pigData> pigEnvironment::get_var(sPtr<stdString> name) {
   if (i >= 0) return values[i];
   if (parent != thNULL) return parent->get_var(name);
   return thNEW(pigDataError, (thNEW(stdString, ("undefined variable: "))->add(name), thNULL, 1));
+}
+int pigEnvironment::has_var(sPtr<stdString> name) {
+  if (find_local(name) >= 0) return 1;
+  return (parent != thNULL) ? parent->has_var(name) : 0;
 }
 sPtr<pigData> pigEnvironment::set_var(sPtr<stdString> name, sPtr<pigData> val) {
   int i = find_local(name);
@@ -885,6 +976,19 @@ void pigDataDelay::destroy() {
               helper.is_notNull() ? 1 : 0, (result != thNULL) ? 1 : 0);
   if (helper.is_notNull()) helper->destroy();
   if (result != thNULL)    result->destroy();
+}
+
+/* ★ #3541②: 演算子ノードの撤収は **引数へも**転送する (理由は pigData.h の宣言のところ)。 */
+void pigDataOperator::destroy() {
+  if (!argsDestroyed) {
+    argsDestroyed = 1;
+    if (osglue_env_int("PIG_DBG_TD", 0))
+      ::fprintf(stderr, "[td] operator args: destroy 転送 (op=%s n=%d)\n",
+                op_name.is_notNull() ? op_name->get_str() : "?", args.length());
+    for (int i = 0; i < args.length(); ++i)
+      if (args[i].is_notNull()) args[i]->destroy();
+  }
+  pigDataDelay::destroy();
 }
 
 void pigDataDelay::preprocess() {
@@ -1357,12 +1461,24 @@ void pigDataOperatorModule::_start() {
 
   std::string err;
   bool conflict = false;   /* 同名で別ファイル (二重ロード) — 「見つからない」とは別物 */
-  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true, &conflict);
+  /* ★★ #3558: **「入っていない」と「拒んだ」を区別する**。ここが両方を飲み込んでいたため、
+   *   記述子違反や ABI 不一致の .so が @{optional:1}@ 経由 (= lib/module/all.sra ・
+   *   SRAVA_MODULE_ALL=1) では **黙って居なくなり**、次点のカーネルが答えていた。
+   *   値は返るので気づく手掛かりが無く、カーネルが入れ替わっても値が一致する op では
+   *   検定も落ちない。⇒ 拒否は conflict と同じ性質 (構成/実装の誤り) なので飲み込まない。 */
+  bool refused = false;    /* ファイルは在るのに使えない (ABI 不一致・記述子違反・非モジュール 等) */
+  const srava_module_descriptor* d = reg->load_file(path, &err, /*lazy=*/true, &conflict, &refused);
   if (d == 0) {
     /* ★ optional:1 が黙って飲み込んでよいのは「入っていない」場合だけ。同名別ファイルの
-     * 衝突は構成の誤りなので optional でも必ず落とす (飲み込むと別物が動いたまま進む)。 */
-    if (optional && !conflict) { result = thNEW(pigDataString, ("")); return; }   /* 見つからなくても続行 */
-    char buf[1024]; ::snprintf(buf, sizeof buf, "module: %s: %s", path, err.c_str());
+     * 衝突と、在るのに使えないもの (refused) は、optional でも必ず落とす。 */
+    if (optional && !conflict && !refused) { result = thNEW(pigDataString, ("")); return; }   /* 入っていない = 続行 */
+    char buf[1024];
+    if (optional)   /* ★ 飲み込まなかった理由を言う (「optional にしたのに落ちた」への答え) */
+      ::snprintf(buf, sizeof buf,
+                 "module: %s: %s -- the file is present but unusable; {optional:1} only skips "
+                 "modules that are not installed", path, err.c_str());
+    else
+      ::snprintf(buf, sizeof buf, "module: %s: %s", path, err.c_str());
     result = thNEW(pigDataError, (buf, info));
     return;
   }
@@ -1413,6 +1529,23 @@ void pigDataOperatorModule::_start() {
       /* ★ #3436 P4: arity = N' (このモジュールが 1 ノードあたり受け取りたい最大項数・policy)。
        *   2 以上の**有限整数**のみ (「上限なし」は取らない。できるだけ多くやりたければ大きい整数を書く)。
        *   実際の項数は k = min(N', op の sig が申告する N, 群の執行者が許す最大)。 */
+      /* ★ #3503: grace = 撤収の猶予 (ミリ秒)。0=即 kill / >0=猶予つき / -1=graceful のみ。
+       *   ⚠ -1 は「**全 op・全経路が中断要求を見る**」と宣言すること。止まらない経路が
+       *     1 つでもあると Ctrl+C で永久ハングする (process なら居残り・in-proc なら planner ごと)。
+       *     迷ったら >0 — 申告が間違っていても代償は遅延だけで済む。 */
+      sPtr<pigData> gr = opts->get_ix(thNEW(pigDataString, ("grace")));
+      if (gr.is_notNull() && !gr->is_error()) {
+        int g = (int)gr->get_int();
+        if (g < -1) { result = thNEW(pigDataError,
+            ("module: grace must be -1 (graceful only), 0 (kill at once) or a positive number of milliseconds", info)); return; }
+        reg->set_grace_ms(id, g);
+      }
+      /* ★ #3503: panic = in-proc で居座ったときに planner を abort するまでの猶予 (ミリ秒)。
+       *   <=0 = 無効 (既定) / >0 = その時間。grace と対だが **同じ値にしない**のが普通 —
+       *   process の猶予切れは agent 1 つ、in-proc の abort は **セッション全体**を失う。 */
+      sPtr<pigData> pn = opts->get_ix(thNEW(pigDataString, ("panic")));
+      if (pn.is_notNull() && !pn->is_error())
+        reg->set_panic_ms(id, (int)pn->get_int());
       sPtr<pigData> ar = opts->get_ix(thNEW(pigDataString, ("arity")));
       if (ar.is_notNull() && !ar->is_error()) {
         int k = (int)ar->get_int();
@@ -1451,6 +1584,31 @@ void pigDataOperatorCallResolve::_start() {
       mf->set_out_cache(reg->op_out_is_mesh(op) == 1 ? 1 : 0);
     result = args[0]->compact();   /* module op 枝 */
   } else {
+    /* ★★ #3570 段3.5 (2026-09-21): **その名前が変数として束縛されていない**なら、
+     *   op 枝の診断を出す。以前はここで無条件に apply 枝へ落ちていたので、
+     *       module("points.so",{}); simplify(p)
+     *   のように *その op を持つモジュールを読んでいない* だけの誤りが
+     *   「undefined variable: simplify」になっていた — 直す場所を指さない文言。
+     *   op 枝なら「no module can execute op 'simplify' … (no module declares this op /
+     *   not loaded / disabled by module(so,"off"))」と **何をすればよいか**まで言う。
+     *
+     *   ⚠ 変数が在るときは従来どおり apply 枝 (ラムダを変数に束ねる書き方を壊さない)。
+     *   ⚠ 両枝は **同じ引数ノード**を共有しているので、ここで枝を替えても引数が
+     *     二度評価されることはない (compact は結果を持つ)。
+     *   ★ これが無いと、パーサの op ハードコードを外した瞬間に *その 68 op 全部*が
+     *     この文言に落ちる (ハードコードは「宣言者が居なくても必ず op にする」効果を
+     *     持っていて、それが op 層の診断を支えていた)。 */
+    int isVar = 0;
+    {
+      sPtr<pigEnvironment> e = pig_current_env();
+      if (e.is_notNull() && opn != thNULL) isVar = e->has_var(opn);
+    }
+    if (!isVar) {
+      sPtr<pigDataOperator> mf = sPtr<pigDataOperator>::d_cast(args[0]);
+      if (mf.is_notNull()) mf->set_out_cache(0);   /* 値扱い: どのみち routing で落ちる */
+      result = args[0]->compact();   /* module op 枝 = op 層の診断 */
+      return;
+    }
     result = args[1]->compact();   /* lambda 変数 apply 枝 */
   }
 }

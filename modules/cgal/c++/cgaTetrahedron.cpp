@@ -71,8 +71,9 @@ cgaTetrahedron_::compute()
 	if ( !(r > 0) ) { result = cga_err(thNEW(stdString,("tetrahedron: circumradius must be > 0"))); return; }
 
 	mesh = thNEW(cgMesh3D,());
-	cgTriSink sink(mesh->mesh());
+	cgTriSink sink;
 	srava_geo::make_tetrahedron(r, sink);
+	sink.flush_to(mesh);   /* ★ #3545: CGAL へ積むのは幾何 lib 側 */
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して本体未設定で return するので

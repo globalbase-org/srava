@@ -1,5 +1,5 @@
 /*
- * ocaArea — area(cross2d) (#3471)。2D 領域 (oc-cross2d) の面積を返す値 op。
+ * ocaArea — area(cross2d) (#3471)。2D 領域 (oc-face3d) の面積を返す値 op。
  * ★ GProp_GProps の SurfaceProperties。**穴は自動的に引かれる** (Face の向きで表現されるため)
  *   ので、'O' や 'あ' のような字形でも外周 − 内周が出る。
  * ★ 輪郭が Bezier / B-spline のままなので、**多角形近似を経ずに厳密な面積**が出る。
@@ -74,5 +74,5 @@ ocaArea_::compute()
 		return;
 	}
 	result = oca_err(thNEW(stdString,(
-	    "area: input must be a 2D region (oc-cross2d) or a 3D shape (oc-brep3d)")));
+	    "area: input must be a 2D region (oc-face3d) or a 3D shape (oc-brep3d)")));
 }

@@ -9,6 +9,7 @@
 #include	"ch/c++/chTriSink.h"
 #include	"common/solids.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/chaPrism_.h"
 
 CLASS_TINYSTATE(ch/c++/chaPrism,pig/c++/ptsCalcBody)
@@ -69,7 +70,8 @@ chaPrism_::compute()
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	double r = ( na > 2 ) ? (*args)[2]->get_flt() : 1.0;
-	if ( !(n >= 3) ) { result = cha_err(thNEW(stdString,("prism: n must be >= 3"))); return; }
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = cha_err(thNEW(stdString,(srava_geo::sides_error("prism").c_str()))); return; }
 	if ( !(h > 0) ) { result = cha_err(thNEW(stdString,("prism: height must be > 0"))); return; }
 	if ( !(r > 0) ) { result = cha_err(thNEW(stdString,("prism: radius must be > 0"))); return; }
 

@@ -10,6 +10,7 @@
 #include	"nf/c++/nfTriSink.h"
 #include	"common/solids.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/nfaPyramid_.h"
 
 CLASS_TINYSTATE(nf/c++/nfaPyramid,pig/c++/ptsCalcBody)
@@ -31,7 +32,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -45,7 +46,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -70,7 +71,8 @@ nfaPyramid_::compute()
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	double r = ( na > 2 ) ? (*args)[2]->get_flt() : 1.0;
-	if ( !(n >= 3) ) { result = nfa_err(thNEW(stdString,("pyramid: n must be >= 3"))); return; }
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = nfa_err(thNEW(stdString,(srava_geo::sides_error("pyramid").c_str()))); return; }
 	if ( !(h > 0) ) { result = nfa_err(thNEW(stdString,("pyramid: height must be > 0"))); return; }
 	if ( !(r > 0) ) { result = nfa_err(thNEW(stdString,("pyramid: radius must be > 0"))); return; }
 

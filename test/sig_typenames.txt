@@ -1,0 +1,19 @@
+# sig に現れてよい型名のうち、**構成によっては建っていない**もの (#3527 段 6)
+#
+# ⚠ tools/audit_sig_typenames.py は `srava --module-info` が実際に名乗った型名を
+#   「登録済み」とみなす。⇒ -DSRAVA_MODULE_<名前>=OFF で建てていないモジュールの型は
+#   出てこないので、それを指す foreign 行が **未登録扱いで落ちてしまう**。
+#   ⇒ 構成で欠けうる型をここに並べ、登録済みの集合に足す。
+#
+# ★ ここに書いてよいのは「**実在するがこの構成には無い**」型だけ。綴り間違いを
+#   黙らせるために足してはいけない (それをするとこの検査は何も守らなくなる)。
+#
+# 書式: 1 行 1 型名。# 以降はコメント。
+
+gg-mesh3d      # geogram   (-DSRAVA_MODULE_GEOGRAM=OFF で消える)
+ch-mesh3d      # cherchi   (-DSRAVA_MODULE_CHERCHI=OFF)
+oc-brep3d      # occt      (-DSRAVA_MODULE_OCCT=OFF)
+oc-face3d      # occt
+vd-grid3d      # openvdb   (-DSRAVA_MODULE_OPENVDB=OFF)
+nf-mesh3d      # nef_snc   (既定では建たない)
+nfb-mesh3d     # nef_hybrid

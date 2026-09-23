@@ -4,17 +4,23 @@
  *
  * ★★ このモジュールの存在理由: nef_snc は **常に SNC (Nef 本来の表現) だけ**を書く。
  *   SNC のパースには CGAL Nef が要り、cgal.so は **CGAL Nef 非依存** (#3440) を設計として
- *   守っているので、cgal.so 側に reader を足すことはできない。
+ *   守っていたので、cgal.so 側に reader を足すことはできなかった。
+ *   ⚠ #3559 でその線は畳まれた (libsrava_cg が Nef を含む) ので、いまは *足せる*。
+ *     足していないのは cache 形式と routing を動かさないためで、この橋は引き続き経路。
  *   #3478 は逆向きに解いた — nef_snc が SNC の後ろに厳密境界を **付録**として併記し、
  *   cgal / manifold にはそれを読ませた。だが付録のために **encode ごとに to_mesh() が走り**、
  *   実時間の代償が大きかった (#3499)。
- *   ⇒ 変換だけを取り出し、**両側の本物のクラス** (nfMesh / cgMesh3D) を使う別 .so に置く。
+ *   ⇒ 変換だけを取り出し、**両側の本物のクラス** (nfMeshSnc / cgMesh3D) を使う形にした。
  *     to_mesh() を払うのは **cast が呼ばれたときだけ**になる。occt_mf (#3452) と同じ構図。
  *
- * ★ 幾何クラス (nfMesh) は **libsrava_nf_snc.so** に置いてある。nef_snc.so / nef_cg.so が
- *   **同じ実体**を共有するため (各自がコピーを持つと in-proc で d_cast が失敗する)。
+ * ★ 幾何クラス (nfMeshSnc / cgMesh3D) も変換の実体 (nfcBridge.cpp) も **libsrava_cg** に在る。
+ *   nef_snc.so / nef_cg.so / cgal.so が **同じ実体**を共有するため (各自がコピーを持つと
+ *   in-proc で d_cast が失敗する)。
+ *   ★ #3559 より前は nfMesh が libsrava_nf_snc.so に、変換が libsrava_nfcg.so に在った。
+ *     どちらも CGAL を include する = **上流の可変大域がその本数だけ複製される**ので、
+ *     幾何ライブラリを libsrava_cg 1 本へ畳んだ (ELF は @u@ で畳むが PE は畳まない)。
  *
- * ★ 変換そのものは **無損失**。nfMesh::Mesh も cgMesh::Mesh も
+ * ★ 変換そのものは **無損失**。nfNefBox::Mesh も Mesh も
  *   CGAL::Surface_mesh<EPECK::Point_3> = **同じ型**なので、境界を取り出してそのまま渡せる。
  *   落ちるのは「境界表現を持てない値」(非有界 = complement の結果など) だけで、それは
  *   cg の表現力に無いものなので明示エラーが正しい。
@@ -24,8 +30,14 @@
 #include	"pig/c++/ptsCalcBody.h"
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
+/* ★★ #3545 段 4: **CGAL を 1 枚も引かない**。変換の実体は libsrava_nfcg (nfcBridge.cpp) に在り、
+ *   宣言 (nfc/c++/nfcBridge.h) は CGAL-free。⇒ この op TU は「呼ぶ」だけ。
+ *   ⚠ 段 4 の前はここで nf_to_mesh + cg_mesh() を直に呼んでいたので、この .o に CGAL の
+ *     可変大域が実体化していた (Linux では @u@ なので無害だったが、それは *柵* であって
+ *     構造ではない — @u@ は GNU の拡張で mac / Windows には無い)。 */
 #include	"nf/c++/nfMesh.h"
 #include	"cg/c++/cgMesh.h"
+#include	"nfc/c++/nfcBridge.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/nfcCast_.h"
 #include	"pig/c++/pigModuleError.h"
@@ -91,13 +103,12 @@ nfcCast_::compute()
 	/* ★ cast の引数は **cast(型名, 幾何)** の 2 つ (CAST_IN = { AK_INLINE, AK_CACHE })。
 	 *   幾何は args[1]。args[0] は目標の型名で、ここに来ている時点で既に解決済み。 */
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
+	sPtr<nfMeshSnc> in = ( na > 1 ) ? sPtr<nfMeshSnc>::d_cast((*args)[1]) : sPtr<nfMeshSnc>();
 	if ( ! in.is_notNull() ) {
 		result = nfc_err(thNEW(stdString,("cast: needs a Nef (SNC) value")));
 		return;
 	}
-	nfMesh::Mesh bnd;
-	if ( ! in->to_mesh(bnd) ) {
+	if ( ! nfcg_nef_to_cgmesh(in, &out) ) {
 		/* ★ 理由を書く (#3479 の作法)。ここに来るのは cg に表現が無い値だけ。 */
 		result = nfc_err(thNEW(stdString,
 		    /* ★ **入力の形式 (NEF3) を文面に出す** — 利用者が受け取るのは「どの値が
@@ -108,8 +119,6 @@ nfcCast_::compute()
 		     "which cg-mesh3d cannot represent")));
 		return;
 	}
-	out = thNEW(cgMesh3D,());
-	out->mesh() = bnd;   /* ★ 同じ EPECK Surface_mesh。厳密なまま素通し */
 }
 
 sPtr<pigData>

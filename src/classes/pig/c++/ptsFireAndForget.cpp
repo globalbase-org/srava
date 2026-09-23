@@ -46,6 +46,13 @@ public:
 
 	sRptr<ptsObject,tinyState>		parent;
 protected:
+	/* ★★ #3482 段 4: **自分が属する try** (根の見えない try も含めて必ず在る)。
+	 * async / gate の本体は「起動して待たない」ので、待つ相手として **この helper 自身**を
+	 * try の待ちリストへ入れる。⇒ try は async の完了も見送り、destroy() は async も畳める。
+	 * ⚠ 登録は **生成時 (INI) = 同期**。本体の agent が出来るのを待たないので、
+	 *   「catch に入った瞬間にはまだ登録されていない」という段 2 の穴がここで閉じる。 */
+	sPtr<pigDataTryCatch>	myTry;
+	int			ffDestroyed;   /* _node へ destroy を転送済み(1 回だけ) */
 private:
 	TS_DEFARGS
 };
@@ -67,6 +74,7 @@ ptsFireAndForget_::ptsFireAndForget_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
+    ffDestroyed = 0;
 }
 
 
@@ -79,11 +87,41 @@ TS_STATE(INI_pigfFunction_START)
 	/* ⚠ 基底は _front が無いとルート env を作る。呼び手 (実態親) の env を継承し直す。 */
 	if ( pigfFunction_::parent.is_notNull() )
 		env = pigfFunction_::parent->get_env();
+	/* ★★ #3482 段 4: 囲む try の待ちリストへ入る (pigfAgent と同じ作法)。 */
+	/* ★★ #3482 (ひさ 2026-09-19): 入るのは **2 つだけ・chain は辿らない**。
+	 *   myTry   … 自分を囲む最も内側の try (= その try が待つ相手)
+	 *   ledger  … 根の見えない try (= プログラム全体の台帳。countAgent / wake-all の置き換え)
+	 * ⚠ env から引けない縁 (pigf 文脈の外・単体テスト) では myTry を根に落とす。
+	 * ⚠⚠ 根へ直接登録しに行くのは **やめた** (ひさ 2026-09-20)。入るのは囲む try 1 つだけ。
+	 *   理由は pigfAgent.cpp の同じ所に書いてある (try は自分の待ちリストが空になるまで
+	 *   終わらないので、入れ子は「try が try を待つ」で閉じる)。
+	 * ★ 外側の try から内側を畳むのは **destroy の木の伝播**が担う (登録は伝播させない)。 */
+	/* ⚠⚠ #3482 (ひさ 2026-09-19): env から try が引けないのは **配線のバグ**。env を作る側は
+	 *   全部 try をリレーする約束なので、引けないならどこかがリレーしていない。
+	 *   **黙って根へ落とさない** — 台帳に穴が空いたまま進んでしまうため。
+	 *   ここは _front を持たず値で返す先が無いので、撤収の理由として上げて畳む。 */
+	if ( ! env.is_notNull() || ! env->get_try().is_notNull() ) {
+		if ( ptsApp.is_notNull() )
+			ptsApp->set_agentError(thNEW(pigDataError,
+			    ("internal: no enclosing try (env relay is broken)", thNULL, PE_FATAL)));
+		return rDO|FIN_START;
+	}
+	myTry = env->get_try();
+	myTry->agent_enter(ifThis);
 	return rDO|ACT_START;
 }
 
 TS_STATE(ACT_START)
 {
+	/* ★★ #3482: **撤収を _node へ転送する**。ここが「起動して待たない」役の唯一の接点なので、
+	 * 転送しないと **async の中身に撤収が届かない** (畳めと言われたのに走り続ける)。
+	 * ⚠ 起動しているのは自分なので止めるのも自分の責任 — pigfSequence / pigfApply が
+	 *   自分の持ち物へ転送しているのとまったく同じ理屈 (#3541②)。1 度だけ送る。
+	 * ⇒ これで destroy は **pigData の木を通って**内側の try の待ちリストまで届く。 */
+	if ( is_destroyed() && ! ffDestroyed ) {
+		ffDestroyed = 1;
+		if ( _node.is_notNull() ) _node->destroy();
+	}
 	/* ★ 普通に compact する。未解決なら preprocess が自分を listener に登録して yield し、
 	 * 完了で起こされて再走する。**呼び手は待たない**(呼び手はこの helper を作っただけ)。 */
 	if ( _node.is_notNull() ) {
@@ -94,7 +132,20 @@ TS_STATE(ACT_START)
 		 * エラーを出さず rc=0 で成功していた。
 		 * ⚠ async は呼び手 (planner) が drain して報告するので、ここで報告すると
 		 *   **二重報告**になる。だから扱いは呼び手が _reportError で指定する。 */
-		if ( _reportError && v.is_notNull() && v->is_error() && ptsApp.is_notNull() )
+		/* ★★ #3482 段 4: **利用者が書いた try の中なら、その try へ渡す** (= catch で捕まる)。
+		 * ⚠ 渡したら planner には報告しない — try が報告経路になる (catch が無ければ
+		 *   2.2 でそのエラーが try の値になる) ので、両方やると二重報告になる。
+		 * ⚠ 畳まれた跡 (PE_DERIVED) は渡さない — 新しい失敗ではない。
+		 * 根の見えない try の下 (= トップレベル) は従来どおり: _reportError が 1 なら
+		 * ptsApp へ、0 なら呼び手 (planner の drain_async) が報告する。 */
+		int owned = 0;
+		if ( v.is_notNull() && v->is_error() && ! v->is_derived() && myTry.is_notNull() ) {
+			myTry->agent_error(v);   /* ★ 根の try も含めて **必ず try が持つ** */
+			owned = 1;
+		}
+		/* ⚠ 根の下 (= トップレベル) の分は末尾で planner (drain_async) が根の try から読んで
+		 *   報告する。⇒ ここで ptsApp へ上げるのは「try が受け取らなかった」ときだけ。 */
+		if ( ! owned && _reportError && v.is_notNull() && v->is_error() && ptsApp.is_notNull() )
 			ptsApp->set_agentError(v);
 	}
 	return rDO|FIN_START;
@@ -102,6 +153,11 @@ TS_STATE(ACT_START)
 
 TS_STATE(FIN_START)
 {
+	/* ★ #3482 段 4: 待ちリストから抜ける (冪等)。⚠ ここが唯一の終点。 */
+	if ( myTry.is_notNull() ) {
+		myTry->agent_leave(ifThis);
+		myTry = thNULL;
+	}
 	return rDO|FIN_ptsFireAndForget_START;
 }
 

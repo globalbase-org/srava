@@ -29,7 +29,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -43,7 +43,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -65,7 +65,7 @@ void
 nfaEmpty3D_::compute()
 {
 	/* 既定構築の Nef が空集合 (頂点・面ゼロ)。 */
-	mesh = thNEW(nfMesh,());
+	mesh = thNEW(NF_MESH,());
 }
 
 sPtr<pigData>

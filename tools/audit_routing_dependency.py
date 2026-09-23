@@ -35,7 +35,11 @@ AGENTS = {
     'occt':       'modules/occt/c++/octsAgent.cpp',
     'openvdb':    'modules/openvdb/c++/vdtsAgent.cpp',
 }
-OPROW = re.compile(r'^\s*\{\s*"([a-z_0-9]+)"\s*,')
+# ★ #3554: 行は `op` と `op#変種` の 2 形。変種しか持たない op (cgal/manifold の cast) を
+#   取りこぼすと「そのモジュールは cast を持たない」と誤読し、**承認済みリストに無い
+#   暗黙依存**として報告するか、逆に依存を見落とす。⇒ `#` の後ろを落として基底名で数える。
+#   ⚠ 変種名が **マクロ**のこともある (occt の `{ "cast#" OC2C_TYPE,`) ので `#` の後ろは 0 文字も許す。
+OPROW = re.compile(r'^\s*\{\s*"([a-z_0-9]+)(?:#[A-Za-z_0-9-]*)?"\s*,?')
 QUAL  = re.compile(r'\\?"([a-z_0-9]+)\\?"\s*::\s*([a-z_0-9]+)\s*\(')
 CALL  = re.compile(r'(?<![\w:"])([a-z_][a-z_0-9]*)\s*\(')
 BOOST = re.compile(r'module\(\\?"([a-z_0-9]+)\.so\\?"\s*,\s*\{[^}]*priority')

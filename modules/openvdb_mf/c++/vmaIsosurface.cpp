@@ -6,6 +6,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"vd/c++/vdGrid.h"
+#include	"vd/c++/vdGridVdb.h"   /* ★ #3545 段 5: 橋は OpenVDB 型を扱うので読んでよい */
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"mf/c++/mfMesh.h"
 #include	"ts2/c++/stdString.h"
@@ -85,7 +86,7 @@ vmaIsosurface_::compute()
 	vdGrid::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
-	if ( ! in.is_notNull() || ! in->grid() ) {
+	if ( ! in.is_notNull() || ! in->box().g ) {
 		result = vma_err(thNEW(stdString,("isosurface: needs an openvdb grid")));
 		return;
 	}
@@ -96,7 +97,7 @@ vmaIsosurface_::compute()
 	 *    method and post process the quad index list")。adaptivity 版は適応的メッシュ用。 */
 	std::vector<openvdb::Vec3s> points;
 	std::vector<openvdb::Vec4I> quads;
-	openvdb::tools::volumeToMesh(*in->grid(), points, quads, iso);
+	openvdb::tools::volumeToMesh(*in->box().g, points, quads, iso);
 	if ( points.empty() || quads.empty() ) {
 		result = vma_err(thNEW(stdString,
 		    ("isosurface: empty surface (isovalue outside the narrow band?)")));

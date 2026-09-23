@@ -35,6 +35,7 @@ public:
 protected:
 	virtual void	compute();
 	sPtr<ocShape>	out;
+	sPtr<ocFace2D>	out2d;
 private:
 	TS_DEFARGS
 };
@@ -49,6 +50,7 @@ class ptsObject;
 class pigData;
 class stdString;
 class ocShape;
+class ocFace2D;
 TS_END_INTERFACE
 
 #endif
@@ -73,10 +75,28 @@ ocaImport_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<stdString> path = ( na > 0 ) ? (*args)[0]->get_str()
 	                                  : sPtr<stdString>(thNEW(stdString,("")));
-	out = ocShape::read_file(path->get_str());
+	/* ★★ #3544 段 3: **DXF は 2D 図面**として読む (oc-cross2d)。
+	 *   ⚠ 3D の read_file に .dxf を渡すと OCCT は何も読めず「B-rep として読めない」と
+	 *     言う ⇒ *形式を知らないのか中身が壊れているのか* が利用者に分からない。
+	 *     ⇒ 拡張子で先に振り分け、断るときは **この形式について**の文言で断る。 */
+	{
+		char eb[320]; eb[0] = '\0';
+		sPtr<ocFace2D> d = ocFace2D::read_drawing(path->get_str(), eb, (int)sizeof eb);
+		if ( d.is_notNull() ) { out2d = d; return; }
+		if ( eb[0] != '\0' ) {
+			sPtr<stdString> msg = thNEW(stdString,("import: "));
+			msg = msg->add(eb);
+			result = oca_err(msg);
+			return;
+		}
+	}
+	out = ocShape::read_file(path->get_str(), &brk_);   /* ★ #3503 続き */
 	if ( ! out.is_notNull() ) {
+		/* ★ 中断されると NbShapes()==0 になり「読めなかった」と見分けがつかない。
+		 *   幾何のせいにする前に旗を見る。 */
+		if ( (result = oc_abort_err(brk_, "import")) != thNULL ) return;
 		/* ★ 部分的に読めた形を黙って返さない。読めなければ明示エラー。 */
-		sPtr<stdString> msg = thNEW(stdString,("import: cannot read as B-rep (occt supports step/stp/brep) "));
+		sPtr<stdString> msg = thNEW(stdString,("import: cannot read as B-rep (occt reads step/stp/brep, and dxf as a 2D drawing) "));
 		result = oca_err(msg->add(path));
 	}
 }
@@ -84,5 +104,7 @@ ocaImport_::compute()
 sPtr<pigData>
 ocaImport_::get_result()
 {
-	return ( result != thNULL ) ? result : out;
+	if ( result != thNULL )     return result;
+	if ( out2d.is_notNull() )   return sPtr<pigData>::d_cast(out2d);
+	return sPtr<pigData>::d_cast(out);
 }

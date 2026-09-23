@@ -452,6 +452,21 @@ cgptsLemonParser_::get_token(int *ptid)
 			/* 文字列が続かない → 通常の識別子 include(下へ fall-through) */
 		}
 		if ( ::strcmp(buf, "var")   == 0 ) { *ptid = VAR;   return thNULL; }
+		/* ★★ #3555 段5 (ひさ 2026-09-21): `use 式;` = `var USE_MODULES = 式;` の糖衣。
+		 *   ⚠ **予約語にした** (var / if / try と同じ扱い) ので、以後 `use` は識別子に使えない。
+		 *     現物の .sra で識別子として使っている箇所は 0 件だったので実害なしと判断した。
+		 *   ⚠ include のような「後続の形を先読みしてディレクティブか決める」方式は採らなかった —
+		 *     `use (x);` が呼び出しか文かで割れ、境界事例が読めなくなるため。 */
+		if ( ::strcmp(buf, "use")   == 0 ) { *ptid = USE;   return thNULL; }
+		/* ★★ #3567 (ひさ 2026-09-21): `null` リテラル。**予約語**にした (use と同じ扱い)。
+		 *   現物の .sra / test で識別子 `null` を使っている箇所は 0 件だったので実害なし。
+		 *   ★ 値としての null は以前から在った (`var x;` / `return;` / 添字伸長の穴 /
+		 *     #3555 の nreq 埋め) のに **書けなかった** ので、`x == null` が言えなかった。
+		 *   ⚠ VALUE モード (キャッシュ本文 / agent 境界) でも同じトークンになる。従来は
+		 *     `value ::= IDENT` へ落ちて mk_varref("null") = 未定義変数になる形だった。
+		 *     @pigDataNull::serialize()@ は "null" を吐くので **読み戻せない綴り**だったが、
+		 *     ⚠ この経路を実際に踏む式は見つけられていない (机上の穴を塞いだだけ)。 */
+		if ( ::strcmp(buf, "null")  == 0 ) { *ptid = NULLV; return thNULL; }
 		if ( ::strcmp(buf, "if")    == 0 ) { *ptid = IF;    return thNULL; }
 		if ( ::strcmp(buf, "else")  == 0 ) { *ptid = ELSE;  return thNULL; }
 		if ( ::strcmp(buf, "while") == 0 ) { *ptid = WHILE; return thNULL; }
@@ -462,6 +477,9 @@ cgptsLemonParser_::get_token(int *ptid)
 		if ( ::strcmp(buf, "exit")     == 0 ) { *ptid = EXIT;     return thNULL; }
 		if ( ::strcmp(buf, "async")    == 0 ) { *ptid = ASYNC;    return thNULL; }
 		if ( ::strcmp(buf, "sync")     == 0 ) { *ptid = SYNC;     return thNULL; }
+		if ( ::strcmp(buf, "try")      == 0 ) { *ptid = TRY;      return thNULL; }   /* ★ #3482 */
+		if ( ::strcmp(buf, "catch")    == 0 ) { *ptid = CATCH;    return thNULL; }
+		if ( ::strcmp(buf, "throw")    == 0 ) { *ptid = THROW;    return thNULL; }   /* ★ #3482 */
 		*ptid = IDENT; return thNEW(pigDataString,(buf, tok_info()));
 	}
 

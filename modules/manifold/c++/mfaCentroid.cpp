@@ -58,13 +58,16 @@ void
 mfaCentroid_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<mfMesh> in = ( na > 0 ) ? sPtr<mfMesh>::d_cast((*args)[0]) : sPtr<mfMesh>();
-	if ( ! in.is_notNull() ) {
-		result = mfa_err(thNEW(stdString,("centroid: needs a 3D mesh")));
+	sPtr<mfMesh>  m3 = ( na > 0 ) ? sPtr<mfMesh>::d_cast((*args)[0])  : sPtr<mfMesh>();
+	sPtr<mfCross> c2 = ( na > 0 ) ? sPtr<mfCross>::d_cast((*args)[0]) : sPtr<mfCross>();
+	if ( ! m3.is_notNull() && ! c2.is_notNull() ) {
+		result = mfa_err(thNEW(stdString,("centroid: needs a mesh")));
 		return;
 	}
 	double c[3] = {0,0,0};
-	int n = in->op_centroid(c);
+	/* ★ #3533: 2D も受ける (それまで manifold だけ 2D の centroid が無かった)。
+	 *   ⚠ 2D は **cross2d=局所 2 成分 / face3d=world 3 成分** で返り値の長さが変わる。 */
+	int n = m3.is_notNull() ? m3->op_centroid(c) : c2->op_centroid(c);
 	sPtr<pigDataArray> arr = thNEW(pigDataArray,());
 	for ( int i = 0 ; i < n ; ++i )
 		arr->push(thNEW(pigDataFloat,(c[i])));

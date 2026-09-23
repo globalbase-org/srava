@@ -12,7 +12,8 @@ Linux・macOS・Windows(MSYS2/MINGW64・Cygwin)での **ビルド + インスト
 
 **個別の手動インストールは不要。** 幾何モジュール(`cgal.so` / `manifold.so` / `nef_*.so` /
 `geogram.so` / `openvdb.so` と橋渡し 3 本 / `occt.so` / `occt_mf.so` / `cherchi.so` /
-`pipe_proximity.so`)はすべて srava のソースからビルドされる。**既定でほぼ全部が ON** なので、
+`pipe_proximity.so`)と、外部ライブラリを持たないカーネル中立の 2 本(`points.so` /
+`geomutils.so`)は、すべて srava のソースからビルドされる。**既定でほぼ全部が ON** なので、
 軽く済ませたいときだけ §7 の `-DSRAVA_MODULE_*=OFF` で外す。各モジュールが依存する外部ライブラリの
 入手経路は 3 種類ある:
 
@@ -60,6 +61,8 @@ Linux・macOS・Windows(MSYS2/MINGW64・Cygwin)での **ビルド + インスト
 | Open CASCADE (OCCT) | [`occt.so`](srava_module_reference.html#occt) / `occt_mf.so`(B-rep・NURBS/解析曲面) | **既定 ON**。**system から `find_package` で検出**するので、事前に入れておく必要がある。Cygwin では自動 OFF |
 | Cherchi (indirect predicates) | `cherchi.so`(厳密ブール) | **既定 ON**。FetchContent で自動(git のみ)。Cygwin では自動 OFF(abseil が拒否) |
 | pipeProximity | [`pipe_proximity.so`](srava_module_reference.html#pipe_proximity) | **不要**(ソース取り込み済み) |
+| **なし** | [`points.so`](srava_module_reference.html#points)(点群型) と `libsrava_pt` | **不要**(外部ライブラリを持たないので **常にビルドされる**) |
+| **なし** | [`geomutils.so`](srava_module_reference.html#geomutils)(メッシュ共通の計測・位相・片取り) と `libsrava_gu` | **不要**(同上。⚠ `valid` / `genus` / `part` 等を mf / gg / ch に対して呼ぶには**これをロードする**) |
 | HDF5 | `export_vox`(voxel 化 → k-Wave) | 任意(無ければ export_vox のみ無効) |
 | jemalloc | Linux の既定アロケータ(実行体 2 本にだけリンク) | 任意(無ければ system malloc へ落ちて警告・`-DSRAVA_ALLOCATOR=system` で明示的に切れる) |
 
@@ -87,16 +90,22 @@ tinyState at '<inc>' has no stdLimitSemaphore::insNeq().
 srava needs it for the worker gate admission order. Install tinyState v2.0.0-rc16 or later, ...
 ```
 
+★ **Windows(MinGW)だけは v2.0.0-rc17 以上**。`CREATE_NEW_PROCESS_GROUP` で起こされた子は
+Ctrl+C が無効な状態を親から継承しており、その解除は rc17 で入った。rc16 以前だと
+**Ctrl+C の入口を撃つテスト 1 本だけが赤くなる**(他は影響を受けない)。
+
 入っている版は install 済みのヘッダで確認できる:
 
 ```sh
 grep TS_REVISION /usr/local/include/std2/tinyState_config.h
-#   → #define TS_REVISION       "v2.0.0-rc16-<n>-g<hash>"   (形は git describe そのまま)
+#   → #define TS_REVISION       "v2.0.0-rc17-0-g6b07f77"      ← 公開 rc17 を素で建てた場合
 ```
 
-⚠ `TS_REVISION` は `git describe` の出力を焼いたもので、**手元の tag の付き方で文字列が変わる**
-(同じコミットに別名の tag が同居していると、そちらの名前で出ることがある)。版の判別には使えるが、
-**文字列の完全一致で判定しない**こと。確実なのは次の 1 行 — これが空なら srava の configure は止まる:
+⚠ `TS_REVISION` は `git describe` の出力を焼いたものなので、**建て方で文字列が揺れる**
+(タグから進んだコミットの `-<n>-g<hash>`、作業ツリーが汚れていれば `-dirty`、
+同じコミットに別名のタグが同居していればその名前)。版の見当をつけるには使えるが、
+**完全一致で判定しない**こと。判定が要るなら、srava が実際に見ているものを直接見る
+— これが空なら configure は止まる:
 
 ```sh
 grep -l insNeq /usr/local/include/ts2/c++/stdLimitSemaphore.h
@@ -136,15 +145,23 @@ cmake --build build -j
 sudo cmake --install build                              # /usr/local/bin へ
 ```
 
-- 検証実績: Debian 13(trixie)/ g++ 14.2 / CMake 3.31・全モジュール ON で **`srava_occt_contact`
-  1 本を除いて green**(2026-09-12)。その 1 本は **OCCT 7.8.1 の上流欠陥**で、srava 側の回帰ではない
-  (下記)。
+- 検証実績: Debian 13(trixie)/ g++ 14.2 / CMake 3.31・`-DSRAVA_MODULE_NEF_SNC=ON` を足した構成で
+  **`srava_occt_contact` 1 本を除いて green**(2026-09-23・**このリリースのツリーそのもの**)。
+  その 1 本は **OCCT 7.8.1 の上流欠陥**で、srava 側の回帰ではない(下記)。
+  (**既定構成**(§7 の既定のまま = `nef_snc` だけ OFF)でも同じ 1 本だけが赤い。2026-09-12 に確認。)
+  ⚠ **ctest の本数は構成で変わる**ので、他所の数字と突き合わせるときは option を揃えること
+  (例: `-DSRAVA_MODULE_NEF_SNC=OFF` は `nef_snc` と橋渡し 2 本のぶんテストが減る)。
 
 > ### ⚠ Debian 13 の OCCT 7.8.1 では `srava_occt_contact` が落ちる
 >
 > **境界だけで接する立体の融合**(2 球の対称差 = 三日月 2 つが交線の円だけで接する形)で、OCCT が
 > その接触面を内部面とみなして消してしまい、レンズが材料に化けて **`xor` が `union` の値を返す**。
-> OCCT 7.9 系では 7 ケースすべて正しいことを確認している。
+> **この誤値そのものは OCCT の版で決まる** — 7.8.1 で出て、7.9.3 では出ない(macOS で確認済み)。
+>
+> ⚠ ただし **`srava_occt_contact` が落ちる理由は版だけではない**。MinGW(OCCT 7.9.3)では、
+> 上の体積検査は通るのに**別の検査で値が返らず**落ちる。⇒ このテストが赤いときは
+> 「OCCT を上げれば直る」と決めつけず、**どの検査が落ちているか**を見ること
+> (体積が **xor ではなく union の値**になっていれば 7.8.1 の欠陥、値が空なら別の問題)。
 >
 > ⚠ **面積では検出できない** — `xor` の境界は元の 2 球の境界そのものなので、union に化けても
 > 面積は正しく見える。体積で見る必要がある。
@@ -185,10 +202,9 @@ sudo cmake --install build
 
   `CMAKE_PREFIX_PATH=/opt/homebrew` を渡しても効かない(keg-only は prefix の外に居るため)。
 - 検証実績: macOS 14.8(arm64・OCCT 7.9.3)/ Apple clang / `-DSRAVA_MODULE_NEF_SNC=ON` を足した構成で
-  **full ctest が 100% green**(2026-09-12)。★ この構成では `srava_occt_contact` も**通る** —
-  Linux(§3)で落ちるのは OCCT 7.8.1 の欠陥で、7.9.3 では出ないため。
-  ⚠ **このリリースの最終ツリーそのものではなく、その 3 コミット手前で取った値**(差分は docs と
-  テストの数え方の修正のみ)。
+  **full ctest が 100% green**(2026-09-23・**このリリースのツリーそのもの**)。
+  ★ この構成では `srava_occt_contact` も**通る** — Linux(§3)で落ちるのは OCCT 7.8.1 の欠陥で、
+  7.9.3 では出ないため。
 
 ## 5. Windows — MSYS2 / MINGW64
 
@@ -223,13 +239,16 @@ cmake --install build --prefix /usr/local
   `export MSYSTEM=MINGW64; source /etc/profile`)。多段クォートが要る操作はスクリプトファイルにして実行。
 - Windows ではモジュールの拡張子は **`.dll`**(`cgal.dll` / `manifold.dll` / …)。ソース中の
   `module("cgal.so")` は実行 OS の拡張子へ自動で正規化されるので、スクリプトはそのまま可搬。
-- 検証実績: Windows 11 + MSYS2/MINGW64(g++ 16.1)/ Ninja / CMake 4.4 で **full ctest が 100% green**
-  (2026-08-28。共有 libpig.dll + 全モジュール .dll 構成)。
+- 検証実績: Windows 11 + MSYS2/MINGW64(g++ 16.1)/ Ninja / CMake 4.4・共有 libpig.dll +
+  全モジュール .dll 構成で、**OCCT 由来の 2 本を除いて green**(2026-09-23・**このリリースの
+  ツリーそのもの**)。その 2 本(`srava_occt_contact` / `srava_cache_path_occt`)は
+  **上流 OCCT の欠陥**で、srava 側の回帰ではない — MinGW の OCCT では
+  「差の和で組んだ xor 立体」がからむブールで agent が落ちる
+  (`EXCEPTION_ACCESS_VIOLATION`・stderr には何も出ない)。
+  ★ **走行中の中断**(Ctrl+C / `grace` / `panic`)は、シグナル・IOCP・`select` という
+  **プラットフォームごとに実装が分かれる**層に触るが、**Windows でも検定済み**
+  (Ctrl+C の入口・`SIGINT`・in-proc の panic を、それぞれ別のテストで撃っている)。
   ⚠ Windows では `ctest -j2` で回すこと。
-  ⚠⚠ **これは前リリース(v1.1.0-rc5)時点の記録**で、このリリースでは取り直していない。
-  本リリースで入った**走行中の中断**(Ctrl+C / `grace` / `panic`)は、シグナル・IOCP・`select` という
-  **プラットフォームごとに実装が分かれる**層に触るので、Windows で使うなら手元で ctest を回して
-  確認してほしい。
 - ★ **Windows の主経路は MinGW**。Cygwin(§6)は使えるモジュールが限られる。
 
 ## 6. Windows — Cygwin
@@ -243,7 +262,7 @@ Boost 差し替え・`-DSRAVA_ENABLE_HDF5` の扱い)。要点:
 - HDF5 は Cygwin の cmake config が壊れているため**既定で無効**。使うなら config を直して
   `-DSRAVA_ENABLE_HDF5=ON`。
 - ⚠ **使えるモジュールが限られる**: `cgal` / `nef_hybrid` / `manifold` / `pipe_proximity` のみ
-  (`nef_snc` は既定 OFF・`-DSRAVA_MODULE_NEF_SNC=ON` で追加できる)。
+  (`nef_snc` も既定 ON。外すなら `-DSRAVA_MODULE_NEF_SNC=OFF`)。
   **他は既定 ON だが Cygwin では自動 OFF に倒れる**: `geogram` と `openvdb` は TBB、`occt` は OpenCASCADE を要するが
   Cygwin はどちらもパッケージしておらず、`cherchi` は依存の abseil が Cygwin を明示的に拒否する。
   `CMakeLists.txt` が `if(CYGWIN)` で自動的に OFF にする。**`manifold.so` の op 内並列
@@ -254,7 +273,8 @@ Boost 差し替え・`-DSRAVA_ENABLE_HDF5` の扱い)。要点:
   失敗時のエラーはワーカーゲートの上限を指すが**それは真因ではない**。詳細は別ページ。
 - 検証実績: Cygwin 3.6(g++ 11.5 / CMake 4.2)で **full ctest が 100% green**(2026-08-28。
   上記 5 モジュール構成・`rebase` 実施後・`-DCMAKE_BUILD_TYPE=Release`)。
-  ⚠⚠ **これも前リリース(v1.1.0-rc5)時点の記録**で、このリリースでは取り直していない(§5 と同じ理由)。
+  ⚠⚠ **この記録はこのリリースのツリーでは取り直していない**(Windows の主経路は MinGW = §5 で、
+  そちらは取り直してある)。Cygwin で使うなら手元で ctest を回して確かめてほしい。
 - ⚠ **`-DCMAKE_BUILD_TYPE=Release` を必ず指定する**。無指定だと最適化が一切かからず、
   数値最適化を回す op(`pipe_adjust` 等)が桁違いに遅くなり、テストが TIMEOUT する。
 - Manifold を使うなら Cygwin の `git` が要る(`-DSRAVA_MODULE_MANIFOLD=ON`)。
@@ -269,7 +289,7 @@ Boost 差し替え・`-DSRAVA_ENABLE_HDF5` の扱い)。要点:
 | `-DSRAVA_MODULE_MANIFOLD=ON` | **ON** | Manifold 幾何モジュール(`manifold.so`)をビルド(要 git・FetchContent 自動取得)。OFF で除外 |
 | `-DSRAVA_MODULE_NEF=ON` | **ON** | CGAL Nef モジュール群の傘(`SRAVA_MODULE_CGAL=ON` が前提)。OFF で 2 変種とも除外 |
 | `-DSRAVA_MODULE_NEF_HYBRID=ON` | **ON** | `nef_hybrid.so`(有界立体は厳密境界・型 `nfb-mesh3d`) |
-| `-DSRAVA_MODULE_NEF_SNC=ON` | **OFF** | `nef_snc.so`(常に SNC 表現・型 `nf-mesh3d`)。**既定 OFF**。橋渡しの `nef_cg.so`(→ CGAL)/ `nef_mf.so`(→ Manifold・要 `SRAVA_MODULE_MANIFOLD`)も**これと連動して**建つ |
+| `-DSRAVA_MODULE_NEF_SNC=ON` | **ON** | `nef_snc.so`(常に SNC 表現・型 `nf-mesh3d`)。**2026-09-16 に既定 ON へ**(以前は OFF)。橋渡しの `nef_cg.so`(→ CGAL)/ `nef_mf.so`(→ Manifold・要 `SRAVA_MODULE_MANIFOLD`)も**これと連動して**建つ |
 | `-DSRAVA_MODULE_GEOGRAM=ON` | **ON** | geogram モジュール(`geogram.so`)をビルド(要 git・FetchContent 自動取得)。⚠ 取得 + ビルドに時間がかかるので、軽く済ませたいときは OFF |
 | `-DSRAVA_MODULE_PIPEPROX=ON` | **ON** | pipe_proximity モジュール(`pipe_proximity.so`)をビルド(取り込み済みソース・外部取得なし)。OFF で除外 |
 | `-DSRAVA_MODULE_OPENVDB=ON` | **ON** | OpenVDB ボリュームモジュール(`openvdb.so` と橋渡し 3 本)をビルド(FetchContent・要 TBB)。⚠ ビルドが重い。**Cygwin では自動 OFF** |
@@ -387,8 +407,9 @@ srava --count-cache <dir>         キャッシュ dir の内訳を 1 行で出�
 
 ```
 $ srava --module-info d3
-d3  (abi=21 prio=-2 <build>/d3.so)
+d3  (abi=31 prio=-2 <build>/d3.so)
     exec_caps=thread|process(0x3)  exec_default=process  make_agent=yes
+    grace=0(kill at once)  panic=off
     arity=0  cache_version=1  import=-  export=-  initialize=no  configure=no
     cache_salt=|d3|v1
     ops (5):
@@ -413,6 +434,16 @@ no such module is loaded (see `srava --modules` for the names)
 - `cache_salt=` は出力キャッシュキーに混ざる弁別バイト列で、**モジュール名 + `cache_version`** から
   レジストリが組む(`|` は表示できない区切り `\x01` の代用)。`.so` を 1 本だけ差し替えたときに
   ここが動いているかで切り分けられる。
+- `grace` / `panic` は**撤収の猶予**の申告。`grace` は **process 実行**で SIGKILL までの
+  猶予(`0(kill at once)` / `Nms` / `graceful-only` = kill しない)、`panic` は **in-proc 実行**で
+  居座ったときに planner を abort するまでの猶予(`off` / `Nms`)。同じモジュールでも実行方式で
+  使う口が変わるので 2 本ある。
+  - ⚠ **ここに出るのは `.so` が申告している値**であって実行時の実効値ではない。
+    `module(so,{grace:N})` や `SRAVA_AGENT_GRACE_MS` / `SRAVA_INPROC_PANIC_MS` での上書きは
+    この表示に現れない(実効値は env > `module()` > 記述子 の順で解決される)。
+  - ⚠ `graceful-only` を名乗れるのは **全 op・全経路が中断要求を見る**モジュールだけ。止まらない
+    経路が 1 つでもあると Ctrl+C で永久に終わらない。迷ったら `Nms` にする(申告が間違っていても
+    代償は遅延だけで済む)。
 
 - `sig` は長いものがあるが**折り返さない**。揃って見えることより `grep` で拾えることを優先している。
 - `provides` の `tag` 行は申告をそのまま出すのではなく、**実際に `create_for_meta` へ通して検証**した

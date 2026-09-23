@@ -9,11 +9,6 @@
 #include	"oc/c++/ocShape.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ocaCylinder_.h"
-#include	<BRepPrimAPI_MakeCylinder.hxx>
-#include	<gp_Ax2.hxx>
-#include	<gp_Pnt.hxx>
-#include	<gp_Dir.hxx>
-#include	<TopoDS_Shape.hxx>
 
 CLASS_TINYSTATE(oc/c++/ocaCylinder,pig/c++/ptsCalcBody)
 
@@ -73,22 +68,24 @@ ocaCylinder_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
+	/* ★ #3570 段3: segs の引数そのものを撤去した (記述子の nin を減らした) ので、
+	 *   ここに在った #3530 の「受けるが無視し、検査はする」は **届かなくなった**。
+	 *   原則が「そのモジュールで必要のない引数は撤去する」に変わったため。 */
 	if ( !(r > 0) || !(h > 0) ) {
 		result = oca_err(thNEW(stdString,("cylinder: r and h must be > 0")));
 		return;
 	}
 	/* 他カーネルの box / sphere と同じく **原点中心**・軸は +Z。
 	 * BRepPrimAPI_MakeCylinder は基準点が底面中心なので h/2 下げる。 */
-	gp_Ax2 ax(gp_Pnt(0, 0, -h/2), gp_Dir(0, 0, 1));
-	BRepPrimAPI_MakeCylinder mk(ax, r, h);
-	/* ★ プリミティブは遅延構築。IsDone() は立たないので IsNull() で見る (ocaBox と同じ罠)。 */
-	TopoDS_Shape sh = mk.Shape();
-	if ( sh.IsNull() ) {
-		result = oca_err(thNEW(stdString,("cylinder: OCCT produced a null shape")));
+	/* ★ #3545 段 5: 幾何の組み立ては **幾何 lib 側** (ocShape::make_cylinder)。
+	 *   ⇒ この TU は OCCT を触らない — 触ると投げうる inline を通っただけで
+	 *     RTTI の型インスタンスが .o に出る (ocShape.h の注記)。 */
+	char why[320]; why[0] = '\0';
+	out = ocShape::make_cylinder(r, h, why, (int)sizeof why);
+	if ( ! out.is_notNull() ) {
+		result = oca_err(thNEW(stdString,( why[0] ? why : "cylinder: failed" )));
 		return;
 	}
-	out = thNEW(ocShape,());
-	out->set_shape(sh);
 }
 
 sPtr<pigData>

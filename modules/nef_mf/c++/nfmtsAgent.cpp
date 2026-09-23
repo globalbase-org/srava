@@ -7,9 +7,10 @@
  *
  * ★ 受けるのは **nf-mesh3d だけ** (nfb-mesh3d = nef_hybrid は受けない)。
  *     ① hybrid は普通の立体を厳密境界で書くので manifold.so がそのまま読める = 橋が要らない。
- *     ② 幾何クラスの実体は **変種ごとに別の共有ライブラリ** (libsrava_nf_snc / _hybrid) に
- *        あり、シンボルバージョンで分離してある。この橋は snc 側にリンクしているので、
- *        hybrid が作った nfMesh を in-proc で d_cast しても通らない。
+ *     ② snc と hybrid は **別の型** (nfMeshSnc / nfMesh) なので、hybrid が作った値は
+ *        この橋の @sPtr<nfMeshSnc>::d_cast@ を通らない = 受けようがない。
+ *        ★ #3559 より前は「変種ごとに別の共有ライブラリ + シンボルバージョン」で
+ *          分けていた。同じ分離が **型** で付くようになった (ライブラリは 1 本に畳んだ)。
  *
  * ライセンス: CGAL (GPL) + Manifold (Apache-2.0)。**混ざるのはこの .so だけ**で、
  *   manifold.so は CGAL 非依存のまま (それが #3478 で reader を足せなかった理由でもある)。
@@ -23,6 +24,7 @@
 #include	"nf/c++/nfMesh.h"
 #include	"mf/c++/mfMesh.h"
 #include	"nfm/c++/nfmCast.h"
+#include	"pig/c++/pigOpMatch.h"   /* ★ #3554 最後の段 2/5: cast の共通マッチ述語 */
 #include	"_ts2/c++/nfmtsAgent_.h"
 
 CLASS_TINYSTATE(nfm/c++/nfmtsAgent,pig/c++/ptsGenericAgent)
@@ -42,7 +44,9 @@ static const pigOpEntry OPS[] = {
 	 *   ★ **cast** で正しい — 粒度パラメータが要らない (厳密境界を取ってから double 化する
 	 *     だけで、丸め方は cg → mf の既存 cast と同一)。
 	 *   ★ 出力型は mf-mesh3d = **本物の mfMesh**。名前だけ借りた別クラスではない。 */
-	{ "cast", CAST_IN, 2, AK_CACHE, OPWIRE(nfmCast, nfGeom), 0, "(nf-mesh3d)->mf-mesh3d" },
+	/* ★ #3554 最後の段 2/5: cast の行は共通述語 @pig_match_cast_target@ が選ぶ
+	 *   (目標型 = この行の sig の出力型か)。橋は出力型が 1 つなので行は 1 本のまま。 */
+	{ "cast", CAST_IN, 2, AK_CACHE, OPWIRE(nfmCast, nfMeshSnc), 0, "(nf-mesh3d)->mf-mesh3d", 0, 0, 0, &pig_match_cast_target },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 

@@ -17,6 +17,8 @@
 #   (env: SRAVA_AGENT 必須。無ければ srava と同 dir の srava_agent を推測)
 set -u
 SRAVA="${1:?usage: repro_bigarg_mingw.sh <srava>}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 AG="${SRAVA_AGENT:-$(dirname "$SRAVA")/srava_agent}"
 [ -x "$AG" ] || AG="$AG.exe"
 
@@ -44,7 +46,7 @@ for n in 256 512 900 1024 2048; do
     D="$TMP/repro-bigarg-$n-$a"; rm -rf "$D"
     t0=$(date +%s 2>/dev/null || echo 0)
     SRAVA_AGENT="$AG" SRAVA_CACHE_DIR="$D" \
-      SRAVA_SOURCE="export(\"$D.off\", tube([$PTS], 6));" \
+      SRAVA_SOURCE="export(\"$D.off\", tube_ruled([$PTS], 6));" \
       $TO "$SRAVA" >/dev/null 2>&1
     rc=$?
     t1=$(date +%s 2>/dev/null || echo 0)

@@ -7,7 +7,6 @@
 #include	"pig/c++/pigData.h"
 #include	"nf/c++/nfMesh.h"
 #include	"ts2/c++/stdString.h"
-#include	<CGAL/Polygon_mesh_processing/measure.h>
 #include	"_ts2/c++/nfaVolume_.h"
 
 CLASS_TINYSTATE(nf/c++/nfaVolume,pig/c++/ptsCalcBody)
@@ -41,7 +40,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -63,17 +62,20 @@ void
 nfaVolume_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	if ( ! in.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("volume: needs a Nef mesh")));
 		return;
 	}
-	nfMesh::Mesh m;
-	if ( ! in->to_mesh(m) ) {
+	/* ★ #3535②: 境界の構築も CGAL::to_double も 幾何ライブラリ (libsrava_cg) 側 (nfNefMesh::volume) でやる。
+	 *   ⚠ ここで to_double を呼ぶと Lazy_exact_nt の精度設定 (可変な大域) の実体が
+	 *     このモジュール .so にもできる (理由は nfMesh.h の volume の宣言のところ)。 */
+	double vol = 0.0;
+	if ( ! in->volume(&vol) ) {
 		char b[256];
 		::snprintf(b, sizeof b, "volume: this Nef has no volume (%s)", nf_why(in));
 		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
-	result = thNEW(pigDataFloat,(CGAL::to_double(CGAL::Polygon_mesh_processing::volume(m))));
+	result = thNEW(pigDataFloat,(vol));
 }

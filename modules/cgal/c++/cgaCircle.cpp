@@ -6,12 +6,14 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"cg/c++/cgMesh.h"
+#include	<vector>
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/cgaCircle_.h"
 
 /* cgaNgon.cpp 定義の共有ヘルパ(正 n 角形 CCW を返す)。 */
-cgMesh2D::Polygon_2 cga_regular_polygon(int n, double r);
+std::vector<double> cga_regular_polygon(int n, double r);   /* ★ #3545: 素の (x,y) 列 */
 
 CLASS_TINYSTATE(cg/c++/cgaCircle,pig/c++/ptsCalcBody)
 
@@ -69,10 +71,20 @@ cgaCircle_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r    = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
-	int    segs = ( na > 1 ) ? (int)(*args)[1]->get_int() : 32;   /* 辺数(精度ピッチ)。既定 32 */
-	if ( segs < 3 ) segs = 3;                                     /* 三角形未満は無意味 */
+	int    segs_in = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 0 = 未指定 */
+	int    segs = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(segs_in, 32, &segs) != srava_geo::SEGS_OK ) {
+		result = cga_err(thNEW(stdString,(srava_geo::segs_error("circle").c_str()))); return;
+	}
+	/* ★ #3516 続き: 他の実装 (occt) が元から持っていた検査を揃えた。
+	 *   ⚠ 無いと circle(0) が面積 0 を返し、circle(-1) は cgal=3.12 (≈π) /
+	 *   manifold=0 と **カーネルごとに違う値**を黙って返していた。 */
+	if ( !(r > 0) ) { result = cga_err(thNEW(stdString,("circle: radius must be > 0"))); return; }
 	mesh = thNEW(cgMesh2D,());
-	mesh->regions().push_back(cgMesh2D::Pwh_2(cga_regular_polygon(segs, r)));
+	std::vector<double> xy = cga_regular_polygon(segs, r);
+	mesh->add_region_ring(&xy[0], segs);
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

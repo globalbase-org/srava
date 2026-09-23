@@ -38,7 +38,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -52,7 +52,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -74,8 +74,8 @@ void
 nfaMinkowski_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> a = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
-	sPtr<nfMesh> b = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> a = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
+	sPtr<nfNefMesh> b = ( na > 1 ) ? sPtr<nfNefMesh>::d_cast((*args)[1]) : sPtr<nfNefMesh>();
 	if ( ! a.is_notNull() || ! b.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("minkowski: needs two Nef meshes")));
 		return;

@@ -10,13 +10,13 @@
 var ruler = \(axis, len, step, r) {
     var p0 = [0, 0, 0];
     var p1 = [0, 0, 0];  p1[axis] = len;
-    var parts = [ tube([[p0, r], [p1, r]]) ];        // 主線
+    var parts = [ tube_ruled([[p0, r], [p1, r]]) ];        // 主線
     var ta = axis + 1;  if ( ta > 2 ) { ta = 0; }    // 目盛を出す直交軸
     var t;
     for ( t = 0 ; t <= len + step * 0.001 ; t = t + step ) {   // 端点を含める微小 eps
         var c  = [0, 0, 0];  c[axis]  = t;
         var c2 = [0, 0, 0];  c2[axis] = t;  c2[ta] = step * 0.4;
-        parts[length(parts)] = tube([[c, r], [c2, r]]);   // 添字伸長で末尾に追加
+        parts[length(parts)] = tube_ruled([[c, r], [c2, r]]);   // 添字伸長で末尾に追加
     }
     combine(parts);   // 可視化ガイド → corefinement 不要の combine で束ねる
 };

@@ -87,20 +87,44 @@ ocaExport_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	refPath = ( na > 0 ) ? (*args)[0]->get_str()
 	                     : sPtr<stdString>(thNEW(stdString,("/tmp/srava-out.step")));
-	sPtr<ocShape> mIn = ( na > 1 ) ? sPtr<ocShape>::d_cast((*args)[1]) : sPtr<ocShape>();
+	/* ★★ #3544 段 3: **2D も受ける**。
+	 *   ⚠ ここは sig ではなく **d_cast が効くガード**なので、sig に型を足すだけでは通らない
+	 *     (pigfModuleAgent の export の近道)。⇒ 受ける型ごとに d_cast を書く。
+	 *   ⚠ ocFace2D は ocShape の派生では **ない** (どちらも ocGeom 派生) ので、
+	 *     3D 用の d_cast は 2D に当たらない。2026-09-17 まで 2D は **1 形式も書けなかった**。 */
 	const char *p = refPath->get_str();
-	if ( ! mIn.is_notNull() ) {
+	sPtr<ocShape>  mIn = ( na > 1 ) ? sPtr<ocShape>::d_cast((*args)[1])  : sPtr<ocShape>();
+	sPtr<ocFace2D> f2  = ( na > 1 ) ? sPtr<ocFace2D>::d_cast((*args)[1]) : sPtr<ocFace2D>();
+	if ( ! mIn.is_notNull() && ! f2.is_notNull() ) {
 		result = oca_err(thNEW(stdString,("export: no shape to write")));
 		return;
 	}
 	sPtr<stdString> unitS = ( na > 2 ) ? (*args)[2]->get_str()
 	                                   : sPtr<stdString>(thNEW(stdString,("")));
-	if ( ! mIn->write_to(p, unitS->get_str()) ) {
-		char b[256];
+	/* ★ 2D は中断の口を持たない (DXF / SVG / BinTools に進捗が無い) ので brk を渡さない。
+	 *   ⚠ 代わりに **理由**を受け取る — 「z=0 に居ないから断った」が呼び手に届かないと、
+	 *     利用者には「知らない拡張子」と区別がつかない。 */
+	char web[320]; web[0] = '\0';
+	const bool okWrite = mIn.is_notNull() ? mIn->write_to(p, unitS->get_str(), &brk_)
+	                                      : f2->write_to(p, unitS->get_str(), web, (int)sizeof web);
+	if ( ! okWrite ) {   /* ★ #3503 続き */
+		/* ★ 中断も「書けなかった」として返ってくるので、先に旗を見る。 */
+		if ( (result = oc_abort_err(brk_, "export")) != thNULL ) return;
+		/* ★ #3544 段 3: 幾何側の理由を丸ごと載せるので 256 では切れる。 */
+		char b[512];
+		/* ★ #3544 段 3: 2D は dxf / svg も書ける。3D は図面ではないので出ない。
+		 *   ★ 幾何側が理由を残していれば **それを言う** (形式の一覧より役に立つ)。 */
+		if ( web[0] != '\0' ) {
+			::snprintf(b, sizeof b, "export: cannot write %s — %s", p, web);
+			result = oca_err(thNEW(stdString,(b)));
+			return;
+		}
 #ifdef SRAVA_OCCT_STEP
-		::snprintf(b, sizeof b, "export: cannot write %s (occt supports step/stp/brep)", p);
+		::snprintf(b, sizeof b, "export: cannot write %s (occt writes step/stp/brep%s)", p,
+		           f2.is_notNull() ? "/dxf/svg for a 2D drawing" : "");
 #else
-		::snprintf(b, sizeof b, "export: cannot write %s (this occt build supports brep only)", p);
+		::snprintf(b, sizeof b, "export: cannot write %s (this occt build writes brep%s)", p,
+		           f2.is_notNull() ? "/dxf/svg for a 2D drawing" : "");
 #endif
 		result = oca_err(thNEW(stdString,(b)));
 		return;

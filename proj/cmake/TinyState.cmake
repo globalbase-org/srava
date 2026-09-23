@@ -62,7 +62,14 @@ function(tinystate_codegen CODEGEN_TARGET)
       OUTPUT ${_stamp} ${_gen_priv} ${_gen_pub}
       COMMAND ${STLCPP_CMD} file ${_src} --baseheader=${CMAKE_BINARY_DIR} --header=_ts2
       COMMAND ${CMAKE_COMMAND} -E touch ${_stamp}
-      DEPENDS ${_src}
+      # ★★ 2026-09-22: **道具 (tscpp2) 自身も依存**に入れる。ts2 を入れ替えると tscpp2 は
+      #   新しくなるが .cpp は変わらないので、ここに ${STLCPP_CMD} が無いと **再生成されない**。
+      #   ⚠⚠ 気づけない形で壊れる: ヘッダ側は .o.d 経由で正しく追跡されているので **.o は全部
+      #     作り直される** ⇒ 「新しいヘッダ x 古い生成コード」の木が建ち、**ctest は全部緑**になる。
+      #     (2026-09-22 の実測: tscpp2 を入れ替えた後の make が **.o を 625 個作り直すのに
+      #      codegen は 0 件**。dev-macmini-1 が発見し 3 機で確認した。)
+      #   ★ 較正は make のログの `tscpp2: codegen` を数える — **0 なら異常**。
+      DEPENDS ${_src} ${STLCPP_CMD}
       COMMENT "tscpp2: codegen ${_src}"
     )
     list(APPEND _stamps ${_stamp})

@@ -108,6 +108,7 @@ toAdjustResult(const pipe::CtrlResult& res)
 	out.energy            = res.energy;
 	out.maxClearViolation = res.maxClearViolation;
 	out.feasible          = res.constraintsFeasible ? 1 : 0;
+	out.cancelled         = res.cancelled ? 1 : 0;   /* ★ #3502 */
 	return out;
 }
 
@@ -116,6 +117,7 @@ static pipe::CtrlParams
 makeCtrlParams(const PPAdjustParams& p, int numC)
 {
 	pipe::CtrlParams cp;
+	cp.cancelled = p.cancelled;   /* ★ #3502: 中断の述語をそのまま渡す (空なら中断しない) */
 	cp.dMin    = p.dMin;
 	cp.maxIter = ( p.maxIter > 0 ) ? p.maxIter : 200;
 	cp.wLen    = p.wLen;       /* 張力(弧長)重み。テール張力 ∝ wLen */
@@ -146,7 +148,8 @@ makeCtrlParams(const PPAdjustParams& p, int numC)
 
 /* 設計点(S, C..., E)を平坦 ctrl_xyz にして PPAdjustResult を組む。 */
 static PPAdjustResult
-designToResult(const pipe::ChainDesign& d, int iters, double energy, double maxViol, int feasible)
+designToResult(const pipe::ChainDesign& d, int iters, double energy, double maxViol, int feasible,
+               int cancelled = 0)
 {
 	PPAdjustResult out;
 	auto pushv = [&](const pipe::Vec3& v){
@@ -160,6 +163,7 @@ designToResult(const pipe::ChainDesign& d, int iters, double energy, double maxV
 	out.energy            = energy;
 	out.maxClearViolation = maxViol;
 	out.feasible          = feasible;
+	out.cancelled         = cancelled;   /* ★ #3502 続き: 後段で中断された場合もここに載る */
 	return out;
 }
 
@@ -196,9 +200,16 @@ addCorr(std::vector<pipe::Vec3>& corr, std::vector<int>& cnt, int numDOF,
 /* 射影的分離パス: movableIdx の Body を、検出した接触の **中心線間方向**(gap≈0 でも安定)に
  * 食い込み量(dMin-gap)だけ押し離す。固定 DOF 除外 + ラプラシアン平滑化でキンクを抑える。
  * energy 法(adjust)が苦手な「押し広げ」を担う。戻り = 最終 max clearance violation。 */
+/* ★ #3502 続き: 中断の問い合わせ。述語が無ければ常に false。 */
+static inline bool ppCancelled(const pipe::CtrlParams& cp)
+{
+	return cp.cancelled && cp.cancelled();
+}
+
 static double
 separateScene(pipe::Scene& sc, int mi, const pipe::CtrlParams& cp,
-              int maxOuter, double gain, double lambda, double tension)
+              int maxOuter, double gain, double lambda, double tension,
+              bool *cancelledOut = 0)
 {
 	pipe::ChainDesign& design = sc.bodies[(size_t)mi].design;
 	int m = (int)design.C.size();
@@ -240,6 +251,11 @@ separateScene(pipe::Scene& sc, int mi, const pipe::CtrlParams& cp,
 
 	double maxViol = 0.0;
 	for ( int outer = 0 ; outer < maxOuter ; ++outer ) {
+		/* ★★ #3502 続き (2026-09-07): **ここに中断点が無かった**。energy 法の本体だけを
+		 *   配線して満足していたが、この分離パスは既定 sepIter=600 回まで回る独立した
+		 *   反復で、@c pipe::adjust を通らないので旗を一切見ていなかった。
+		 *   ⇒ 本体が終わった後に Ctrl+C を受けると、ここを最後まで走ってから止まっていた。 */
+		if ( ppCancelled(cp) ) { if ( cancelledOut ) *cancelledOut = true; break; }
 		sc.bodies[(size_t)mi].rebuild();
 		std::vector<pipe::Contact> cs = pipe::findSceneProximities(sc, det);
 		std::vector<pipe::Vec3> corr((size_t)numDOF, pipe::Vec3{0,0,0});
@@ -363,7 +379,7 @@ evalSceneEnergy(pipe::Scene sc, int mi, pipe::CtrlParams cp)
  * 接触の無い区間が自分のスケールで動けない。切り出すと gmax は幾何スケールに戻る。
  * 戻り = ポリッシュ後の max clearance violation。 */
 static double
-polishScene(pipe::Scene& sc, int mi, const pipe::CtrlParams& cp)
+polishScene(pipe::Scene& sc, int mi, const pipe::CtrlParams& cp, bool *cancelledOut = 0)
 {
 	pipe::ChainDesign& design = sc.bodies[(size_t)mi].design;
 	int m = (int)design.C.size();
@@ -453,6 +469,13 @@ polishScene(pipe::Scene& sc, int mi, const pipe::CtrlParams& cp)
 	int i = 1;
 	bool any = false;
 	while ( i <= numDOF - 2 ) {
+		/* ★★ #3502 続き (2026-09-07): **ここも中断点が無かった**。しかもこちらは
+		 *   分離パスより悪い — @c relaxSpan は内部で @c pipe::adjust を呼び、その scp は
+		 *   cp のコピーなので *旗を継承する*。⇒ 中断後は内側の adjust が即座に戻り、
+		 *   **緩和されていない設計をそのまま out へ書き込みながら**貪欲拡張を続けていた。
+		 *   本体が中断されていない (res.cancelled==false) 経路なので、その劣化した結果が
+		 *   **成功として返り、キャッシュに焼き付く**。#3489 / #3498 と同じ形の事故。 */
+		if ( ppCancelled(cp) ) { if ( cancelledOut ) *cancelledOut = true; break; }
 		if ( blocked[(size_t)i] ) { i++; continue; }
 		int lo0 = i;
 		while ( i <= numDOF - 2 && ! blocked[(size_t)i] ) i++;
@@ -505,7 +528,8 @@ std::vector<PPContact>
 pipe_proximity_run(const std::vector<double>& ctrl_xyz, int npts,
                    double r0, double m, const std::vector<double>& radial_sr,
                    double reportGap,
-                   double clampS0, double clampS1, double clampR)
+                   double clampS0, double clampS1, double clampR,
+                   const std::function<bool()>& cancelled, bool *cancelledOut)
 {
 	pipe::ChainDesign design = makeDesign(ctrl_xyz, npts);
 	pipe::Chain chain = design.build();
@@ -514,8 +538,11 @@ pipe_proximity_run(const std::vector<double>& ctrl_xyz, int npts,
 
 	pipe::Params pr;
 	pr.reportGap = reportGap;
+	pr.cancelled = cancelled;   /* ★ #3502 続き */
 
-	std::vector<pipe::Contact> contacts = pipe::findSelfProximities(chain, R, pr);
+	bool cx = false;
+	std::vector<pipe::Contact> contacts = pipe::findSelfProximities(chain, R, pr, 0, &cx);
+	if ( cancelledOut ) *cancelledOut = cx;
 	std::vector<PPContact> out;
 	out.reserve(contacts.size());
 	for ( size_t i = 0 ; i < contacts.size() ; ++i ) out.push_back(toPP(contacts[i]));
@@ -534,6 +561,9 @@ pipe_adjust_run(const std::vector<double>& ctrl_xyz, int npts,
 	                                clampS0, clampS1, clampR);
 	pipe::CtrlParams cp = makeCtrlParams(p, (int)design.C.size());
 	pipe::CtrlResult res = pipe::adjust(design, R, cp);
+	/* ★ #3502: 中断されたら後段 (分離パス / ポリッシュ) へ進まない。
+	 *   途中の設計にさらに手を入れても意味が無いうえ、そこも数百反復ぶん走ってしまう。 */
+	if ( res.cancelled ) return toAdjustResult(res);
 
 	/* energy 法の後に射影的分離パス(押し広げ)→ 接触フリー区間ポリッシュで仕上げる。
 	 * 1 体 Scene に包んで共通処理。 */
@@ -546,14 +576,16 @@ pipe_adjust_run(const std::vector<double>& ctrl_xyz, int npts,
 	b.rebuild();
 	sc.bodies.push_back(b);
 	double mv = res.maxClearViolation;
+	bool postCancelled = false;   /* ★ #3502 続き: 後段での中断 */
 	if ( p.sepEnable )
-		mv = separateScene(sc, 0, cp, p.sepIter, p.sepGain, p.sepLambda, p.sepTension);
-	if ( p.polishEnable ) {
-		double pv = polishScene(sc, 0, cp);
+		mv = separateScene(sc, 0, cp, p.sepIter, p.sepGain, p.sepLambda, p.sepTension,
+		                   &postCancelled);
+	if ( p.polishEnable && ! postCancelled ) {
+		double pv = polishScene(sc, 0, cp, &postCancelled);
 		if ( pv > mv ) mv = pv;
 	}
 	return designToResult(sc.bodies[0].design, res.iters, res.energy, mv,
-	                      res.constraintsFeasible ? 1 : 0);
+	                      res.constraintsFeasible ? 1 : 0, postCancelled ? 1 : 0);
 }
 
 /* PPBody 群 → pipe::Scene。movableIdx の Body だけ半径ゲートを外す(弧長が変わるため)。
@@ -578,12 +610,16 @@ buildScene(const std::vector<PPBody>& bodies, int movableIdx)
 }
 
 std::vector<PPContact>
-pipe_scene_proximity_run(const std::vector<PPBody>& bodies, double reportGap)
+pipe_scene_proximity_run(const std::vector<PPBody>& bodies, double reportGap,
+                         const std::function<bool()>& cancelled, bool *cancelledOut)
 {
 	pipe::Scene sc = buildScene(bodies, /*movableIdx=*/-1);
 	pipe::Params pr;
 	pr.reportGap = reportGap;
-	std::vector<pipe::Contact> contacts = pipe::findSceneProximities(sc, pr);
+	pr.cancelled = cancelled;   /* ★ #3502 続き */
+	bool cx = false;
+	std::vector<pipe::Contact> contacts = pipe::findSceneProximities(sc, pr, 0, &cx);
+	if ( cancelledOut ) *cancelledOut = cx;
 	std::vector<PPContact> out;
 	out.reserve(contacts.size());
 	for ( size_t i = 0 ; i < contacts.size() ; ++i ) out.push_back(toPP(contacts[i]));
@@ -598,27 +634,31 @@ pipe_scene_adjust_run(const std::vector<PPBody>& bodies, int movableIdx,
 	int numC = bodies[movableIdx].npts - 2;
 	pipe::CtrlParams cp = makeCtrlParams(p, numC);
 	pipe::CtrlResult res = pipe::adjustScene(sc, movableIdx, cp);
+	if ( res.cancelled ) return toAdjustResult(res);   /* ★ #3502 (pipe_adjust_run と同じ理由) */
 
 	if ( ! p.sepEnable && ! p.polishEnable ) return toAdjustResult(res);
 	/* energy 法の後に射影的分離パス(押し広げ)→ 接触フリー区間ポリッシュ(固定 body は障害物のまま)。 */
 	sc.bodies[(size_t)movableIdx].design = res.design;
 	sc.bodies[(size_t)movableIdx].rebuild();
 	double mv = res.maxClearViolation;
+	bool postCancelled = false;   /* ★ #3502 続き */
 	if ( p.sepEnable )
-		mv = separateScene(sc, movableIdx, cp, p.sepIter, p.sepGain, p.sepLambda, p.sepTension);
-	if ( p.polishEnable ) {
-		double pv = polishScene(sc, movableIdx, cp);
+		mv = separateScene(sc, movableIdx, cp, p.sepIter, p.sepGain, p.sepLambda, p.sepTension,
+		                   &postCancelled);
+	if ( p.polishEnable && ! postCancelled ) {
+		double pv = polishScene(sc, movableIdx, cp, &postCancelled);
 		if ( pv > mv ) mv = pv;
 	}
 	return designToResult(sc.bodies[(size_t)movableIdx].design, res.iters, res.energy, mv,
-	                      res.constraintsFeasible ? 1 : 0);
+	                      res.constraintsFeasible ? 1 : 0, postCancelled ? 1 : 0);
 }
 
 std::vector<PPSample>
 pipe_sample_run(const std::vector<double>& ctrl_xyz, int npts,
                 double r0, double m, const std::vector<double>& radial_sr,
                 double pitch,
-                double clampS0, double clampS1, double clampR)
+                double clampS0, double clampS1, double clampR,
+                const std::function<bool()>& cancelled, bool *cancelledOut)
 {
 	std::vector<PPSample> out;
 	pipe::ChainDesign design = makeDesign(ctrl_xyz, npts);
@@ -649,6 +689,8 @@ pipe_sample_run(const std::vector<double>& ctrl_xyz, int npts,
 
 	out.reserve(uniq.size());
 	for ( size_t k = 0 ; k < uniq.size() ; ++k ) {
+		/* ★ #3502 続き: サンプル点ごとの境界。1 点あたりの二分法は 50 回で有界。 */
+		if ( cancelled && cancelled() ) { if ( cancelledOut ) *cancelledOut = true; return out; }
 		double s = uniq[k];
 		/* s → (seg, t): segStartS でバケット選択 + arcAt 単調を二分法で逆引き。 */
 		int seg = 0;

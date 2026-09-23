@@ -129,9 +129,9 @@ var clothoid = \(k0, rate, L, segs) {
 
 // ribbon2d(pts, w): 2D 折れ線 pts=[[x,y],…] を **一定幅 w** で太らせた帯領域(丸ジョイント/丸キャップ)。
 //   ビルトイン tube の 2D 版に半幅 w/2 を渡す薄いラッパ(tube は r=半径=半幅・可変幅)。
-//   幅を頂点ごとに変えたいときは tube を直接: tube([[[x,y], r], …])(r が可変半幅)。
+//   幅を頂点ごとに変えたいときは tube を直接: tube_ruled([[[x,y], r], …])(r が可変半幅)。
 //   返りは 2D 塗り領域 → export(".svg"/".dxf") / extrude で 3D 化 / |||/&&&/--- でブール可。
-var ribbon2d = \(pts, w) { tube(map(pts, \(p){ [p, w / 2]; })); };
+var ribbon2d = \(pts, w) { tube_ruled(map(pts, \(p){ [p, w / 2]; })); };
 
 // arclen(pts): 点列 pts=[[x,y(,z)],…] の **頭からの累積弧長** を返す。
 //   返り = [0, |p1-p0|, |p1-p0|+|p2-p1|, …, 全長 L]（length は pts と同じ・先頭 0・末尾 L）。
@@ -149,7 +149,7 @@ var arclen = \(pts){
 //   接線 t̂・弧長微分 r'=dr/ds に対し、[v,r] → [v - ds·r'/√(1+r'²)·t̂,  r + ds/√(1+r'²)]。
 //     r'=0(円筒)なら半径に +ds するだけ。r'≠0(円錐/ラッパ)では中心線を接線方向へ引いて壁を垂直化。
 //   ds を負にすると内側へオフセット(内壁)。path は 2 点以上・節は相異なること。
-//   使い方: difference(tube(tube_wall_var(path, ds)), tube(path)) で肉厚可変シェル。
+//   使い方: difference(tube_ruled(tube_wall_var(path, ds)), tube_ruled(path)) で肉厚可変シェル。
 var tube_wall_var = \(path, ds){
     var n = length(path);
     if ( n < 2 ) { return path; }
@@ -171,5 +171,5 @@ var tube_wall_var = \(path, ds){
 };
 
 // tube_wall(path, d): 一定肉厚 d 版（tube_wall_var に一様 d を渡すだけ）。
-//   difference(tube(tube_wall(path, d)), tube(path)) で肉厚 d 一定のパイプ壁が得られる。
+//   difference(tube_ruled(tube_wall(path, d)), tube_ruled(path)) で肉厚 d 一定のパイプ壁が得られる。
 var tube_wall = \(path, d){ tube_wall_var(path, map(path, \(p){ d; })); };

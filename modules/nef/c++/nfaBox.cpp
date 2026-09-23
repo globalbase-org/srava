@@ -6,8 +6,6 @@
 #include	"pig/c++/pigData.h"
 #include	"nf/c++/nfMesh.h"
 #include	"ts2/c++/stdString.h"
-#include	<CGAL/boost/graph/generators.h>
-#include	<CGAL/Polygon_mesh_processing/triangulate_faces.h>
 #include	"_ts2/c++/nfaBox_.h"
 
 CLASS_TINYSTATE(nf/c++/nfaBox,pig/c++/ptsCalcBody)
@@ -29,7 +27,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -43,7 +41,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -79,15 +77,21 @@ nfaBox_::compute()
 		if ( na > 1 ) h = (*args)[1]->get_flt();
 		if ( na > 2 ) d = (*args)[2]->get_flt();
 	}
+	/* ★ #3516: 退化・負の寸法を弾く (occt / openvdb は元から持っていた検査を揃えた)。
+	 *   ⚠ 弾かないと「体積 0 の立体」や「負を正として扱った立体」が**黙って**下流へ流れる。
+	 *     実測 (2026-09-12): 同じ box(-1,1,1) が nef=1 / cgal=-1 / manifold=0 / geogram=1 と
+	 *     カーネルごとに違う値になり、nef は box(1,1,0) で **SIGSEGV** していた
+	 *     (CGAL の SNC 構築が厚みゼロの面で落ちる。例外ではないので呼び手では受けられない)。
+	 *   ★ boxa も同じクラスが受けるので、ここ 1 箇所で両方に効く。 */
+	if ( !(w > 0) || !(h > 0) || !(d > 0) ) {
+		result = nfa_err(thNEW(stdString,("box: sizes must be > 0")));
+		return;
+	}
 
-	nfMesh::Mesh m;
-	typedef nfMesh::Point_3 P;
-	CGAL::make_hexahedron(
-	    P(0,0,0), P(w,0,0), P(w,h,0), P(0,h,0),
-	    P(0,0,d), P(w,0,d), P(w,h,d), P(0,h,d), m);
-	CGAL::Polygon_mesh_processing::triangulate_faces(m);
-	mesh = thNEW(nfMesh,());
-	mesh->set_from_mesh(m);   /* 境界 → Nef (SNC 構築) */
+	/* ★ #3535②: 構成は 幾何ライブラリ側 (nfNefMesh::build_box)。
+	 *   ⚠ ここで CGAL に触ると可変大域状態の実体がこの .so にもできる。 */
+	mesh = thNEW(NF_MESH,());
+	mesh->build_box(w, h, d);
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

@@ -56,7 +56,70 @@ enum {
 	EXEC_REMOTE  = 1 << 2,   /* 将来: リモートノード */
 };
 
-#define SRAVA_MODULE_ABI 21   /* 記述子 ABI 版。dlopen 時に不一致なら拒否。 v21: 復号を拒んだ理由の配線 (#3479)。
+#define SRAVA_MODULE_ABI 33   /* 記述子 ABI 版。dlopen 時に不一致なら拒否。
+                              * v33: **pigData に is_int() / is_flt() が増えた** (ひさ設計 2026-09-21)。
+                              *     記述子は 1 バイトも変わらないが、*基底のレイアウト* (vtable) が
+                              *     変わるので上げる。⚠ pigData はすべての本体クラスの祖先なので、
+                              *     古い .so を新しい libpig に載せると **dlopen は成功して実行時に
+                              *     別の関数を呼ぶ** (v29 / v31 と同じ形)。部分ビルドを許さないために
+                              *     版で止める。
+                              * v32: #3554 段 2 — **pigOpEntry の末尾に match が増えた** (AK_MATCH)。
+                              *     行 (`op` / `op#変種`) が *引数の値の中身*を見て選ばれるようにする器。
+                              *     ⚠ OPS[] は位置指定初期化子なので **末尾に足した** (途中に挿すと
+                              *     静かにずれる)。既存の行は match=0 = 無条件のままで意味が変わらない。
+                              * v31: #3545 段 2 — **cgMesh3D / cgMesh2D の中身が不透明な箱へ移った**。
+                              *     @c Mesh m_ → @c cgMesh3DBox *box_ ・ @c regions_ / @c guides_ →
+                              *     @c cgMesh2DBox *box_ なので **両クラスのレイアウトが変わる**。
+                              *     ⚠ cgMesh.h を include しているのは cgal.so だけではない
+                              *     (srava_cg / nef_cg / openvdb_cg) — v29 と同じ形。部分ビルドは
+                              *     dlopen が成功して **実行時に SIGSEGV**。
+                              * v30: #3545 段 1 — nfMesh が @c Nef を値で持つのをやめ、不透明な
+                              *     @c nfNefBox * になった (nef_snc / nef_hybrid / nef_cg / nef_mf)。
+                              * v29: #3525 — **cgMesh3D に順序つき片リスト (partEnd_) が増えた**。
+                              *     記述子は不変だが *共有される幾何クラスのレイアウトが変わる* ので上げる。
+                              *     ⚠ cgMesh.h を include しているのは cgal.so だけではない
+                              *     (srava_cg / nef_cg / openvdb_cg)。片方だけ建て直すと dlopen は
+                              *     成功して **実行時に SIGSEGV** — v26 / v28 で実際に踏んだ形と同じ。
+                              * v28: #3533 — **2D 領域の型が 2 つに割れた** (cg-cross2d / cg-face3d ・
+                              *     mf-cross2d / mf-face3d)。どちらの実体クラスにも「face3d か」を
+                              *     持つビット (placed_) が 1 つ増えるので、**cgMesh2D と mfCross の
+                              *     レイアウトが両方変わる**。⇒ v26 (cgMesh2D) と v27 (mfCross) で
+                              *     踏んだ形の両方に当たる: cg 側は nef_cg / openvdb_cg、mf 側は
+                              *     nef_mf / occt_mf / openvdb_mf も include している。
+                              *     ⚠ 部分ビルドは dlopen が成功して **実行時に SIGSEGV**。
+                              * v27: #3529 — **mfCross の真実が輪郭列になった** (Polygons p_ と
+                              *     遅延構築の旗が増え、CrossSection c_ は派生に降りた)。
+                              *     記述子は不変だが *共有される幾何クラスのレイアウトが変わる*。
+                              *     ⚠ v25 で実際に踏んだ形と同じ — mfMesh.h は manifold だけでなく
+                              *     nef_mf / occt_mf / openvdb_mf も include しており、とくに
+                              *     occt_mf の polygonize は mfCross を **自分で構築する**
+                              *     (ocmPolygonize.cpp)。片方だけ建て直すと dlopen は成功して
+                              *     実行時に SIGSEGV になる。
+                              * v26: #3526 — **cgMesh2D にも枠 (frame) が増えた** (manifold に続いて cgal)。
+                              *     v25 と同じ理由: 記述子は不変だが共有幾何クラスのレイアウトが変わる。
+                              *     ⚠ cg-cross2d を触る .so は nef_cg / openvdb_cg もあるので、
+                              *     cgal.so だけ建て直すと v25 で踏んだ SIGSEGV と同じ形になる。
+                              * v25: #3526 — **mfCross (2D) に枠 (frame) が増えた**。記述子は不変だが
+                              *     *共有される幾何クラスのレイアウトが変わる* ので版を上げる。
+                              *     ⚠ 実際に踏んだ: manifold.so だけ建て直して occt_mf.so を古いまま
+                              *     残したら、polygonize が mfCross を旧レイアウトで構築して
+                              *     **SIGSEGV** になった (dlopen は成功する)。v22 と同じ形。
+                              * v24: in-proc の abort 猶予 panic_ms を追加 (#3503)。grace_ms と対。
+                              *     ⚠ v23 は本ブランチの外へ出ていないが、**レイアウトが変わったら
+                              *     版を上げる**という規約はそのまま適用する (古い .so を新しい host で
+                              *     開くと dlopen は成功して実行時に壊れるため)。
+                              * v23: 撤収の猶予 grace_ms を追加 (#3503)。記述子のレイアウトが変わる。
+                              *     未指定は 0 = 従来どおり即 kill なので、既存モジュールの挙動は不変。
+                              * v22: 走行中の中断 (#3498)。記述子は不変だが、**モジュールの calc が派生する
+                              *     基底 ptsCalcBody にメンバ (pigBreak brk_) が増え、destroy() の override も
+                              *     入った** ので、古い .so を新しい host で開くとレイアウトも vtable も食い違う。
+                              *     ⚠ これを上げ忘れると **dlopen は成功して実行時に SIGSEGV** になる
+                              *     (実際に踏んだ: 先にビルドしてあった occt/openvdb の .so が古い
+                              *     ptsCalcBody のレイアウトを持ったまま新しい host に開かれ、
+                              *     stdmath / affine / meshprops など 300 本超が agent の SIGSEGV で落ちた)。
+                              *     ★v21 と同じ理由 — 記述子の形が同じでも、共有する基底のレイアウトが
+                              *     変わったら版を上げる。
+                              * v21: 復号を拒んだ理由の配線 (#3479)。
                               *     記述子そのものは不変だが、**モジュールが派生する基底クラス
                               *     ptsWireCacheStreamReader にメンバ (errWhy) が増えた** ので、
                               *     古い .so を新しい host で開くとレイアウトが食い違う。
@@ -183,6 +246,49 @@ struct srava_module_descriptor {
 	 * ★ capability (op ごとの N・**正しさ**の上限) と policy (モジュールごとの N'・**つまみ**) の
 	 *   分離がこの設計の核。N' は「最大」であって「固定」ではない (docs §5.2)。 */
 	int               arity;
+
+	/* ★★ #3503 (ひさ設計 2026-09-07): **撤収の猶予** (ミリ秒)。プロセス実行の agent を
+	 * 畳むときに、EOF (graceful) を撃ってから SIGKILL までどれだけ待つか。
+	 *
+	 *     0    即 kill (#3417 6.2 の現行どおり)
+	 *   > 0    EOF → この時間だけ待つ → 応答が無ければ kill    推奨 500
+	 *   = -1   EOF のみ。タイマを張らない
+	 *          (**必ず自分で畳まれる**と宣言したモジュールだけ)
+	 *
+	 * ★ **未指定 = 0 = 現行の挙動**。記述子は designated initializer で書かれているので、
+	 *   このフィールドを足しても既存モジュールはゼロ初期化され、挙動が変わらない。
+	 *   ⇒ 書き忘れが事故にならない (安全側が黙って既定になる)。
+	 *
+	 * ⚠ **-1 を名乗れるのは全 op・全経路が中断要求を見るモジュールだけ**。止まらない経路が
+	 *   1 つでもあると Ctrl+C で永久ハングし、そこから抜ける手は planner を別端末から殺すこと
+	 *   だけ = agent の居残り (#3417 が潰したもの) に戻る。
+	 *   ⚠ 「op を配線した」ではなく「**その op の全経路**を配線した」で判断すること —
+	 *     #3502 では主経路だけ配線して後段 (分離パス / ポリッシュ) が残っていた。
+	 * ⚠ 逆に > 0 なら申告が間違っていても **代償は遅延だけ**で正しさは失われない。
+	 *   迷ったらこちら。
+	 *
+	 * ⚠ **効くのはプロセス実行のときだけ**。in-proc (ptsMediatorInternal) には kill 経路が
+	 *   そもそも無い。
+	 * ★ module(so,{grace:N}) と env SRAVA_AGENT_GRACE_MS で上書きできる。 */
+	int               grace_ms;
+
+	/* ★★ #3503: **in-proc で居座ったときに planner を abort するまでの猶予** (ミリ秒)。
+	 *
+	 *     <= 0   無効 (既定)。応じなければ planner は待ち続ける
+	 *   >  0     この時間だけ待って、応じなければ planner が abort する
+	 *
+	 * ★ grace_ms と **対**。同じモジュールでも実行方式で使う口が変わる —
+	 *   exec_caps に THREAD|PROCESS の両方を立てたモジュールは、process で走れば
+	 *   grace_ms (SIGKILL までの猶予)、in-proc で走れば panic_ms (abort までの猶予) を使う。
+	 *   ⇒ 口が片方しか無いと、実行方式を変えた途端に設定が効かなくなる (ひさ指摘 2026-09-07)。
+	 *
+	 * ⚠ **grace_ms と同じ値にしない**のが普通。代償が違う — process なら猶予切れで失うのは
+	 *   agent 1 つだが、in-proc は **planner ごと落ちてセッション全体**(まだ保存していない
+	 *   全結果) を失う。「畳んでほしい budget」(数百 ms) と「もう畳まれないという判定」
+	 *   (数秒) は別物。
+	 * ⚠ grace_ms = -1 (必ず自分で畳まれると宣言) のモジュールは panic しない。
+	 * ★ module(so,{panic:N}) と env SRAVA_INPROC_PANIC_MS で上書きできる。 */
+	int               panic_ms;
 
 	/* ★ モジュール全体の初期化 (§7)。**そのモジュールの最初の agent が起きるときに 1 回だけ**
 	 * 呼ばれる。TBB の global_control のように「プロセスに 1 度だけ」設定したいものを置く。

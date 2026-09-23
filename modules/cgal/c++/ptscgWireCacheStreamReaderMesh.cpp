@@ -13,7 +13,7 @@
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsApp 値メンバの完全型(ptsObject.h から移動・#3406 4.2) */
 #include	"pig/c++/pigwire.h"
-#include	"cg/c++/cgMesh.h"
+#include	"cg/c++/cgMeshCgal.h"
 #include	"cg/c++/cgaMeshCodec.h"
 #include	"_ts2/c++/ptscgWireCacheStreamReaderMesh_.h"
 

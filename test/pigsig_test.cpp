@@ -97,6 +97,43 @@ main(void)
 	ck( matches("[a](4)->a", "a,a,a,a"),   "fold N=4 ちょうど");
 	ck(!matches("[a](4)->a", "a,a,a,a,a"), "fold N=4 は 5 項を受けない");
 
+	/* ── ★★ §3.3 "(N!)" = 主型で振り分けるが **木に分解しない** (#3528・2026-09-13) ── */
+	/*   「主型で振り分ける」と「分解してよい」は独立した 2 つの性質だった。hull がその含意の
+	 *   成り立たない最初の例 (入力から頂点しか使わないので分解は損で、しかも退化検査が
+	 *   部分集合について閉じていないため群が同一平面になると落ちる)。 */
+	parse_sigline("[cg-mesh3d,mf-mesh3d](*!)->cg-mesh3d", L);
+	ck(!L.bad && L.kind == SK_FOLD && L.arity == -1 && L.nosplit
+	   && L.set.size() == 2 && L.out == "cg-mesh3d", "(*!) parse = fold 形 + 分解禁止");
+	parse_sigline("[gg-mesh3d,mf-mesh3d](32!)->gg-mesh3d", L);
+	ck(!L.bad && L.kind == SK_FOLD && L.arity == 32 && L.nosplit, "(N!) は N と併記できる");
+	parse_sigline("[cg-mesh3d,mf-mesh3d](*)->cg-mesh3d", L);
+	ck(!L.bad && ! L.nosplit, "印なしは従来どおり (分解可)");
+	parse_sigline("[a,b](!)->a", L);
+	ck(L.bad, "N の無い \"(!)\" は文法違反");
+	/* ★ 照合規則は印で変わらない — 分解の可否だけが違う。 */
+	ck( matches("[cg-mesh3d,mf-mesh3d](*!)->cg-mesh3d", "cg-mesh3d,mf-mesh3d"), "(*!) の照合は (*) と同じ");
+	ck(!matches("[cg-mesh3d,mf-mesh3d](*!)->cg-mesh3d", "mf-mesh3d,mf-mesh3d"), "(*!) でも主型は要る");
+
+	/* ── ★★ §3.4 "[]" = **cache の配列 1 個でも渡せる** (#3511・2026-09-13) ───────── */
+	/*   展開は評価時 (pigfModuleAgent::try_shortcircuit の頭) で、分解は dispatch 時。
+	 *   ⇒ 段が違うので "[]" と "(N!)" は **独立に働く**。 */
+	parse_sigline("{mf-cross2d}...[]->mf-mesh3d", L);
+	ck(!L.bad && L.kind == SK_REPEAT && L.array_ok && L.set.size() == 1
+	   && L.out == "mf-mesh3d", "繰り返し形 + [] parse (loft_ruled の形)");
+	parse_sigline("{mf-cross2d}...->mf-mesh3d", L);
+	ck(!L.bad && L.kind == SK_REPEAT && ! L.array_ok, "[] が無ければ配列は受けない");
+	/* ⚠ 糖衣 "T..." は **外括弧が要る** (可変部を外括弧なしで書けるのは "[…]" "{…}" で
+	 *   始まる形だけ)。実測で踏んだので形ごと固定しておく。 */
+	parse_sigline("(cg-cross2d...[])->cg-mesh3d", L);
+	ck(!L.bad && L.kind == SK_REPEAT && L.array_ok && L.set.size() == 1
+	   && L.set[0] == "cg-cross2d", "糖衣 \"T...[]\" も同じ");
+	/* ★★ 2026-09-14 (bench↔dev-macmini-1 の同期): **併記が parse できる**ことだけ固定する。
+	 *   いまどの sig 行も併記していないが、どちらかの剥がし方を直したときに黙って壊れるのを防ぐ
+	 *   (剥がす順は "[]" が先・"(N!)" の '!' が後。依存は無い)。 */
+	parse_sigline("[cg-cross2d,mf-cross2d,pt-cloud2d](*!)[]->cg-cross2d", L);
+	ck(!L.bad && L.kind == SK_FOLD && L.arity == -1 && L.nosplit && L.array_ok
+	   && L.set.size() == 3 && L.out == "cg-cross2d", "★ (N!) と [] は併記できる");
+
 	/* ★★ §4.3 規則 3: 主型 (set[0]) が最低 1 個 = disjoint 原則を記法に埋めたもの。 */
 	ck( matches(CG, "cg-mesh3d,cg-mesh3d"), "主型のみ");
 	ck( matches(CG, "cg-mesh3d,mf-mesh3d"), "主型 + foreign");

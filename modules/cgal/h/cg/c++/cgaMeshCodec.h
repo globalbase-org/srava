@@ -33,6 +33,7 @@
 #include	<cstddef>
 #include	<optional>
 #include	<stdint.h>
+#include	<string.h>   /* ★ #3526: put_f64/get_f64 の memcpy */
 
 namespace cgaMeshCodec {
 
@@ -42,6 +43,16 @@ template<class Sink>
 inline void put_u32(Sink& sink, uint32_t v) {
 	uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) };
 	sink.chunk(b, 4);
+}
+/* ★ #3526: 生の double を 8 バイト little-endian で。**枠 (frame) 専用**。
+ *   ⚠ 座標 (put_coord) は厳密な有理数の文字列で書く規約なので混ぜないこと。枠は正規化に
+ *     sqrt が要るので原理的に厳密にできず、double で持つと決めてある (cgMesh.h の但し書き)。
+ *   ⚠ 端の表現 (big-endian 機) は他の raw-double 節 (mf の 2D/3D) と同じ前提に乗る。 */
+template<class Sink>
+inline void put_f64(Sink& sink, double v) {
+	uint8_t b[8];
+	::memcpy(b, &v, 8);
+	sink.chunk(b, 8);
 }
 template<class Sink, class FT>
 inline void put_coord(Sink& sink, const FT& c) {
@@ -95,6 +106,15 @@ inline uint32_t get_u32(Source& src) {
 	src.pull(b, 4);
 	return (uint32_t)b[0] | ((uint32_t)b[1] << 8)
 	     | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+/* ★ #3526: put_f64 の対。 */
+template<class Source>
+inline double get_f64(Source& src) {
+	uint8_t b[8];
+	src.pull(b, 8);
+	double v;
+	::memcpy(&v, b, 8);
+	return v;
 }
 template<class Source, class FT>
 inline FT get_coord(Source& src) {

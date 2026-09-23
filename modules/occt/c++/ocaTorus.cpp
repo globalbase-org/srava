@@ -11,11 +11,6 @@
 #include	"oc/c++/ocShape.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ocaTorus_.h"
-#include	<BRepPrimAPI_MakeTorus.hxx>
-#include	<gp_Ax2.hxx>
-#include	<gp_Pnt.hxx>
-#include	<gp_Dir.hxx>
-#include	<TopoDS_Shape.hxx>
 
 CLASS_TINYSTATE(oc/c++/ocaTorus,pig/c++/ptsCalcBody)
 
@@ -75,6 +70,9 @@ ocaTorus_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	double R = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double r = ( na > 1 ) ? (*args)[1]->get_flt() : 0.25;
+	/* ★ #3570 段3: segs の引数そのものを撤去した (記述子の nin を減らした) ので、
+	 *   ここに在った #3530 の「受けるが無視し、検査はする」は **届かなくなった**。
+	 *   原則が「そのモジュールで必要のない引数は撤去する」に変わったため。 */
 	if ( !(R > 0) || !(r > 0) ) {
 		result = oca_err(thNEW(stdString,("torus: R and r must be > 0")));
 		return;
@@ -85,16 +83,15 @@ ocaTorus_::compute()
 		return;
 	}
 	/* 原点中心・軸は +Z (穴が Z 方向に空く)。 */
-	gp_Ax2 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
-	BRepPrimAPI_MakeTorus mk(ax, R, r);
-	/* ★ プリミティブは遅延構築。IsDone() は立たないので IsNull() で見る (ocaBox と同じ罠)。 */
-	TopoDS_Shape sh = mk.Shape();
-	if ( sh.IsNull() ) {
-		result = oca_err(thNEW(stdString,("torus: OCCT produced a null shape")));
+	/* ★ #3545 段 5: 幾何の組み立ては **幾何 lib 側** (ocShape::make_torus)。
+	 *   ⇒ この TU は OCCT を触らない — 触ると投げうる inline を通っただけで
+	 *     RTTI の型インスタンスが .o に出る (ocShape.h の注記)。 */
+	char why[320]; why[0] = '\0';
+	out = ocShape::make_torus(R, r, why, (int)sizeof why);
+	if ( ! out.is_notNull() ) {
+		result = oca_err(thNEW(stdString,( why[0] ? why : "torus: failed" )));
 		return;
 	}
-	out = thNEW(ocShape,());
-	out->set_shape(sh);
 }
 
 sPtr<pigData>

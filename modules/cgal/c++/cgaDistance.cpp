@@ -67,6 +67,6 @@ cgaDistance_::compute()
 		return;
 	}
 	double pa[3], pb[3];
-	double d = a->op_proximity(*b.__get(), false, pa, pb);
+	double d = a->op_proximity(b, false, pa, pb);
 	result = thNEW(pigDataFloat,(d));
 }

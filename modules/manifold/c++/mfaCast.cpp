@@ -13,6 +13,7 @@
 #include	"mf/c++/mfMesh.h"
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	<cstring>
 #include	"_ts2/c++/mfaCast_.h"
 
 CLASS_TINYSTATE(mf/c++/mfaCast,pig/c++/ptsCalcBody)
@@ -76,6 +77,31 @@ mfaCast_::compute()
 		return;
 	}
 	mesh = in;   /* identity(mfMesh/mfCross 共通・既に Manifold)。cg→mf downgrade は reader が有理数→double 化して渡す */
+
+	/* ★★ #3533 規約②: **降格 (mf-face3d → mf-cross2d) だけは identity ではない** (cgaCast と対。
+	 *   ⚠ 片方だけ直さないこと)。「空間に置かれた 2D」を「z=0 の簡易表現」と名乗り直す操作
+	 *   なので、*本当に z=0 に居るとき* しか許さない ⇒ @frame_is_default()@ が偽なら明示エラー。
+	 *   幾何は 1 ミリも動かさない (傾いたものを落とすのは #3534 の project_flatten)。 */
+	sPtr<mfCross> c2 = sPtr<mfCross>::d_cast(in);
+	if ( c2.is_notNull() && na > 0 ) {
+		sPtr<pigData> tv = (*args)[0];
+		const char *tname = ( tv.is_notNull() && tv->get_str() != thNULL )
+		                  ? tv->get_str()->get_str() : "";
+		if ( ::strcmp(tname, "mf-cross2d") == 0 && c2->is_placed() ) {
+			if ( ! c2->frame_is_default() ) {
+				result = mfa_err(thNEW(stdString,(
+				    "cast: this 2D region is placed on another plane, so it cannot be named "
+				    "\"mf-cross2d\" (the z=0 representation); cast never moves geometry — "
+				    "use project_flatten(...) to drop it onto z=0, or transform it back first")));
+				mesh = thNULL;
+				return;
+			}
+			/* 幾何はそのまま・**名乗りだけ**下げる (共有されうる値なので複製する)。 */
+			sPtr<mfCross> out = thNEW(mfCross,(c2->polys()));
+			out->set_placed(0);
+			mesh = sPtr<mfGeom>::d_cast(out);
+		}
+	}
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

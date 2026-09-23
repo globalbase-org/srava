@@ -10,7 +10,13 @@
  *   3. srava のグレースフル終了(exit 130 = 128+SIGINT)を待つ。ハングなら失敗
  * env(SRAVA_SOURCE / SRAVA_AGENT / SRAVA_CACHE_DIR / PIG_TEST_SLOW)は継承して srava へ渡す。
  *
- * 使い方: win_sigbreak <srava.exe> [pre_break_ms(既定 600)]
+ * 使い方: win_sigbreak <srava.exe> [pre_break_ms(既定 600)] [event: b|c(既定 b)]
+ *
+ * ★ 第 3 引数 (2026-09-15・#3520/#3542):
+ *     b = CTRL_BREAK_EVENT (既定)  … 「Ctrl+C を無視」状態の**対象外**なので常に届く
+ *     c = CTRL_C_EVENT             … CREATE_NEW_PROCESS_GROUP では **既定で無効**。子が
+ *                                    SetConsoleCtrlHandler(NULL, FALSE) で解除して初めて届く
+ *   ⇒ b と c の**撃ち分けが、その解除が入っているかの判定**になる (tinyState #3542)。
  */
 #include <windows.h>
 #include <stdio.h>
@@ -21,6 +27,9 @@ main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: win_sigbreak <srava.exe> [ms]\n"); return 2; }
     DWORD ms = (argc >= 3) ? (DWORD)atoi(argv[2]) : 600;
+    /* 既定は CTRL_BREAK (既存の呼び出し側は 2 引数なので挙動不変)。 */
+    DWORD ev = (argc >= 4 && (argv[3][0] == 'c' || argv[3][0] == 'C'))
+                 ? CTRL_C_EVENT : CTRL_BREAK_EVENT;
 
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
@@ -37,12 +46,13 @@ main(int argc, char **argv)
     }
 
     Sleep(ms);   /* srava が評価中(in-flight agent 有)になるまで待つ */
-    if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId))
+    if (!GenerateConsoleCtrlEvent(ev, pi.dwProcessId))
         fprintf(stderr, "win_sigbreak: GenerateConsoleCtrlEvent failed %lu\n", GetLastError());
 
     DWORD w = WaitForSingleObject(pi.hProcess, 15000);
     if (w == WAIT_TIMEOUT) {
-        fprintf(stderr, "win_sigbreak: srava HUNG (no graceful shutdown)\n");
+        fprintf(stderr, "win_sigbreak: srava HUNG (no graceful shutdown) event=%s\n",
+                (ev == CTRL_C_EVENT) ? "CTRL_C" : "CTRL_BREAK");
         TerminateProcess(pi.hProcess, 99);
         return 3;
     }

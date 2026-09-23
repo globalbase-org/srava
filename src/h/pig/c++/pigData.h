@@ -97,6 +97,7 @@ protected:
 
 class pigDataArray;   /* obt_array() の戻り型 (前方宣言。実体は下で定義) */
 class pigDataHash;    /* obt_hash()  の戻り型 */
+class pigDataTryCatch;   /* ★ #3482: try/catch 文のノード。env が **生ポインタ**で 1 本持つ */
 
 class pigData : public stdObject {
 public:
@@ -107,6 +108,13 @@ public:
   /* 致命エラーか (planner が in-flight agent を即撤収するか drain するかの判断)。
    * is_error と対の多態述語 (pigDataError が override)。 */
   virtual int is_fatal() { return 0; }
+  /* ★ #3503: in-proc の実行体が destroy に応じない要求 (PE_PANIC)。基底は偽。 */
+  virtual int is_panic() { return 0; }
+  /* ★★ #3482: **前段のエラーの写し / 依頼された撤収の跡** (PE_DERIVED)。基底は偽。
+   *   「これは新しい失敗ではない」という印で、**集約・報告・終了コードから外す**ための述語。
+   *   例: try の catch が destroy() で畳んだ agent は「失敗した」のではなく「畳まれた」。
+   *   ⚠ is_fatal / is_panic と同じく **compact 済みの値に対して**聞く (遅延ノードは委譲しない)。 */
+  virtual int is_derived() { return 0; }
   /* エラーの **生メッセージ** (前置なし)。ワイヤ/表示の整形をしない素の本文で、pigDataError が
    * override して msg を返す。既定は get_str()。d_cast を使わず多態で取るための述語対
    * (is_cache と同じ流儀。#3406 / 2026-07-30 メモ L651: Mediator が符号化に使う)。
@@ -198,6 +206,23 @@ public:
    * 遅延ノード(pigDataDelay)は compact() ゲート、pigDataCache のみ真。 */
   virtual int is_cache() { return 0; }
 
+  /* ★★ 2026-09-21 (ひさ設計): **その値が「整数として書かれたか / 浮動小数点として書かれたか」**。
+   *   is_cache() と同じ族の述語 — d_cast を使わずに多態で分岐し、遅延ノードは compact() ゲート。
+   *
+   *   ⚠ get_int() / get_flt() では答えられない。どちらも **値を返してしまう**ので、3 と 3.0 が
+   *     区別できない。「いくつか」ではなく「どう書かれたか」を訊きたいときがある:
+   *       points の rand(a,b,n,seed) … a と b が両方 **整数で書かれていたら** 整数乱数
+   *   ★ 書かれ方は wire を越えて保たれる (serialize() が float に必ず小数点を付け、
+   *     pig_value_parse がそれを読み戻す) ので、process 経路でも in-proc でも同じ答えになる。
+   *
+   *   ⚠ **両方偽がありうる** — 文字列・配列・ハッシュ・null・cache ハンドルは数ではない。
+   *     「is_int でない ⇒ is_flt」と読まないこと。数かどうかは `is_int() || is_flt()`。
+   *   ⚠ 文字列 "3" は **偽**。get_int() は 3 を返すが、*整数として書かれてはいない*。
+   *     文字列から数を作るのは float() / int() の仕事で、その結果は数の値になる。
+   *   ★ inf / nan は pigDataFloat なので is_flt() が真 (浮動小数点として書かれている)。 */
+  virtual int is_int() { return 0; }
+  virtual int is_flt() { return 0; }
+
   /* ★ rev4 型ディスパッチ (§9・Phase A): この値の **cacheable 本体型名** (実装型・タグと 1:1)。
    *   ★ P2e: 旧 get_module_tag (カーネル軸: 値の所属 module を返す) は撤去。routing は型軸 (type_name)。
    *   既定 = **0 (untyped 番兵)**: 値 (TEXT)・不透明参照 (D_REF) 等の「型を持たない/変換不能」な
@@ -264,6 +289,16 @@ public:
   pigDataNull(sPtr<pigInfo> i = thNULL) : pigData(i) {}
   virtual sPtr<stdString> get_str();
   virtual sPtr<stdString> serialize();   /* "null" */
+  /* ★★ #3567 (ひさ 2026-09-21): **null 同士だけ** PIG_EQ。他はすべて PIG_INCOMP のまま。
+   *   ⇒ `x == null` が書けるようになる一方、`null == 0` は false のまま・`null < 0` は
+   *     従来どおり "incomparable types" のエラーで落ちる (INCOMP は **型違いの比較**全般を
+   *     担っていて、"1" == 1 が false なのも同じ仕掛け ⇒ そこは触らない)。
+   *   ★ 副作用: `null < null` は EQ 経由で **false**、`null <= null` は **true** になる
+   *     (以前は両方エラー)。null を順序に並べたいわけではないが、EQ を返す以上は一貫する。
+   *   ⚠ #3555 の `nreq` で省略された末尾を null で埋めるので、body 側が「省略された」を
+   *     0 や "" と **区別して** 読めることがこの 1 本に懸かっている ⇒ 真偽だけでは混ざる。 */
+  virtual int cmp(sPtr<pigData> o)
+  { return sPtr<pigDataNull>::d_cast(o).is_notNull() ? PIG_EQ : PIG_INCOMP; }
 };
 
 /* エラーは吸収元: あらゆる演算で自分を返す。各演算から is_error() 分岐を排除するための要。 */
@@ -275,7 +310,12 @@ public:
 enum pigErrClass {
   PE_NORMAL  = 0,   /* 既定。幾何の失敗等 -> drain (走り出した計算は完走させる)      */
   PE_FATAL   = 1,   /* 確定的なプログラム/型エラー -> in-flight agent を即撤収  [FATAL]   */
-  PE_DERIVED = 2    /* 前段のエラーの写し (プレースホルダ)。集約しない          [DERIVED] */
+  PE_DERIVED = 2,   /* 前段のエラーの写し (プレースホルダ)。集約しない          [DERIVED] */
+  /* ★ #3503: in-proc の実行体が destroy に応じない。**planner が abort する要求**で、
+   * 幾何の失敗ではない。撤収そのものは PE_FATAL と同じく即時だが、行き着く先が違う —
+   * 子プロセスを持つ agent が 0 になった時点で planner が abort する (ptsMediatorInternal /
+   * cgptsPlanner の WAITAGENTS)。⚠ 殺せるスレッドが無いので、これ以外に抜ける道が無い。 */
+  PE_PANIC   = 3
 };
 
 /* 属性タグの文字列。★ 属性を **文言に載せる**のは wire を跨げる唯一の手段だから
@@ -302,10 +342,23 @@ public:
   /* ★ 「前段の fatal の写し」は PE_DERIVED なので **偽**を返す。撤収は原因側が既に起動して
    *   いるので、写し側が重ねて起動する必要はない (set_agentError の wake-all を二重に撃たない
    *   という既存の作法と一致する)。 */
-  virtual int is_fatal() { return cls_ == PE_FATAL; }
+  /* ★ #3503: PE_PANIC も **待つ意味が無い**点では PE_FATAL と同じなので真を返す
+   *   (in-flight agent の即撤収に乗せる)。行き着く先だけが違う — planner が
+   *   子プロセスを持つ agent の消滅を待って abort する。 */
+  virtual int is_fatal() { return cls_ == PE_FATAL || cls_ == PE_PANIC; }
+  virtual int is_panic() { return cls_ == PE_PANIC; }
+  virtual int is_derived() { return cls_ == PE_DERIVED; }
   int err_class() { return cls_; }
   virtual sPtr<stdString> get_str();
   sPtr<stdString> message() { return msg; }
+  /* ★★ #3482: **中身をハッシュにする** (catch 内の error() が返す形)。
+   *   { message: 文言(タグ抜き), class: "normal"|"fatal"|"derived"|"panic",
+   *     file: ソース名, line: 行番号 }
+   *   ⇒ この 4 つで pigDataError は完全に復元できる (モジュール名は message に畳まれている
+   *     = #3475 の「[TAG] module/op: message」の組み立てが ctor 1 箇所という規約をそのまま使う)。
+   * ★ 逆向きは pig_err_from_hash。**往復はこの 2 つだけが知っている** — 片方だけ直すと
+   *   `throw error();` が黙って別のエラーになるので、鍵の名前も含めてここで対にしておく。 */
+  sPtr<pigData> to_hash();
   /* ★ 位置前置き (ERROR[file,line]) の無いメッセージ。**[TAG] は含む** —
    *   これが wire を渡る文字列そのもので、受け側はタグを見て属性を復元する。 */
   virtual sPtr<stdString> error_message() { return msg; }
@@ -337,6 +390,12 @@ protected:
   int cls_;        /* pigErrClass */
 };
 
+/* ★★ #3482: pigDataError::to_hash() の逆。ハッシュから pigDataError を **復元**する。
+ *   復元できない値 (0・非ハッシュ・message 欠け) を渡されたら、
+ *   **「復元できない」という pigDataError** を返す (呼び手はどちらもそのまま伝播させればよい)。
+ *   fallbackInfo … ハッシュが位置を持たないときに使う位置 (throw 文の位置)。 */
+sPtr<pigData> pig_err_from_hash(sPtr<pigData> h, sPtr<pigInfo> fallbackInfo = thNULL);
+
 /* 制御フロー信号: return / break / continue。pigDataError を継承し、あらゆる演算を吸収して
  * 評価チェーンを上方に伝播する(エラーと同じ性質)。while/関数の評価器が control_kind() で捕捉し、
  * 捕捉されずループ/関数の外に出ると msg がそのまま表示される("break outside loop" 等)。 */
@@ -360,6 +419,7 @@ protected:
 class pigDataInteger : public pigData {
 public:
   pigDataInteger(INTEGER64 v, sPtr<pigInfo> i = thNULL) : pigData(i), d(v) {}
+  virtual int       is_int()   { return 1; }
   virtual INTEGER64 get_int()  { return d; }
   virtual double    get_flt()  { return (double)d; }
   virtual int       get_bool() { return d != 0; }
@@ -391,6 +451,7 @@ protected:
 class pigDataFloat : public pigData {
 public:
   pigDataFloat(double v, sPtr<pigInfo> i = thNULL) : pigData(i), d(v) {}
+  virtual int       is_flt()   { return 1; }
   virtual INTEGER64 get_int()  { return (INTEGER64)d; }
   virtual double    get_flt()  { return d; }
   virtual int       get_bool() { return d != 0.0; }
@@ -693,17 +754,51 @@ public:
   pigEnvironment(sPtr<pigEnvironment> p = thNULL) : parent(p) {}
   sPtr<pigData> def_var(sPtr<stdString> name, sPtr<pigData> val);
   sPtr<pigData> get_var(sPtr<stdString> name);
+  /* ★ #3555 段2: 名前が **束縛されているか**だけを問う (親チェーンを辿る)。
+   *   ⚠ get_var は未定義のとき pigDataError を返すので、「未定義」と「エラー値が入っている」の
+   *     区別が付かない。予約変数の既定へ倒す判断はこちらで行う (エラー値は素通しして伝播させる)。 */
+  int           has_var(sPtr<stdString> name);
   sPtr<pigData> set_var(sPtr<stdString> name, sPtr<pigData> val);
   /* この env から根まで辿り、可視束縛(name→値)を frozen フレームへ値コピー(外側→内側の順=内側 shadow 維持)。
    * クロージャの**値捕捉**に使う(pigDataLambdaExpr::_start): 生成時点の自由変数値を凍結し、以後の
-   * set_var/def_var の書き換えを遮断する。frozen->parent を caller env にしておけば、生成時まだ未束縛の
-   * 名前(自己再帰の関数名等)は frozen を素通りして apply 時に親で遅延解決される(= 再帰維持)。 */
+   * set_var/def_var の書き換えを遮断する。
+   * ★ #3450 (2026-08-29) で frozen は **親を持たない** 完全なスナップショットになった
+   *   (env ⇄ lambda の参照循環を切るため)。⇒ 生成時まだ未束縛の名前は apply 時に遅延解決されず
+   *   「未定義変数」の明示エラーになる。再帰は自己適用 f(f,x) で書く。詳細は pigfOps.cpp の
+   *   pigDataLambdaExpr::_start。 */
   void snapshot_into(sPtr<pigEnvironment> frozen);
+  /* ★★ #3482: **いま自分を囲んでいる try** (thNULL 可)。
+   *   ・ try の帰属は **動的** (定義地点ではなく呼び出し元) — ヘルパ lambda を try の外で定義して
+   *     中で呼ぶのが普通の書き方なので、レキシカルだと効かない (C++ の例外と同じ直感)。
+   *   ・ get_try() は **親チェーンを辿らない O(1) 読み出し**。#3450 で frozen env の親リンクを
+   *     切った (参照循環) ので、辿る実装は復活させられない。
+   *   ⇒ **env を生成する側が必ず引き継ぐ** (pigfSequence / pigfAsync / pigfApply の 3 箇所。
+   *     pigfFunction は親の env をそのまま共有するので何もしなくてよい)。
+   * ⚠ frozen (クロージャ捕捉) env には **持たせない** — snapshot_into は束縛だけを写す。
+   *
+   * ★★ #3564 (2026-09-20): **生ポインタをやめて sPtr にした**。
+   *   ⚠⚠ ここには長らく「sPtr にすると TryCatch → statement2 の env → TryCatch で循環し、
+   *     参照カウントでは永遠に落ちない」と *理由つきで* 書いてあった。その前提は
+   *     **#3450 (2026-08-29) の時点で外れていた** — try を持つ env は全部 pigfFunction_ 系の
+   *     状態機械のメンバで、共通 FIN が @env = thNULL@ で明示的に手放すため、env→try の辺は
+   *     参照カウント任せではなく **決定的に消える** (さらに #3564 で pigfTryCatch の FIN に
+   *     @env->set_try(thNULL)@ も足した = 引き継ぎ先の env が残っていても切れる)。
+   *     ★ 理由つきで正しそうに書いてあるコメントほど、前提が動いても疑われずに残る。
+   *   ★ 直した動機は @__get()@ (利用禁止・ひさ 2026-09-20) を木から無くすことと、
+   *     **@flush()@ / @error()@ の null 検査を本物にする**こと。生ポインタでは
+   *     「一度も入っていない」しか拾えず、**「入ったが畳まれた」は素通り**していた
+   *     (借りたポインタ越しの操作 = #3560 と同じ家系)。
+   *   ⚠ 定義は pigData.cpp — この時点で @pigDataTryCatch@ はまだ不完全型なので、
+   *     @sPtr@ の代入/破棄 (relref) をヘッダに書けない。 */
+  void                    set_try(sPtr<pigDataTryCatch> t);
+  sPtr<pigDataTryCatch>   get_try();
+  ~pigEnvironment();   /* ⚠ tryPtr の破棄に完全型が要るので out-of-line (上の ⚠) */
 protected:
   int find_local(sPtr<stdString> name);
   sArray<sPtr<stdString> > names;
   sArray<sPtr<pigData> >   values;
   sPtr<pigEnvironment>     parent;
+  sPtr<pigDataTryCatch>    tryPtr;   /* ★ #3564: 強参照。thNULL = try の外 */
 };
 
 /*
@@ -751,6 +846,12 @@ public:
   virtual sPtr<pigData> car()             { return compact()->car(); }
   virtual sPtr<pigData> cdr()             { return compact()->cdr(); }
   virtual int           is_cache()        { return compact()->is_cache(); }
+  /* ★ 「どう書かれたか」も解決済み下位へ委譲 (is_cache と同じ理由)。これが無いと
+   *   map / lambda 由来の遅延ノードが数でも is_int / is_flt がともに偽になり、
+   *   ⚠ **process 経路 (値がテキスト化されて素の値に戻る) でだけ正しく、in-proc で嘘**
+   *   という obt_array() が踏んだのと同型の穴になる。 */
+  virtual int           is_int()          { return compact()->is_int(); }
+  virtual int           is_flt()          { return compact()->is_flt(); }
   /* ★ rev4: 解決済み下位 (pigDataCache 等) へ型を委譲 (is_cache と対称)。これが無いと cache に解決した
    *   遅延ノードが is_cache=1 なのに type_name が基底に落ちて typeless になる (arg_type_set が取りこぼす)。
    *   ★ P2e: get_module_tag の委譲は撤去 (カーネル軸 API 廃止・型軸 type_name のみ)。 */
@@ -805,7 +906,7 @@ protected:
 /* 軽演算子: args を持ち、_start で同期的に畳む(helper を使わない=遅延しない) */
 class pigDataOperator : public pigDataDelay {
 public:
-  pigDataOperator(sPtr<pigInfo> i = thNULL) : pigDataDelay(i) {}
+  pigDataOperator(sPtr<pigInfo> i = thNULL) : pigDataDelay(i), argsDestroyed(0) {}
   void pushArg(sPtr<pigData> a) { args.push(a); }
   int  argc() { return args.length(); }
   sPtr<pigData> arg(int ix) { return args[ix]; }
@@ -829,6 +930,21 @@ public:
    * result は保持(観測でこれを返す)。clone は未評価テンプレートに対してのみ起こる(評価済みノードは
    * 再 clone されない)ので args を落として安全。同期 op は _start 末尾、agent helper は FIN で front->clean()。 */
   virtual void clean() { args.length(0); helper = thNULL; }
+  /* ★★ #3541②: **撤収を引数へ転送する**。
+   *   ⚠⚠ 基底 @c pigDataDelay::destroy() は helper と result しか辿らない。演算子ノードは
+   *     同期のものだと helper が thNULL なので、@c print(..., system("sleep 30")) のように
+   *     **引数側に走行中の helper がぶら下がっている**と、その helper が **走査経路に入らず**
+   *     撤収が届かない ⇒ 子プロセスが最後まで走り続ける (実測 3 機・#3541②)。
+   *   ★ 転送してよい根拠: 演算子は @c spark_args() で **全 args を必ず起動する**
+   *     (#3419「1 回目の compact で全ての引数の計算が起動される = 並列」)。
+   *     *起動しているのは自分* なので、止めるのも自分の責任 — @c pigfApply が実引数へ
+   *     転送しているのとまったく同じ理屈。
+   *   ⚠ 逐次に意味がある op (@c pigfSequence など) は **helper 側**が自分で選んで転送する。
+   *     ここで畳むのは「全部起動する」演算子ノードだけ。
+   *   ⚠ 短絡評価する演算子は **存在しない** (パーサの mk_logic に「短絡評価はしない(両辺評価)」
+   *     と明記。2026-09-15 に 23 個の演算子クラスを確認) ⇒ 全 args へ送って過剰にならない。
+   *   ⚠ 1 度だけ送る (DAG は共有されるので、環で無限再帰しないため)。 */
+  virtual void destroy();
   /* ★ #3419 (ひさ設計 2026-08-24): **引数を並列に解決し始める**。
    * 全 args を compact し、未解決の yield (sException) は**握って次の引数へ進み**、最後に投げ直す。
    * ⇒ 1 回目の compact で **全ての引数の計算が起動される** = 並列。
@@ -860,6 +976,7 @@ protected:
   sPtr<stdString> op_name;
   sPtr<pigData> module_expr;   /* ★ #3467: `module::op` の指名 (文字列に評価される式)。thNULL = 未指定 */
   int out_cache = 0;
+  unsigned argsDestroyed : 1;   /* ★ #3541②: destroy の転送は 1 度だけ */
 };
 
 /* 演算子ノード生成: pigDataOperator<Name> = 遅延ノード(args を畳む/単項適用)。
@@ -1061,9 +1178,13 @@ protected:
  * ★ 実装は pigfModuleAgent.cpp — sig の解析 (parse_sigline) と型スタンプの読み方
  *   (arg_type_set) がそこにあり、**dispatch と同じ判定**を使わないと内省の意味がないため。 */
 
-/* modules() — いま解決されているモジュールと priority を "name:priority" の空白区切りで返す。
- * 並びは **priority 降順** (= dispatch が候補を見る順)・同点は登録順。module() の指定が
- * 効いているかの確認に使う。 */
+/* modules() — いま載っているモジュールの **名前の配列** を dispatch 順 (priority 降順・同点は
+ * 登録順) で返す。★ #3555 段5: 候補列 (USE_MODULES / `use`) へそのまま渡せる形が主用途なので、
+ * 引数なしをこちらにした。`use modules();` は **挙動を変えない** (列の先勝ち = priority 最大)。
+ * modules("priority") — 従来の "name:priority" 空白区切り文字列。module() の priority 指定が
+ * 効いているかを目で見る用。⚠ こちらは番兵 "delayed" まで出す (#3477) が、配列版は候補に
+ * なり得るものだけ (resolve_cands と同じ述語) なので **中身が一致しない**。
+ * ★ 組込の "pig" は記述子を持つ実在のモジュールなので **両方に出る** (op が無く勝てないだけ)。 */
 class pigDataOperatorModules : public pigDataOperator {
 public:
   pigDataOperatorModules(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
@@ -1079,6 +1200,35 @@ class pigDataOperatorTypeOf : public pigDataOperator {
 public:
   pigDataOperatorTypeOf(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorTypeOf,())); }
+protected:
+  virtual void _start();
+};
+
+/* kind_of(x) — x の **値の種別**を文字列で返す (ひさ設計 2026-09-21)。planner 側 op (agent 不要)。
+ *
+ *   "int" / "float" / "string" / "array" / "hash" / "function" / "null" / "cache" / "unknown"
+ *
+ * ★★ **type_of() と軸が違う**。type_of は *幾何型* の軸 ("cg-mesh3d" / "pt-cloud2d" / "ref"・
+ *   非幾何はすべて "value" に潰れる) で、こちらは *値の種別* の軸。2 つで直交する:
+ *       kind_of(box(1,1,1))  = "cache"      type_of(box(1,1,1))  = "mf-mesh3d"
+ *       kind_of(3)           = "int"        type_of(3)           = "value"
+ *       kind_of(3.0)         = "float"      type_of(3.0)         = "value"
+ *   ⇒ 「種別を見て → その型で誰が受けるかを見る」は kind_of → type_of → which() でたどれる。
+ *
+ * ★★ 幾何が "mesh" ではなく **"cache"** なのは (ひさ 2026-09-21)、そのハンドルが持つのは
+ *   *計算結果への参照* であって mesh とは限らないから — 点群 (pt-cloud3d) も B-rep (oc-brep3d) も
+ *   ボリューム (vd-grid3d) も export の戻り (ref) も、値の種別としては同じ「キャッシュハンドル」。
+ *   **何のキャッシュか**は type_of() が答える。⇒ ここで型名を混ぜない。
+ *
+ * ⚠ **幾何は compact しない** (type_of と同じ理由)。内省したいだけなのに計算を走らせないため、
+ *   型スタンプを継続 pair の car から非ブロッキングに読む。値は compact する — 種別を答えるには
+ *   評価するしかなく、それは呼び側が承知のうえで訊いている。
+ * ⚠ 該当が無ければ **"unknown"**。黙って "value" に寄せない (寄せると *新しい種別が増えたこと*
+ *   が誰にも見えなくなる)。 */
+class pigDataOperatorKindOf : public pigDataOperator {
+public:
+  pigDataOperatorKindOf(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorKindOf,())); }
 protected:
   virtual void _start();
 };
@@ -1148,6 +1298,184 @@ public:
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorCatchContinue,())); }
 protected:
   virtual void _start();
+};
+
+/* ------------------------------------------------------------------ */
+/* ★★ #3482: try/catch 文                                             */
+/* ------------------------------------------------------------------ */
+/* try { statement1 } [ catch { statement2 } ]
+ *   args[0] = statement1 (ブロック = pigfSequence)
+ *   args[1] = statement2 (catch 本体。get_has_catch()==0 なら無い)
+ *
+ * ★ **ノードが持ち主**である理由 (ひさ決定): 待ちリスト (段 2 以降) の持ち主は helper ではなく
+ *   この pigDataTryCatch。env はここへの **参照**を 1 本持ち (pigEnvironment::set_try・#3564 で
+ *   生ポインタから sPtr へ)、
+ *   catch 本体の error() は env->get_try() で O(1) に辿り着く。
+ *
+ * ⚠ 段 1 (いまここ) の範囲 = **直列系のエラーだけ**:
+ *     ・ statement1 を is_error() で評価。コントロール系 (break/continue/return/exit) は
+ *       捕まえずそのまま戻り値にする (try は制御の分岐ではない)。
+ *     ・ 実エラーなら statement2 を実行し、その値を try/catch の値とする。
+ *     ・ catch が無ければ発生したエラーをそのまま戻り値にする
+ *       (⇒ `try { s }` は `try { s } catch { error() }` と同じ意味)。
+ *   promise に入った後の agent エラー (待ちリスト) は **段 2**。destroy() 関数も段 2
+ *   (待ちリストが無いと送る先が無い)。 */
+class pigDataTryCatch : public pigDataOperator {
+public:
+  pigDataTryCatch(sPtr<pigInfo> i = thNULL)
+    : pigDataOperator(i), hasCatch(0), errTaken(0) {}
+  virtual sPtr<pigData> clone() {
+    sPtr<pigDataTryCatch> n = thNEW(pigDataTryCatch,());
+    n->set_has_catch(hasCatch);      /* catch の有無は構文の属性 = 複製する */
+    return copy_to(n);               /* 収集済みエラーは複製しない (新鮮ノード) */
+  }
+  void set_has_catch(int h) { hasCatch = h; }
+  int  get_has_catch()      { return hasCatch; }
+  /* エラーの収集口。**発生順**に積む (集約して 1 件にしない)。statement1 の直列エラーと、
+   * 待ちリストの agent が promise 解決後に出したエラー (§4.2 ①) の両方がここへ来る。 */
+  void push_error(sPtr<pigData> e);
+  /* error() の読み出し口。**3 値**を返す:
+   *   未読のエラーがある … 中身のハッシュ (pigDataError::to_hash)
+   *   まだ待つ相手が居る … thNULL = 「いま答えられない」 ⇒ 呼び手 (error()) は待ちに入る
+   *   もう何も無い       … pigDataInteger 0
+   * ★ pigDataError そのものを返さないのは、error 値はあらゆる演算を吸収して上方伝播する
+   *   = catch の中で変数に入れた瞬間に catch 自身がそのエラーで抜けてしまうため。
+   * ★ 再送は `throw error();` — ハッシュから復元するので、位置もクラスも元のまま。 */
+  sPtr<pigData> take_error();
+  /* 未読のエラーを **消費せずに**覗く (thNULL = 無い)。try が「待っている間にエラーが来たか」を
+   * 見るのに使う — 消費してしまうと catch の中の error() が読めなくなる。 */
+  sPtr<pigData> peek_error() { return ( errTaken < errs.length() ) ? errs[errTaken] : sPtr<pigData>(thNULL); }
+
+  /* ---- 待ちリスト (#3482 段 2) ------------------------------------------------
+   * ★ 持ち主は **このノード** (helper ではない)。helper は try の評価が終われば畳まれるが、
+   *   「誰を待っているか」は try のスコープの性質なのでノード側に置く。
+   * ⚠ 参照の向き: try → agent は **強参照のまま置き、agent_leave で落とす**。
+   *   agent → try も強参照で、同じ FIN で切れる。
+   *   ⇒ 環は張るが **同じ 1 つの出来事 (agent の FIN) で両側とも切れる**ので残らない。
+   *   生ポインタにしないのは、agent の寿命が try の評価より長くなる経路 (撤収中) があるため。 */
+  /* ★★ #3482 (ひさ 2026-09-19 / 2026-09-20): **登録は伝播させない**。計算が入るのは
+   *   **自分を囲む最も内側の try 1 つだけ**で、祖先の chain は辿らず、
+   *   ⚠⚠ **根の台帳へ直接入れにも行かない** (2026-09-20 に外した。それまでは「myTry と根」の
+   *     2 つに登録していたが、根へ直接登録するのをやめたはずだった所が残っていた)。
+   *   ★ 根が全体を知る必要はない — 利用者の try は自分の待ちリストが空になるまで
+   *     終わらない (@ACT_pigfTryCatch_WAIT@) ので、入れ子は「try が try を待つ」で閉じる。
+   * ★ 外側の try から内側の計算を畳むのは **destroy を pigData の木で伝播させる**方でやる
+   *   (ptsFireAndForget → async の front → pigfAsync → 内側の try → その待ちリスト)。
+   *   ⇒ 台帳と撤収を別々の仕組みが担う: **数えるのは登録・止めるのは木**。
+   * ⇒ @ptsApplication::agent_count()@ が数えるのは「どの利用者 try にも囲まれていない計算」。 */
+  void agent_enter(sPtr<tinyState> who);        /* 待ちリストへ入る */
+  void agent_leave(sPtr<tinyState> who);        /* 待ちリストから抜ける。★ **冪等** */
+  void agent_error(sPtr<pigData> e);            /* 待ち中の agent が出したエラー (§4.2 ①) */
+  void destroy_agents();                        /* 待ちリスト全員へ destroy (終了は待たない) */
+  /* 待ちリスト全員を **起こす** (destroy とは別)。撤収の理由が立ったときに、イベント待ちで
+   * 詰まっている計算にも届かせるための一撃 (旧 ptsApplication::set_agentError の wake-all)。 */
+  void wake_agents();
+  int  agent_live() { return waitLive; }
+  /* ★★ #3482: **この try が畳めと言ったか**。畳まれた agent は自分の「aborted」を
+   *   PE_DERIVED で立てる ⇒ planner の集約・報告・終了コードから外れる。
+   *   「失敗した」のではなく「言われたとおり畳んだ」を区別するための 1 ビット。
+   * ⚠ 一度立ったら下げない — 畳んだ後に届く遅れた撤収の跡も同じ扱いにする。 */
+  int  is_tearing_down() { return tearingDown; }
+  /* ★★ #3482 段 3/4: **根の見えない try か**。根は構文に現れず・文を持たず・評価されないので、
+   *   自分でエラーを報告できない ⇒ 根の下で起きたことは **従来どおり planner が報告する**。
+   *   利用者が書いた try は自分が報告経路 (catch が無ければ 2.2 でそのエラーを返す) なので、
+   *   そちらは planner に渡さない (**二重報告を避ける**)。 */
+  void set_root(int r) { rootFlag = r; }
+  int  is_root()       { return rootFlag; }
+
+  /* ---- プログラム全体の撤収の指標と診断台帳 (#3482・**根の try だけが使う**) ----------
+   * ★ 本チケット §0 の「tree の根本に見えない try を置いて **全体をそこへ集約する**」の実体。
+   *   以前は ptsApplication が持っていたが、置き場所が 2 つ (try と app) に割れていた。
+   * ⚠ **意味論は動かしていない** — 先勝ち ・ PE_PANIC だけ先勝ちを覆す ・ 文言で重複排除 ・
+   *   上限 16、はすべて ptsApplication から **そのまま**移したもの。
+   *   起こす役 (生存中の agent への wake-all) は生存台帳を持つ ptsApplication に残る。 */
+  /* 撤収の理由を立てる。戻り値 1 = **これが最初の 1 件** (呼び手はそのときだけ wake-all する)。 */
+  int           set_teardown_reason(sPtr<pigData> e);
+  sPtr<pigData> teardown_reason() { return tdReason; }
+  /* 診断台帳: 落ちた本人の理由を全部溜めて末尾で列挙する (撤収トリガにはしない)。 */
+  void          record_reason(sPtr<pigData> e);
+  int           reason_count() { return reasons.length(); }
+  sPtr<pigData> reason_at(int i) { return ( i >= 0 && i < reasons.length() ) ? reasons[i] : sPtr<pigData>(thNULL); }
+  /* error() が「待ち」に入るときに自分を預ける先。状態が動いたら set_result で起こす。 */
+  void register_waiter(sPtr<pigDataDelay> w);
+  /* ★★ #3482: @flush()@ が「この try の待ちが **全部**なくなるまで」待つときの預け先。
+   *   error() が「次の 1 件 or 全部終わる」を待つのに対し、こちらは **空になること**だけを待つ。 */
+  void register_drain_waiter(sPtr<pigDataDelay> w);
+  /* 未読のエラーの本数と取り出し (planner が根の try から末尾報告するのに使う)。
+   * ⚠ take_error と違い **消費しない**・待たない。 */
+  int  error_count() { return errs.length() - errTaken; }
+  sPtr<pigData> error_at(int i) { int k = errTaken + i;
+    return ( k >= 0 && k < errs.length() ) ? errs[k] : sPtr<pigData>(thNULL); }
+  /* 待ちに入る error() が listen する先 = **この try の helper**。try の評価中は必ず居る
+   * (catch 本体を走らせているのが当の helper だから)。 */
+  /* ⚠ 根の try は評価されないので helper を持たない。その場合は waker (= app) を listen 先に
+   *   する — 待ち手を宙吊りにしないため (preprocess は helper も result も無いノードを
+   *   system error にする)。 */
+  sPtr<tinyState> try_helper() { return helper.is_notNull() ? helper : waker; }
+  /* ★ 根の try は helper を持たない (評価されない) ので、台帳が動いたときに起こす相手を
+   *   外から預かる — ptsApplication が自分を入れる (旧 agent_leave の `countAgent==0 で wakeup()`)。 */
+  void set_waker(sPtr<tinyState> w) { waker = w; }
+protected:
+  virtual void _start();
+  /* 待ちリストの状態が動いた (agent が減った / エラーが来た) ⇒ 待っている error() に答え、
+   * try 自身の helper も起こす。★ **通知駆動** — 総なめのポーリングはしない (#3414 の決着)。 */
+  void wake_waiters();
+  int hasCatch;
+  int errTaken;                      /* 次に error() が返す位置 (発生順) */
+  sArray<sPtr<pigData> > errs;       /* 発生順のエラー */
+  sArray<sPtr<tinyState> > waiters;  /* 待ちリスト (登録中の agent helper)。抜けた所は thNULL */
+  int waitLive = 0;                  /* 待ちリストの生存数 */
+  int tearingDown = 0;               /* この try が destroy を送ったか (#3482) */
+  int rootFlag = 0;                  /* 根の見えない try か (#3482 段 3/4) */
+  sPtr<tinyState> waker;             /* 台帳が動いたら起こす相手 (根の try では app) */
+  sPtr<pigData> tdReason;            /* 撤収の理由 (先勝ち・PANIC だけ覆す)。根の try のみ */
+  sArray<sPtr<pigData> > reasons;    /* 診断台帳 (文言で重複排除・上限 16)。根の try のみ */
+  sArray<sPtr<pigDataDelay> > errWaiters;    /* 「答えを待っている error() ノード」 */
+  sArray<sPtr<pigDataDelay> > drainWaiters;  /* 「空になるのを待っている flush() ノード」 */
+};
+
+/* destroy() — 待ちリストの agent へ撤収を送る組み込み関数 (#3482 §2-B)。
+ * ★ **終了は待たない** (待つのは error() の役目)。戻り値は送った数。
+ * ⚠ 囲む try が無い場所で呼ぶと実行時エラー (送る先が無い)。 */
+class pigDataOperatorDestroyAgents : public pigDataOperator {
+public:
+  pigDataOperatorDestroyAgents(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorDestroyAgents,())); }
+protected:
+  virtual void _start();
+};
+
+/* throw 式; — 値から **エラーを復元して発生させる** 文 (#3482)。
+ *   throw error();   … error() が 0 でなければ、捕まえたエラーが **そのまま再現**される
+ *                      (位置・モジュール名・エラークラスまで含めて)
+ *   throw 0;         … 復元できないので「復元できない」というエラーになる
+ * ★ これで `try { s }` は `try { s } catch { throw error(); }` と **同じ意味**になる
+ *   (catch 無しの経路 = 発生したエラーをそのまま戻り値にする、と一致する)。 */
+class pigDataOperatorThrow : public pigDataOperator {
+public:
+  pigDataOperatorThrow(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorThrow,())); }
+protected:
+  virtual void _start();
+};
+
+/* error() — catch 本体で **エラーの中身をハッシュで** 1 件ずつ取り出す組み込み関数。
+ * env->get_try() で **動的に**囲む try を引く (レキシカルではない)。
+ * ⚠ catch の外での呼び出しは **静的に**弾く (パース時。ns_sravaParser.y の check_stray_error)。
+ *   in_catch はそのための印で、実行時の意味は持たない。 */
+class pigDataOperatorError : public pigDataOperator {
+public:
+  pigDataOperatorError(sPtr<pigInfo> i = thNULL) : pigDataOperator(i), inCatch(0) {}
+  virtual sPtr<pigData> clone() {
+    sPtr<pigDataOperatorError> n = thNEW(pigDataOperatorError,());
+    n->set_in_catch(inCatch);
+    return copy_to(n);
+  }
+  void set_in_catch(int c) { inCatch = c; }
+  int  get_in_catch()      { return inCatch; }
+protected:
+  virtual void _start();
+  int inCatch;
 };
 
 /* ------------------------------------------------------------------ */
@@ -1242,6 +1570,8 @@ public:
   pigDataLambdaExpr(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
   void push_param(sPtr<stdString> p) { params.push(p); }
   void set_body(sPtr<pigData> b)     { bodyT = b; }
+  /* ★ #3482: body は args ではないので、木を歩く側(パーサの静的検査)から見えるようにする。 */
+  sPtr<pigData> get_body()           { return bodyT; }
   virtual sPtr<pigData> clone() {      /* params 共有 + body テンプレを clone(ネスト lambda 用) */
     sPtr<pigDataLambdaExpr> n = thNEW(pigDataLambdaExpr,());
     for ( int i = 0 ; i < params.length() ; ++i ) n->push_param(params[i]);

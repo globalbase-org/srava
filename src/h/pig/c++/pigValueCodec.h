@@ -18,4 +18,5 @@
 /* text 全体を 1 個の値として parse。成功=その pigData / 失敗=pigDataError。 */
 sPtr<pigData> pig_value_parse(const char *text);
 
+
 #endif

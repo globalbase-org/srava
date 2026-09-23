@@ -19,8 +19,13 @@
 #include	"pig/c++/ptsCalcBody.h"
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
+/* ★★ #3545 段 4: **CGAL を 1 枚も引かない**。厳密境界のバイト列は nef 側
+ *   (nfNefMesh::to_exact_boundary_bytes ・ libsrava_cg) が作る。
+ *   ⚠ 以前はここで nf_to_mesh + cgaMeshCodec::encode を直に呼んでいたので、この TU に
+ *     CGAL の可変大域が実体化していた。形式は同じなので **値は 1 bit も変わらない**。 */
 #include	"nf/c++/nfMesh.h"
-#include	"cg/c++/cgaMeshCodec.h"
+/* ⚠ #3545 段 4: @cgaMeshCodec.h@ を **落とした** — CGAL を引くヘッダで、この TU はもう
+ *   codec を自分では呼ばない (バイト列は nef 側が作る)。 */
 #include	"mf/c++/mfMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/nfmCast_.h"
@@ -114,13 +119,13 @@ nfmCast_::compute()
 	/* ★ cast の引数は **cast(型名, 幾何)** の 2 つ (CAST_IN = { AK_INLINE, AK_CACHE })。
 	 *   幾何は args[1]。args[0] は目標の型名で、ここに来ている時点で既に解決済み。 */
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
+	sPtr<nfMeshSnc> in = ( na > 1 ) ? sPtr<nfMeshSnc>::d_cast((*args)[1]) : sPtr<nfMeshSnc>();
 	if ( ! in.is_notNull() ) {
 		result = nfm_err(thNEW(stdString,("cast: needs a Nef (SNC) value")));
 		return;
 	}
-	nfMesh::Mesh bnd;
-	if ( ! in->to_mesh(bnd) ) {
+	MemSink sink;
+	if ( ! in->to_exact_boundary_bytes(sink.buf) ) {
 		result = nfm_err(thNEW(stdString,
 		    /* ★ **入力の形式 (NEF3) を文面に出す** — 利用者が受け取るのは「どの値が
 		     *   どの形式で書かれていて、なぜ渡せないのか」で、型名だけでは
@@ -130,9 +135,6 @@ nfmCast_::compute()
 		     "which mf-mesh3d cannot represent")));
 		return;
 	}
-	MemSink sink;
-	cgaMeshCodec::encode(bnd, sink);
-
 	/* ★ mfMesh は既定構築を持たない (常に Manifold を伴う)。空の Manifold から起こして
 	 *   decode で中身を入れる — mfGeom::create_for_meta と同じ組み立て方。 */
 	sPtr<mfMesh> m = thNEW(mfMesh,(manifold::Manifold()));

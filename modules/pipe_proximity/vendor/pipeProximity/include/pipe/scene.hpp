@@ -26,7 +26,9 @@ struct Scene {
 //   - 異 Body 間の交差接近（除外帯なし）
 //   - 固定–固定ペアはスキップ（制御に無関係・不変）
 // 各 Contact の bodyA/bodyB に Body 番号が入る。
+// ★ #3502 続き: 中断の扱いは findSelfProximities と同じ (途中の列は捨てること)。
 std::vector<Contact> findSceneProximities(const Scene& sc, const Params& pr,
-                                          Stats* stats = nullptr);
+                                          Stats* stats = nullptr,
+                                          bool* cancelledOut = nullptr);
 
 } // namespace pipe

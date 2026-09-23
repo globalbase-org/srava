@@ -1,5 +1,5 @@
 /*
- * cgaTube — tube(path[, segs]) の計算本体(ptsCalcBody 派生)= パスに沿って丸断面を掃引した管。
+ * cgaTube — tube_ruled(path[, segs]) の計算本体(ptsCalcBody 派生)= パスに沿って丸断面を掃引した管。
  *
  * **次元ディスパッチ**: パス頂点の位置の長さで 3D / 2D を振り分ける(offset/transform 等と同方針)。
  *   - 3D: path = [[[x,y,z], r], ...] → 3D 折れ線まわりに丸断面を掃引した立体(cgMesh3D)。「蛇」。
@@ -22,14 +22,10 @@
 #include	"cg/c++/cgMesh.h"
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"common/tube.h"   /* 掃引の共通生成器(manifold.so と共有) */
 #include	"_ts2/c++/cgaTube_.h"
 
-#include	<CGAL/Polygon_mesh_processing/measure.h>        /* volume */
-#include	<CGAL/Polygon_mesh_processing/orientation.h>    /* reverse_face_orientations */
-#include	<CGAL/boost/graph/helpers.h>                    /* is_closed */
-#include	<CGAL/Polygon_set_2.h>                          /* 2D tube: 帯のスタンプ union */
-#include	<CGAL/Boolean_set_operations_2.h>
 #include	<vector>
 #include	<cmath>
 
@@ -84,45 +80,12 @@ cgaTube_::cgaTube_(TS_ARGS0)
 	INSTANCE FUNCTIONS
 ********************************************/
 
-namespace {
+/* ★★ #3535②: **この TU は CGAL を 1 つも参照しない**。2 つの Sink (CgTubeSink /
+ * CgRibbonSink) と外向き保証は libsrava_cg 側 (cgMesh3D::build_tube / cgMesh2D::build_tube)
+ * へ移した。⚠ CGAL は 6.x でヘッダオンリーなので、ここで触ると **この .so の中に
+ * CGAL の可変大域状態 (_error_handler / _error_behaviour / get_default_random) の実体**が
+ * できて libsrava_cg 側と別物になる (理由は cgMesh.h の build_tube の宣言のところ)。 */
 using srava_geo::TubeV3;
-
-/* 3D Sink: 共通生成器が出す頂点/三角形を CGAL Surface_mesh へ積む。 */
-struct CgTubeSink {
-	typedef cgMesh::K            K;
-	typedef cgMesh::Mesh         Mesh;
-	typedef Mesh::Vertex_index   VI;
-	Mesh&            m;
-	std::vector<VI>  vi;
-	CgTubeSink(Mesh& mm) : m(mm) {}
-	int add_vertex(double x, double y, double z) {
-		vi.push_back(m.add_vertex(K::Point_3(K::FT(x), K::FT(y), K::FT(z))));
-		return (int)vi.size() - 1;
-	}
-	void add_triangle(int a, int b, int c) {
-		std::vector<VI> f;
-		f.push_back(vi[(size_t)a]); f.push_back(vi[(size_t)b]); f.push_back(vi[(size_t)c]);
-		m.add_face(f);
-	}
-};
-
-/* 2D Sink: 共通生成器が出すスタンプ輪郭(CCW)を Polygon_set_2 へ union で積む。 */
-struct CgRibbonSink {
-	typedef cgMesh::K                      K;
-	typedef K::Point_2                     P2;
-	typedef CGAL::Polygon_2<K>             Poly2;
-	typedef CGAL::Polygon_set_2<K>         PSet2;
-	PSet2 acc;
-	void add_ring(const double *xy, int npts) {
-		Poly2 p;
-		for ( int i = 0 ; i < npts ; ++i )
-			p.push_back(P2(K::FT(xy[2*i]), K::FT(xy[2*i+1])));
-		if ( ! p.is_simple() ) return;                 /* 退化(線分に潰れた等)は捨てる */
-		if ( p.is_clockwise_oriented() ) p.reverse_orientation();
-		acc.join(p);
-	}
-};
-} /* anonymous namespace */
 
 void
 cgaTube_::compute()
@@ -130,14 +93,18 @@ cgaTube_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<pigDataArray> path = ( na > 0 ) ? (*args)[0]->obt_array()
 	                                     : sPtr<pigDataArray>();
-	int segs = ( na > 1 ) ? (int)(*args)[1]->get_int() : 32;   /* 円の辺数(精度ピッチ)。既定 32 */
-	if ( segs < 3 ) segs = 3;
-	if ( segs > 4096 ) segs = 4096;
+	int    segs_in = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 0 = 未指定 */
+	int    segs = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(segs_in, 32, &segs) != srava_geo::SEGS_OK ) {
+		result = cga_err(thNEW(stdString,(srava_geo::segs_error("tube_ruled").c_str()))); return;
+	}
 
 	int nraw = path.is_notNull() ? path->length() : 0;
 	if ( nraw < 2 ) {
 		result = cga_err(thNEW(stdString,(
-		    "tube: needs >= 2 path vertices ([[[x,y,z],r],...] for 3D / [[[x,y],r],...] for 2D)")));
+		    "tube_ruled: needs >= 2 path vertices ([[[x,y,z],r],...] for 3D / [[[x,y],r],...] for 2D)")));
 		return;
 	}
 
@@ -150,7 +117,7 @@ cgaTube_::compute()
 		sPtr<pigDataArray> pr = path->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! pr.is_notNull() || pr->length() < 2 ) {
 			result = cga_err(thNEW(stdString,(
-			    "tube: each vertex must be [pos, r] (pos=[x,y,z] or [x,y])")));
+			    "tube_ruled: each vertex must be [pos, r] (pos=[x,y,z] or [x,y])")));
 			return;
 		}
 		sPtr<pigDataArray> pos = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
@@ -158,8 +125,8 @@ cgaTube_::compute()
 		if ( i == 0 ) dim = ( pl >= 3 ) ? 3 : 2;   /* 先頭頂点で次元を確定 */
 		if ( pl < dim ) {
 			result = cga_err(thNEW(stdString,(
-			    dim == 3 ? "tube: vertex position must be [x,y,z] (3D path)"
-			             : "tube: vertex position must be [x,y] (2D path)")));
+			    dim == 3 ? "tube_ruled: vertex position must be [x,y,z] (3D path)"
+			             : "tube_ruled: vertex position must be [x,y] (2D path)")));
 			return;
 		}
 		Praw[(size_t)i] = TubeV3(pos->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt(),
@@ -167,7 +134,7 @@ cgaTube_::compute()
 		                         dim == 3 ? pos->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt() : 0.0);
 		Rraw[(size_t)i] = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
 		if ( Rraw[(size_t)i] < 0.0 ) {
-			result = cga_err(thNEW(stdString,("tube: radius must be >= 0")));
+			result = cga_err(thNEW(stdString,("tube_ruled: radius must be >= 0")));
 			return;
 		}
 	}
@@ -178,43 +145,32 @@ cgaTube_::compute()
 	srava_geo::tube_dedup(Praw, Rraw, P, R);
 	if ( P.size() < 2 ) {
 		result = cga_err(thNEW(stdString,(
-		    "tube: needs >= 2 distinct path vertices (all given vertices coincide)")));
+		    "tube_ruled: needs >= 2 distinct path vertices (all given vertices coincide)")));
 		return;
 	}
 
 	/* ---- 2D: 折れ線を半径 r で太らせた帯領域(可変幅・丸ジョイント)。stamp-and-union。 ---- */
 	if ( dim == 2 ) {
-		CgRibbonSink sink;
-		srava_geo::make_tube_2d(P, R, segs, sink);
 		sPtr<cgMesh2D> out = thNEW(cgMesh2D,());
-		std::vector<CGAL::Polygon_with_holes_2<cgMesh::K> > res;
-		res.resize(sink.acc.number_of_polygons_with_holes());
-		sink.acc.polygons_with_holes(res.begin());
-		out->regions() = res;
+		out->build_tube(P, R, segs);
 		mesh = out;
 		return;
 	}
 
 	/* ======================= 以下 3D: 折れ線まわりの掃引立体 ======================= */
 	sPtr<cgMesh3D> m3 = thNEW(cgMesh3D,());
-	cgMesh::Mesh& m = m3->mesh();
-	CgTubeSink sink(m);
-	int st = srava_geo::make_tube_3d(P, R, segs, sink);
+	int st = m3->build_tube(P, R, segs);
 	if ( st == srava_geo::TUBE_ERR_ZERO_SEGMENT ) {
 		result = cga_err(thNEW(stdString,(
-		    "tube: two consecutive zero-radius vertices (degenerate segment)")));
+		    "tube_ruled: two consecutive zero-radius vertices (degenerate segment)")));
 		return;
 	}
 	if ( st != srava_geo::TUBE_OK ) {
-		result = cga_err(thNEW(stdString,("tube: duplicate consecutive path vertices")));
+		result = cga_err(thNEW(stdString,("tube_ruled: duplicate consecutive path vertices")));
 		return;
 	}
 
-	/* 念のため外向き保証: 閉じていて符号付き体積が負なら全反転。 */
-	if ( CGAL::is_closed(m) ) {
-		if ( CGAL::Polygon_mesh_processing::volume(m) < cgMesh::K::FT(0) )
-			CGAL::Polygon_mesh_processing::reverse_face_orientations(m);
-	}
+	/* ★ 外向き保証 (is_closed / volume / 反転) も build_tube の中でやる。 */
 	mesh = m3;
 }
 

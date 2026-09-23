@@ -11,7 +11,6 @@
 #include	"pig/c++/pigData.h"
 #include	"nf/c++/nfMesh.h"
 #include	"ts2/c++/stdString.h"
-#include	<CGAL/Polygon_mesh_processing/measure.h>
 #include	"_ts2/c++/nfaNparts_.h"
 
 CLASS_TINYSTATE(nf/c++/nfaNparts,pig/c++/ptsCalcBody)
@@ -45,7 +44,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -67,7 +66,7 @@ void
 nfaNparts_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	if ( ! in.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("nparts: needs a Nef mesh")));
 		return;

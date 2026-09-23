@@ -8,29 +8,28 @@
  * ⚠ finish() は dx (ボクセルサイズ) を取る。ボクセル表現では精度は分割数ではなく dx で決まる。
  */
 #include	"vd/c++/vdGrid.h"
-#include	<openvdb/tools/MeshToVolume.h>
 #include	<vector>
 #include	<stdint.h>
 
+/* ★★ #3545 段 5 (2026-09-18): **素の配列で受ける**形に作り替えた。
+ *   ⚠ 以前は @openvdb::Vec3s@ / @Vec3I@ を直に持ち @meshToLevelSet@ をここで呼んでいたので、
+ *     このヘッダを include する **9 本の op TU** が上流を引いていた
+ *     (nef が踏んだ「⑥ 推移的な取り込み」と同じ形 — 字面で数えると見落とす)。
+ *   ⇒ 実体は @vdGrid::from_triangles@ (幾何 lib 側)。ここは並べるだけ。
+ *   ⚠ 精度は変わらない — 以前も内部で float に落としていた (Vec3s)。 */
 struct vdTriSink {
-	std::vector<openvdb::Vec3s>	pts;
-	std::vector<openvdb::Vec3I>	tri;
+	std::vector<double>	pts;   /* 3*nv */
+	std::vector<uint32_t>	tri;   /* 3*nt */
 	int  add_vertex(double x, double y, double z) {
-		pts.push_back(openvdb::Vec3s((float)x, (float)y, (float)z));
-		return (int)pts.size() - 1;
+		pts.push_back(x); pts.push_back(y); pts.push_back(z);
+		return (int)(pts.size() / 3) - 1;
 	}
 	void add_triangle(int a, int b, int c) {
-		tri.push_back(openvdb::Vec3I((uint32_t)a, (uint32_t)b, (uint32_t)c));
+		tri.push_back((uint32_t)a); tri.push_back((uint32_t)b); tri.push_back((uint32_t)c);
 	}
 	sPtr<vdGrid> finish(double dx) const {
-		openvdb::math::Transform::Ptr xform =
-		    openvdb::math::Transform::createLinearTransform(dx);
-		openvdb::FloatGrid::Ptr g =
-		    openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(*xform, pts, tri);
-		if ( ! g ) return sPtr<vdGrid>();
-		sPtr<vdGrid> o = thNEW(vdGrid,());
-		o->set_grid(g);
-		return o;
+		return vdGrid::from_triangles(pts.empty() ? 0 : &pts[0], (int)(pts.size() / 3),
+		                              tri.empty() ? 0 : &tri[0], (int)(tri.size() / 3), dx);
 	}
 };
 

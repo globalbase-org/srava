@@ -140,7 +140,8 @@ int make_tube_3d(const std::vector<TubeV3>& P, const std::vector<double>& R, int
 {
 	int n = (int)P.size();
 	if ( n < 2 ) return TUBE_ERR_DUP_VERTEX;
-	if ( segs < 3 ) segs = 3;
+	if ( segs < 3 ) segs = 32;   /* ★ #3530: 0 = 未指定 → 既定 32。3 未満の可否は
+	                              *   op 側の共通検査 (common/segs.h) が決める。 */
 
 	std::vector<TubeV3> T, N, B;
 	int st = tube_frames(P, T, N, B);
@@ -227,7 +228,8 @@ template<class Sink2>
 int make_tube_2d(const std::vector<TubeV3>& P, const std::vector<double>& R, int segs, Sink2& sink)
 {
 	int n = (int)P.size();
-	if ( segs < 3 ) segs = 3;
+	if ( segs < 3 ) segs = 32;   /* ★ #3530: 0 = 未指定 → 既定 32。3 未満の可否は
+	                              *   op 側の共通検査 (common/segs.h) が決める。 */
 
 	std::vector<double> xy;
 

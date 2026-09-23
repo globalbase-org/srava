@@ -7,6 +7,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"vd/c++/vdGrid.h"
+#include	"vd/c++/vdGridVdb.h"   /* ★ #3545 段 5: 橋は OpenVDB 型を扱うので読んでよい */
 #include	"vd/c++/vdMeshVoxelize.h"   /* ★ #3491: 空洞を保つ共通の入口 */
 #include	<stdio.h>   /* ★ #3491: 退避したときの WARN (PIG_SEP_LOG で採取可) */
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
@@ -103,28 +104,20 @@ vcaVoxelize_::compute()
 	 * ★ float へ落ちるが、level set の値自体が float なので追加の損失にはならない。 */
 	/* ★ 本物の CGAL Surface_mesh から抽出する。EPECK の有理数 → float は情報が落ちるが、
 	 *   level set の値自体が float なので追加の損失にはならない (vd 側の性質)。 */
-	typedef cgMesh3D::Mesh Mesh;
-	Mesh &m = in->mesh();
+	/* ★ #3535②: 厳密座標 → double の変換は libsrava_cg 側 (cgMesh3D::to_soup) でやる。
+	 *   ⚠ ここで CGAL::to_double を呼ぶと Lazy_exact_nt の精度設定 (可変な大域) の実体が
+	 *     この .so にもできる (理由は cgMesh.h の to_soup の宣言のところ)。 */
+	std::vector<double> sxyz;
+	std::vector<int>    stri;
+	in->to_soup(sxyz, stri);
 	std::vector<openvdb::Vec3s> points;
-	std::vector<uint32_t> vidx(m.number_of_vertices() + 1, 0);
-	points.reserve(m.number_of_vertices());
-	uint32_t next = 0;
-	for ( Mesh::Vertex_index v : m.vertices() ) {
-		if ( (size_t)v >= vidx.size() ) vidx.resize((size_t)v + 1, 0);
-		vidx[(size_t)v] = next++;
-		points.push_back(openvdb::Vec3s((float)CGAL::to_double(m.point(v).x()),
-		                                (float)CGAL::to_double(m.point(v).y()),
-		                                (float)CGAL::to_double(m.point(v).z())));
-	}
+	points.reserve(sxyz.size() / 3);
+	for ( size_t k = 0 ; k + 2 < sxyz.size() ; k += 3 )
+		points.push_back(openvdb::Vec3s((float)sxyz[k], (float)sxyz[k+1], (float)sxyz[k+2]));
 	std::vector<openvdb::Vec3I> tris;
-	for ( Mesh::Face_index f : m.faces() ) {
-		uint32_t c[3]; int n = 0;
-		for ( Mesh::Vertex_index v : CGAL::vertices_around_face(m.halfedge(f), m) ) {
-			if ( n < 3 ) c[n] = vidx[(size_t)v];
-			++n;
-		}
-		if ( n == 3 ) tris.push_back(openvdb::Vec3I(c[0], c[1], c[2]));
-	}
+	tris.reserve(stri.size() / 3);
+	for ( size_t k = 0 ; k + 2 < stri.size() ; k += 3 )
+		tris.push_back(openvdb::Vec3I((uint32_t)stri[k], (uint32_t)stri[k+1], (uint32_t)stri[k+2]));
 	if ( points.empty() || tris.empty() ) {
 		result = vca_err(thNEW(stdString,("voxelize: empty mesh")));
 		return;
@@ -139,17 +132,23 @@ vcaVoxelize_::compute()
 	 *   interiorTest を渡して直す。理由と実測は vd/c++/vdMeshVoxelize.h の冒頭。 */
 	long fellBack = 0;
 	openvdb::FloatGrid::Ptr g =
-	    vd_mesh_to_levelset(points, tris, *xform, (float)openvdb::LEVEL_SET_HALF_WIDTH, &fellBack);
+	    vd_mesh_to_levelset(points, tris, *xform, (float)openvdb::LEVEL_SET_HALF_WIDTH,
+	                        &fellBack, &brk_);   /* ★ #3498 */
 	if ( ! g ) {
+		if ( (result = vd_abort_err(brk_, "voxelize")) != thNULL ) return;   /* ★ #3498 */
 		result = vca_err(thNEW(stdString,("voxelize: meshToLevelSet failed")));
 		return;
 	}
+	/* ★ #3498: meshToVolume は中断されると **途中までの格子**を返すことがある (null とは
+	 *   限らない)。半分だけボクセル化された形をキャッシュへ焼き付けないよう、null でなくても
+	 *   旗を見る。 */
+	if ( (result = vd_abort_err(brk_, "voxelize")) != thNULL ) return;
 	if ( fellBack > 0 )   /* 閉じた向きの揃った曲面ではない = 従来経路で作った (空洞は埋まる) */
 		::fprintf(stderr, "[voxelize] WARN: %ld column(s) with non-zero winding sum "
 		                  "(input is not a closed, consistently oriented surface); "
 		                  "internal cavities will be filled\n", fellBack);
 	out = thNEW(vdGrid,());
-	out->set_grid(g);
+	out->box().g = g;
 	out->set_normalized(true);   /* meshToVolume は真の符号付き距離場を作る */
 	}, vdwhy) )
 		result = vca_err(thNEW(stdString,(vdwhy.c_str())));

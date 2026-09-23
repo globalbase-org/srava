@@ -16,6 +16,8 @@
 # 引数: $1=srava (build-bench の in-place。兄弟 .so を auto-load する)。SRAVA_AGENT は env。
 set -u
 SRAVA="$1"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 
 # manifold box(2,2,2) の三角形数/頂点数 (Manifold の GetMeshGL64 が返す立方体の値)。
 EXP_F=12

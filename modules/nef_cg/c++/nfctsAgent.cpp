@@ -8,9 +8,11 @@
  * ★ 受けるのは **nf-mesh3d だけ** (nfb-mesh3d = nef_hybrid は受けない)。
  *   理由は 2 つ:
  *     ① hybrid は普通の立体を厳密境界で書くので、cgal.so がそのまま読める = 橋が要らない。
- *     ② 幾何クラスの実体は **変種ごとに別の共有ライブラリ** (libsrava_nf_snc / _hybrid) に
- *        あり、シンボルバージョンで分離してある。この橋は snc 側にリンクしているので、
- *        hybrid が作った nfMesh を in-proc で d_cast しても通らない。
+ *     ② snc と hybrid は **別の型** (nfMeshSnc / nfMesh) なので、hybrid が作った値は
+ *        この橋の @sPtr<nfMeshSnc>::d_cast@ を通らない = 受けようがない。
+ *        ★ #3559 より前は「変種ごとに別の共有ライブラリ + シンボルバージョン」で
+ *          分けていた。同じ分離が **型** で付くようになったので、リンクの都合ではなく
+ *          *型の違い* が理由になった (ライブラリは 1 本に畳んだ)。
  *
  * ライセンス: CGAL (GPL) のみ。nef も cgal も CGAL なので新たな混入は無い。
  */
@@ -23,6 +25,7 @@
 #include	"nf/c++/nfMesh.h"
 #include	"cg/c++/cgMesh.h"
 #include	"nfc/c++/nfcCast.h"
+#include	"pig/c++/pigOpMatch.h"   /* ★ #3554 最後の段 2/5: cast の共通マッチ述語 */
 #include	"_ts2/c++/nfctsAgent_.h"
 
 CLASS_TINYSTATE(nfc/c++/nfctsAgent,pig/c++/ptsGenericAgent)
@@ -42,7 +45,9 @@ static const pigOpEntry OPS[] = {
 	 *   ★ **cast** で正しい — 情報の落ちない厳密変換なので粒度パラメータが要らない
 	 *     (occt_mf の triangulate が cast でないのは deflection が要るから)。
 	 *   ★ 出力型は cg-mesh3d = **本物の cgMesh3D**。名前だけ借りた別クラスではない。 */
-	{ "cast", CAST_IN, 2, AK_CACHE, OPWIRE(nfcCast, nfGeom), 0, "(nf-mesh3d)->cg-mesh3d" },
+	/* ★ #3554 最後の段 2/5: cast の行は共通述語 @pig_match_cast_target@ が選ぶ
+	 *   (目標型 = この行の sig の出力型か)。橋は出力型が 1 つなので行は 1 本のまま。 */
+	{ "cast", CAST_IN, 2, AK_CACHE, OPWIRE(nfcCast, nfMeshSnc), 0, "(nf-mesh3d)->cg-mesh3d", 0, 0, 0, &pig_match_cast_target },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 

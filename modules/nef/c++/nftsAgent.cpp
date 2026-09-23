@@ -4,7 +4,7 @@
  *   mfatsAgent / cgatsAgent と同一構造。
  *
  * ★このモジュールの要件 (#3433): **Nef 型を維持したまま op 連鎖する**こと。
- *   ブール op は nfMesh のまま結果を返し、境界表現へ戻すのは volume / export / cache 書き出しだけ。
+ *   ブール op は nfNefMesh のまま結果を返し、境界表現へ戻すのは volume / export / cache 書き出しだけ。
  */
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"
@@ -35,6 +35,7 @@
 #include	"nf/c++/nfaDifference.h"
 #include	"nf/c++/nfaComplement.h"
 #include	"nf/c++/nfaMinkowski.h"
+#include	"nf/c++/nfaHull.h"
 #include	"nf/c++/nfaOffset.h"
 #include	"nf/c++/nfaConvexDecomposition.h"
 #include	"nf/c++/nfaNparts.h"
@@ -56,6 +57,7 @@
 #include	"nf/c++/nfaMirror.h"
 #include	"nf/c++/nfaTransform.h"
 #include	"ts2/c++/stdString.h"
+#include	"pig/c++/pigOpMatch.h"   /* ★ #3554 最後の段 2/5: cast の共通マッチ述語 */
 #include	"_ts2/c++/nftsAgent_.h"
 
 #include	<string.h>
@@ -80,17 +82,21 @@ static const pigOpEntry OPS[] = {
 	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaBox),          0, "->" NF_TYPE },
 	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
 	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaPyramid), 0, "->" NF_TYPE },  /* pyramid(n,h,r) */
-	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaCylinder), 0, "->" NF_TYPE },  /* cylinder(r,h,seg) */
-	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaCone), 0, "->" NF_TYPE },  /* cone(r,h,seg) */
-	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaTorus), 0, "->" NF_TYPE },  /* torus(R,r,seg) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaCylinder), 0, "->" NF_TYPE, 0, 0, 2 },  /* cylinder(r,h,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaCone), 0, "->" NF_TYPE, 0, 0, 2 },  /* cone(r,h,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaTorus), 0, "->" NF_TYPE, 0, 0, 2 },  /* torus(R,r,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
 	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaTetrahedron), 0, "->" NF_TYPE },  /* tetrahedron(r) */
 	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
 	{ "prism",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(nfaPrism), 0, "->" NF_TYPE },  /* prism(n,h,r) */
 	{ "icosphere",     SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaIcosphere), 0, "->" NF_TYPE, 0, 0, 1 },  /* icosphere(r,subdiv) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
-	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaImport), 0, "->" NF_TYPE },  /* import(path): STL/OFF */
+	/* ★ #3554 最後の段 3/5 (2026-09-19): import の行は共通述語 @pig_match_import_ext@ が選ぶ
+	 *   (拡張子が産む型 = @d->import_exts@ の型付き CSV が、**この行の sig の出力型**か)。
+	 *   ⚠ 出力型が拡張子で決まるので、*sig だけでは行が決まらない* のが import の特徴。
+	 *   ★ このカーネルは import の出力型が 1 つなので **行を分ける必要は無い**。 */
+	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(nfaImport), 0, "->" NF_TYPE, 0, 0, 0, &pig_match_import_ext },  /* import(path): STL/OFF */
 	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(nfaEmpty3D), 0, "->" NF_TYPE },  /* 空集合(3D)。{} は中立元なので別物 */
 	/* ★ nreq=1: segs は省略可 (既定 32 は op が入れる)。掃引は common/tube.h。 */
-	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaTube), 0, "->" NF_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
+	{ "tube_ruled",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaTube), 0, "->" NF_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
 	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(nfaSphere),       0, "->" NF_TYPE, 0, 0, 1 },  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ブール: 自型どうし + **混成** (片側が cg / mf / gg)。混成は cache reader の昇格読みで成立する
 	 * (nf-cg-upgrade: MESH → nf / nf-mf-upgrade: MFM3 → nf)。
@@ -98,12 +104,12 @@ static const pigOpEntry OPS[] = {
 	 *   = codec は不要で sig の宣言だけで開通する (2026-08-25 追加)。nef は geogram より先に
 	 *   書かれたので gg 型が存在せず、追随が漏れていた。
 	 * ★all-foreign ((cg,cg)) は書かない — cgal 自身が同じ op を持つので曖昧になる (disjoint 原則)。 */
-	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(nfaUnion, nfGeom, nfGeom),        1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
-	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(nfaIntersection, nfGeom, nfGeom), 1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
-	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(nfaDifference, nfGeom, nfGeom),   1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE },
+	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(nfaUnion, NF_MESH, NF_MESH),        1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
+	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(nfaIntersection, NF_MESH, NF_MESH), 1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE, 1 /* ★可換 */ },
+	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(nfaDifference, NF_MESH, NF_MESH),   1, "[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d,ch-mesh3d](*)->" NF_TYPE },
 	/* ★Nef 固有: 補集合。cgal(corefinement)/manifold には無い op = 多カーネルの質的な差。
 	 * nef しか持たない op なので all-foreign (cg-mesh3d) を書いてよい (曖昧にならない)。 */
-	{ "complement",   MEASURE_IN,1, AK_CACHE, OPWIRE(nfaComplement, nfGeom),   0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
+	{ "complement",   MEASURE_IN,1, AK_CACHE, OPWIRE(nfaComplement, NF_MESH),   0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
 	/* ★Nef 固有: Minkowski 和 (#3440)。offset はこの特殊形 (球との和) = こちらがプリミティブ。
 	 * nef しか持たない op なので **all-foreign も書いてよい** (cgal/manifold に minkowski は無く
 	 * 曖昧にならない = complement と同じ扱い)。cg/mf の mesh は昇格読み (nf-cg-upgrade /
@@ -121,21 +127,31 @@ static const pigOpEntry OPS[] = {
 	 *   (ひさ指摘) なので撤去した (#3440)。 */
 #define NF_MINK_ROW(A)	"(" A "," NF_TYPE ")->" NF_TYPE ";(" A ",cg-mesh3d)->" NF_TYPE ";(" A ",mf-mesh3d)->" NF_TYPE ";(" A ",gg-mesh3d)->" NF_TYPE
 #define NF_MINK_SIG	NF_MINK_ROW(NF_TYPE) ";" NF_MINK_ROW("cg-mesh3d") ";" NF_MINK_ROW("mf-mesh3d") ";" NF_MINK_ROW("gg-mesh3d")
-	{ "minkowski",    BINMESH_IN,2, AK_CACHE, OPWIRE(nfaMinkowski, nfGeom, nfGeom),    0, NF_MINK_SIG },
+	{ "minkowski",    BINMESH_IN,2, AK_CACHE, OPWIRE(nfaMinkowski, NF_MESH, NF_MESH),    0, NF_MINK_SIG },
+	/* ★ #3511: 凸包。**1 個でも受ける**ので nin=1 + variadic=1。頂点しか見ないので
+	 *   n 項が 1 回の convex_hull_3 で済む = `(*)` と書ける。可換 = 1。
+	 *   他カーネルのメッシュも受ける (nef が凸包を持つこと自体は nef 固有ではないが、
+	 *   nf-mesh3d を返す口がここにしか無いので all-foreign を書いてよい)。 */
+	/* ★★ #3528: **"(*!)" = 分解禁止**。hull は入力から **頂点しか使わない**ので、木に分解すると
+	 *   「点 → メッシュを作って cache へ書き、読み戻して面を捨てて頂点に戻す」を段ごとに繰り返す
+	 *   = 作ったものを次の段で捨てる。⚠⚠ それ以前に **落ちうる** — 退化検査は部分集合について
+	 *   閉じていないので、全体が立体でも群が同一平面になると「立体にならない」で明示エラーになる。
+	 *   ⇒ 主型による振り分け (fold 形) は保ったまま、分解だけを止める。 */
+	{ "hull",         MEASURE_IN,1, AK_CACHE, OPWIRE(nfaHull, NF_MESH),        1, "(" NF_TYPE ")->" NF_TYPE ";[" NF_TYPE ",cg-mesh3d,mf-mesh3d,gg-mesh3d](*!)->" NF_TYPE, 1 /* ★可換 */ },
 	/* ★3D offset (#3440 の 2): cgal.so から**移設**した。中身は Minkowski 和 (Nef + 凸分解) なので
 	 * cgal.so に置くのは約束①違反だった。**2D offset は cgal.so に残る** (straight skeleton・Nef 無関係)
 	 * ので、ここで申告するのは **3D の型だけ**。minkowski と同じく nef 固有 = all-foreign を書いてよい。
 	 * 結果は nf 型。cg で続けたいときは利用者が cast("cg-mesh3d", ...) を書く (約束②)。 */
-	{ "offset",       OFFSET_IN, 3, AK_CACHE, OPWIRE(nfaOffset, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE, 0, 0, 2 },  /* ★ nreq=2: 以降は省略可 (既定は op が入れる) */
+	{ "offset",       OFFSET_IN, 3, AK_CACHE, OPWIRE(nfaOffset, NF_MESH),       0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE, 0, 0, 2 },  /* ★ nreq=2: 以降は省略可 (既定は op が入れる) */
 	/* ★Nef 固有: 凸分解 (#3441)。凸片は 1 つの mesh の中に別々の連結成分として入る
 	 * (mesh の配列を返せないため。返し方の検討は #3441 に記録)。個数だけなら convex_pieces。 */
-	{ "convex_decomposition", MEASURE_IN,1, AK_CACHE, OPWIRE(nfaConvexDecomposition, nfGeom), 0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
+	{ "convex_decomposition", MEASURE_IN,1, AK_CACHE, OPWIRE(nfaConvexDecomposition, NF_MESH), 0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
 	/* ★塊の取り出し (#3441 追補・ひさ提案): mesh の配列を返せないので **数 + n 番目** の 2 本にする。
 	 * 塊 = marked volume。凸分解の結果に使うと片が 1 つずつ得られる。 */
-	{ "nparts",               MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNparts, nfGeom),              0, "(" NF_TYPE ")->value;(cg-mesh3d)->value;(mf-mesh3d)->value;(gg-mesh3d)->value" },
-	{ "part",                 MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaPart, nfGeom),                0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
+	{ "nparts",               MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNparts, NF_MESH),              0, "(" NF_TYPE ")->value;(cg-mesh3d)->value;(mf-mesh3d)->value;(gg-mesh3d)->value" },
+	{ "part",                 MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaPart, NF_MESH),                0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
 	/* ★Nef 固有: 内壁除去 (#3442)。repair とは別物で **体積が変わる**。自動ではやらない。 */
-	{ "unify",                MEASURE_IN,1, AK_CACHE, OPWIRE(nfaUnify, nfGeom),               0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
+	{ "unify",                MEASURE_IN,1, AK_CACHE, OPWIRE(nfaUnify, NF_MESH),               0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE },
 	/* ★ #3445: 壊れた境界 (自己交差した閉メッシュ) からソリッドを組み直す。
 	 * 自己交差は Nef 構築を素通りする (面どうしの交差は検査されない) ので、壊れた形のまま
 	 * nf に入っている。それを面ごとの Nef の n 項 union + 有界セルの mark で解き直す。
@@ -152,30 +168,43 @@ static const pigOpEntry OPS[] = {
 	 *     nef が拾うので `solidify(mf)` が routing 不能にならない = 後退しない。
 	 *   ⚠ **(gg-mesh3d) は足さない**。gg の値は geogram を積んだときにしか存在せず、そのときは
 	 *     priority で必ず geogram が勝つので、書いても一生使われない死んだ行になる。 */
-	{ "solidify",     MEASURE_IN,1, AK_CACHE, OPWIRE(nfaSolidify, nfGeom),     0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE },
+	{ "solidify",     MEASURE_IN,1, AK_CACHE, OPWIRE(nfaSolidify, NF_MESH),     0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE },
 	/* ★ #3443: 境界へ落としたときの頂点数 / 面数。 */
-	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNverts, nfGeom), 0, "(" NF_TYPE ")->value" },
-	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNfaces, nfGeom), 0, "(" NF_TYPE ")->value" },
-	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaVolume, nfGeom),       0, "(" NF_TYPE ")->value" },
+	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNverts, NF_MESH), 0, "(" NF_TYPE ")->value" },
+	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaNfaces, NF_MESH), 0, "(" NF_TYPE ")->value" },
+	{ "volume",       MEASURE_IN,1, AK_INLINE,OPWIRE(nfaVolume, NF_MESH),       0, "(" NF_TYPE ")->value" },
 	/* ★ #3487: 値の素性を訊く op。どれも →value で 2D 型を要さない。無いと確認のためだけに
 	 * 別カーネルへ cast させることになり、**cast が通らない値では確認手段そのものが消える**
 	 * (#3478 の非有界・非多様体)。中身は common/meshprops.h (valid の共通定義もそこ)。 */
-	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(nfaBbox, nfGeom),     0, "(" NF_TYPE ")->value" },
-	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(nfaCentroid, nfGeom), 0, "(" NF_TYPE ")->value" },
-	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(nfaArea, nfGeom),     0, "(" NF_TYPE ")->value" },
-	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(nfaValid, nfGeom),    0, "(" NF_TYPE ")->value" },
-	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(nfaExport, nfGeom),       0, "(" NF_TYPE ")->ref" },
+	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(nfaBbox, NF_MESH),     0, "(" NF_TYPE ")->value" },
+	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(nfaCentroid, NF_MESH), 0, "(" NF_TYPE ")->value" },
+	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(nfaArea, NF_MESH),     0, "(" NF_TYPE ")->value" },
+	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(nfaValid, NF_MESH),    0, "(" NF_TYPE ")->value" },
+	/* ★★ #3554 最後の段 4/5 (2026-09-19): export の行は共通述語 @pig_match_export_ext@ が選ぶ
+	 *   (= 第 1 引数の拡張子を **d->export_exts** が書けるか)。出力は常に @ref@ なので
+	 *   **行を分ける必要は無い** (cast / import と違うのはここ)。
+	 *   ⚠⚠ 同時に **規約① (自型優先) を撤去**した — 「入力型の home カーネルが書けるならそこ」
+	 *     という routing の特例で、sig でも記述子でもない *3 つめの規則* だった。
+	 *     ⇒ いまは priority × sig × 拡張子 の普通の決着。 */
+	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(nfaExport, NF_MESH),       0, "(" NF_TYPE ")->ref", 0, 0, 0, &pig_match_export_ext },
 	/* cast は sig の**出力型**で routing される。cg→nf の実変換は nf-cg-upgrade codec が担う。 */
-	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(nfaCast, nfGeom),         0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE ";(ch-mesh3d)->" NF_TYPE   /* ★ #3464: cherchi も MFM3 を名乗る = mf と同じ経路 */ },
-	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaTranslate, nfGeom),    0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(nfaCast, NF_MESH),         0, "(" NF_TYPE ")->" NF_TYPE ";(cg-mesh3d)->" NF_TYPE ";(mf-mesh3d)->" NF_TYPE ";(gg-mesh3d)->" NF_TYPE ";(ch-mesh3d)->" NF_TYPE
+	                                                          /* ★ #3527: gu-mesh3d も MFM3 ⇒ NF_MESH::create_for_meta が読める (2D は nef に型が無い) */
+	                                                          ";(gu-mesh3d)->" NF_TYPE,  /* ★ #3464: cherchi も MFM3 を名乗る = mf と同じ経路 */
+	                                                          /* ★ #3554 最後の段 2/5: cast の行は
+	                                                           *   共通述語 @pig_match_cast_target@ が選ぶ (目標型 = この行の sig の出力型か)。
+	                                                           *   ⚠ このカーネルの cast は出力型が 1 つなので **行を分ける必要は無い**
+	                                                           *     (分ける理由は「1 行 1 出力型」という規約の方であって、名前ではない)。 */
+	                                                          0, 0, 0, &pig_match_cast_target },
+	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaTranslate, NF_MESH),    0, "(" NF_TYPE ")->" NF_TYPE },
 	/* ★ #3486: アフィン変換 4 op。translate だけあって残り 3 本が無いと、式の途中で
 	 * **カーネルが裏返る** (rotate を書いた瞬間に cgal/manifold へ落ちる)。4 本とも
 	 * 3D→3D で 2D 型を要さないので、2D 型を持たないこのカーネルでも置ける。
-	 * 引数の解釈と行列作りは common/affine.h・適用は nfMesh::apply_affine。 */
-	{ "rotate",       ROTATE_IN,  3,AK_CACHE, OPWIRE(nfaRotate, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE },
-	{ "scale",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaScale, nfGeom),        0, "(" NF_TYPE ")->" NF_TYPE },
-	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaMirror, nfGeom),       0, "(" NF_TYPE ")->" NF_TYPE },
-	{ "transform",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaTransform, nfGeom),    0, "(" NF_TYPE ")->" NF_TYPE },
+	 * 引数の解釈と行列作りは common/affine.h・適用は nfNefMesh::apply_affine。 */
+	{ "rotate",       ROTATE_IN,  3,AK_CACHE, OPWIRE(nfaRotate, NF_MESH),       0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "scale",        MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaScale, NF_MESH),        0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "mirror",       MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaMirror, NF_MESH),       0, "(" NF_TYPE ")->" NF_TYPE },
+	{ "transform",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(nfaTransform, NF_MESH),    0, "(" NF_TYPE ")->" NF_TYPE },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -245,7 +274,10 @@ extern const srava_module_descriptor nftsAgent_descriptor = {
 	.export_exts   = "off,stl,ply,obj",   /* */
 	.provides      = nef_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
 	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
-	.cache_version = 5,   /* ★★ v5 (#3507・2026-09-10): SNC の framing を **ブロック分割**へ変更
+	.cache_version = 6,   /* ★ v6 (#3525・2026-09-15): **volume を落とすところで CGAL::exact() を通す**。
+	                       *   to_double は Lazy_exact_nt の区間近似で正しく丸められず、値が 1〜2 ulp
+	                       *   動いていた。⚠ cgal 側と対で直してある (cgMesh3D::op_volume)。
+	                       * ★★ v5 (#3507・2026-09-10): SNC の framing を **ブロック分割**へ変更
 	                       *   ([u32 blocklen][block]…[u32 0])。全長の前置をやめたので書き手が
 	                       *   全文を作らなくてよくなり、4 GiB の上限も消えた。
 	                       *   ★★ v4 (#3499・2026-09-07): **nef_snc が付録の境界を書くのをやめた**

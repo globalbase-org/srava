@@ -157,3 +157,4 @@ pig_value_parse(const char *text)
 		return thNEW(pigDataError,(thNEW(stdString,("pig_value_parse: trailing characters"))));
 	return v;
 }
+

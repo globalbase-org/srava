@@ -14,7 +14,6 @@
 #include	"ts2/c++/stdString.h"
 #include	"common/geodesic.h"   /* subdiv_to_n / SEED_ICOSAHEDRON */
 #include	"_ts2/c++/cgaIcosphere_.h"
-void cga_make_geodesic(cgMesh::Mesh& ball, int seed, int n, double r);
 CLASS_TINYSTATE(cg/c++/cgaIcosphere,pig/c++/ptsCalcBody)
 #if 0
 TS_BEGIN_IMPLEMENT
@@ -61,7 +60,14 @@ cgaIcosphere_::compute()
 	double r      = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	int    subdiv = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 細分回数。既定 0(二十面体 20 面) */
 	int    n      = srava_geo::subdiv_to_n(subdiv);
+	/* ★ #3516: 退化・負の半径を弾く (nef / geogram / cherchi / occt / openvdb は元から
+	 *   持っていた検査を揃えた)。 */
+	if ( !(r > 0) ) {
+		result = cga_err(thNEW(stdString,("icosphere: radius must be > 0")));
+		return;
+	}
 
 	mesh = thNEW(cgMesh3D,());
-	cga_make_geodesic(mesh->mesh(), srava_geo::SEED_ICOSAHEDRON, n, r);
+	/* ★ #3545: CGAL に触るのは幾何 lib 側 (cgMesh3D::build_geodesic)。 */
+	mesh->build_geodesic(srava_geo::SEED_ICOSAHEDRON, n, r);
 }

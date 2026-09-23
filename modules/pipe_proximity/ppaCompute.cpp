@@ -68,5 +68,9 @@ void
 ppaCompute_::compute()
 {
 	const char *opn = ( _op.is_notNull() ) ? _op->get_str() : "pipe_proximity";
-	result = pp_compute(opn, *args);
+	/* ★ #3502: 基底 ptsCalcBody の brk_ を渡す (#3498 で入った旗)。
+	 *   ⚠ is_destroyed() ではない — ソルバは vendor のホスト非依存コードで、しかも
+	 *     座標降下は parallel_for でワーカーを起こす。tinyState のビットフィールドを
+	 *     そこから引くわけにはいかない (理由は pigBreak.h)。 */
+	result = pp_compute_brk(opn, *args, &brk_);
 }

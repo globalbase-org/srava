@@ -10,6 +10,7 @@
  * 両者の境界が **この plain 型ヘッダ**(pipe も pigData も登場しない)。 */
 
 #include <vector>
+#include <functional>
 
 struct PPContact {
 	double gap;
@@ -33,7 +34,9 @@ std::vector<PPContact>
 pipe_proximity_run(const std::vector<double>& ctrl_xyz, int npts,
                    double r0, double m, const std::vector<double>& radial_sr,
                    double reportGap,
-                   double clampS0 = -1, double clampS1 = -1, double clampR = 0);
+                   double clampS0 = -1, double clampS1 = -1, double clampR = 0,
+                   const std::function<bool()>& cancelled = std::function<bool()>(),
+                   bool *cancelledOut = 0);
 
 /* 通過点ピン: 内部通過点 M_joint = (C[joint]+C[joint+1])/2 を target へ留める。
  * hard != 0 = 厳密(零空間射影) / hard == 0 = ソフト(ペナルティ)。 */
@@ -67,6 +70,10 @@ struct PPAdjustParams {
 	int    polishEnable;          /* ポリッシュを行うか(既定 1) */
 	/* ソルバ選択: 0=勾配降下(従来), 1=座標降下(単点・軸並行 line search)。
 	 * cd は cd.cpp の座標降下アルゴリズムを本番へ移植したもの。様々なパターンで cd/協調を評価する用。 */
+	/* ★ #3502: 走行中の中断。ホストが「もう要らない」を答える述語(空 = 中断しない)。
+	 *   ⚠ この境界は **plain 型のみ**の約束なので、pigBreak ではなく述語を渡す
+	 *     (旗の実体は srava 側が持つ)。反復の境界でだけ呼ばれる。 */
+	std::function<bool()> cancelled;
 	int    solver;                /* 0=grad(既定), 1=cd */
 	double cdPitch0;              /* 座標降下 初期 pitch(既定 8.0) */
 	double cdPitchMin;            /* 座標降下 最小 pitch(既定 0.01) */
@@ -82,6 +89,10 @@ struct PPAdjustResult {
 	double energy;                  /* 最終エネルギー */
 	double maxClearViolation;       /* max(0, dMin - gap) 残差(0 に近いほどクリアランス達成) */
 	int    feasible;                /* 硬拘束(固定 DOF / hard ピン)が両立したか(1/0) */
+	/* ★★ #3502: 中断で打ち切ったか(1/0)。**呼び手はこれを見て結果を捨てること**。
+	 *   途中で止めた解は iters / energy / feasible のどれを見ても「収束が浅いだけの
+	 *   普通の結果」と見分けがつかない。成功として扱うとキャッシュに焼き付く。 */
+	int    cancelled = 0;
 };
 
 /* 自己接近する初期設計を、gap >= dMin を満たすよう制御点を動かす(単一チェーン)。 */
@@ -103,7 +114,9 @@ struct PPBody {
 
 /* N 体近接検出(可動 body の自己接近 + 異 body 間の交差)。各 PPContact に bodyA/bodyB が入る。 */
 std::vector<PPContact>
-pipe_scene_proximity_run(const std::vector<PPBody>& bodies, double reportGap);
+pipe_scene_proximity_run(const std::vector<PPBody>& bodies, double reportGap,
+                         const std::function<bool()>& cancelled = std::function<bool()>(),
+                         bool *cancelledOut = 0);
 
 /* N 体調整: movableIdx の Body を、他の固定 Body 群を障害物として平衡へ。
  * 返りは可動 Body の調整後 ctrl(PPAdjustResult)。fixed/pins は可動 Body の DOF に効く。 */
@@ -121,6 +134,8 @@ std::vector<PPSample>
 pipe_sample_run(const std::vector<double>& ctrl_xyz, int npts,
                 double r0, double m, const std::vector<double>& radial_sr,
                 double pitch,
-                double clampS0 = -1, double clampS1 = -1, double clampR = 0);
+                double clampS0 = -1, double clampS1 = -1, double clampR = 0,
+                const std::function<bool()>& cancelled = std::function<bool()>(),
+                bool *cancelledOut = 0);
 
 #endif

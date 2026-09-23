@@ -1,8 +1,11 @@
 /*
  * ptsnfWireCacheStreamReaderMesh — nf(Nef)mesh キャッシュ入力用 reader 派生 (#3433 P1)。
  * cg/mf 版のミラー。META gate で D_META タグを検証し (自型 "NEF3" と cg の "MESH" を受理 =
- * ★MESH→nf の昇格読みはフレーミングが同一なので同じ decode 経路)、ACT_START で nfMesh を
+ * ★MESH→nf の昇格読みはフレーミングが同一なので同じ decode 経路)、ACT_START で nfNefMesh を
  * 生成して decode が pull() でチャンク境界をまたいでバイトを取り Nef を再構成する。
+ *
+ * ★★ #3559: **どちらの変種として読むか**は ctor で渡される (@_variant@)。この TU 自身は
+ *   変種を焼き込んでいない = 幾何ライブラリ (libsrava_cg) に 1 本だけ在ればよい。
  */
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"
@@ -25,7 +28,12 @@ class TS_THISCLASS : public TS_BASECLASS {
 public:
 	ptsnfWireCacheStreamReaderMesh_(
 		sPtr<ptsObject> parent,
-		sPtr<stdString> _cacheFileName);
+		sPtr<stdString> _cacheFileName,
+		/* ★★ #3559: **どの変種として読むか** (nfMesh.h の nfWireVariant)。
+		 *   受ける 4CC の判定と、読めなかったときに名乗るモジュール名が入っている。
+		 *   ⚠ 以前は @nfGeom::create_for_meta@ と @NF_MODULE_NAME@ を直に参照していた。
+		 *     それだと **この TU が変種ごとに別物**になり、幾何ライブラリを 1 本にできない。 */
+		const nfWireVariant *_variant);
 
 	sRptr<ptsObject,tinyState>		parent;
 
@@ -46,6 +54,7 @@ TS_BEGIN_INTERFACE
 #include	<stdint.h>
 class ptsObject;
 class stdString;
+struct nfWireVariant;
 TS_END_INTERFACE
 
 #endif
@@ -113,12 +122,12 @@ ptsnfWireCacheStreamReaderMesh_::more()
 TS_STATE(INI_ptsWireCacheStreamReader_METADATA)   /* D_META タグが nf の受理形式か検証 */
 {
 	const uint8_t *m = ( meta.length() > 0 ) ? &meta[0] : (const uint8_t*)0;
-	if ( nfGeom::create_for_meta(m, meta.length()) == thNULL ) {
+	if ( _variant->create(m, meta.length()) == thNULL ) {
 		/* ★ #3479: どの形式を誰が読めなかったのかを言う。従来は errCode だけで、
 		 *   利用者には「materialize できない」としか届かなかった。 */
 		char b[128];
 		::snprintf(b, sizeof b, "module '%s' has no reader for format '%.4s'",
-		           NF_MODULE_NAME, ( meta.length() >= 4 ) ? (const char*)m : "????");
+		           _variant->module, ( meta.length() >= 4 ) ? (const char*)m : "????");
 		set_err(-2, b);
 	}      /* nf の対応形式ではない(未知タグ) */
 	return rDO|INI_ptsWireCacheStreamReader_METADATA_FINISH;
@@ -128,11 +137,11 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	chunkPos = rec_payload.length();   /* INI の D_META を消費済みにし、最初の pull で D_CHUNK へ */
 	pullErr  = 0;
 	const uint8_t *mp = ( meta.length() > 0 ) ? &meta[0] : (const uint8_t*)0;
-	sPtr<nfGeom> geom = nfGeom::create_for_meta(mp, meta.length());
+	sPtr<nfGeom> geom = _variant->create(mp, meta.length());
 	if ( geom == thNULL ) {                     /* META gate と同じ理由 (再掲) */
 		char b[128];
 		::snprintf(b, sizeof b, "module '%s' has no reader for format '%.4s'",
-		           NF_MODULE_NAME, ( meta.length() >= 4 ) ? (const char*)mp : "????");
+		           _variant->module, ( meta.length() >= 4 ) ? (const char*)mp : "????");
 		set_err(-2, b);
 		return rDO|FIN_START;
 	}
@@ -149,7 +158,7 @@ TS_THREAD(ACT_START)                              /* D_CHUNK ストリームを 
 	 *   ★これを入れる前は CGAL の assertion で **agent プロセスごと落ちて**いた
 	 *   ("agent closed unexpectedly" としか出ず原因が分からなかった)。 */
 	{
-		sPtr<nfMesh> m3 = sPtr<nfMesh>::d_cast(geom);
+		sPtr<nfNefMesh> m3 = sPtr<nfNefMesh>::d_cast(geom);
 		if ( m3.is_notNull() && m3->build_failed() ) {
 			/* ★ #3504: 理由が付いていればそれを出す (4 GiB 超の SNC など)。 */
 			const char *why = m3->last_error();

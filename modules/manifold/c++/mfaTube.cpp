@@ -1,5 +1,5 @@
 /*
- * mfaTube — tube(path[, segs]) の計算本体(mf 版・cgaTube のミラー)= パスに沿って丸断面を掃引した管。
+ * mfaTube — tube_ruled(path[, segs]) の計算本体(mf 版・cgaTube のミラー)= パスに沿って丸断面を掃引した管。
  *
  * **次元ディスパッチ**: パス頂点の位置の長さで 3D / 2D を振り分ける(cgaTube と同一)。
  *   - 3D: path = [[[x,y,z], r], ...] → 3D 折れ線まわりに丸断面を掃引した立体(mfMesh)。
@@ -22,6 +22,7 @@
 #include	"mf/c++/mfMesh.h"
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"common/tube.h"   /* 掃引の共通生成器(cgal.so と共有) */
 #include	<vector>
 #include	"_ts2/c++/mfaTube_.h"
@@ -117,14 +118,18 @@ mfaTube_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<pigDataArray> path = ( na > 0 ) ? (*args)[0]->obt_array()
 	                                     : sPtr<pigDataArray>();
-	int segs = ( na > 1 ) ? (int)(*args)[1]->get_int() : 32;   /* 円の辺数(精度ピッチ)。既定 32 */
-	if ( segs < 3 ) segs = 3;
-	if ( segs > 4096 ) segs = 4096;
+	int    segs_in = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 0 = 未指定 */
+	int    segs = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(segs_in, 32, &segs) != srava_geo::SEGS_OK ) {
+		result = mfa_err(thNEW(stdString,(srava_geo::segs_error("tube_ruled").c_str()))); return;
+	}
 
 	int nraw = path.is_notNull() ? path->length() : 0;
 	if ( nraw < 2 ) {
 		result = mfa_err(thNEW(stdString,(
-		    "tube: needs >= 2 path vertices ([[[x,y,z],r],...] for 3D / [[[x,y],r],...] for 2D)")));
+		    "tube_ruled: needs >= 2 path vertices ([[[x,y,z],r],...] for 3D / [[[x,y],r],...] for 2D)")));
 		return;
 	}
 
@@ -138,7 +143,7 @@ mfaTube_::compute()
 		sPtr<pigDataArray> pr = path->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! pr.is_notNull() || pr->length() < 2 ) {
 			result = mfa_err(thNEW(stdString,(
-			    "tube: each vertex must be [pos, r] (pos=[x,y,z] or [x,y])")));
+			    "tube_ruled: each vertex must be [pos, r] (pos=[x,y,z] or [x,y])")));
 			return;
 		}
 		sPtr<pigDataArray> pos = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
@@ -146,8 +151,8 @@ mfaTube_::compute()
 		if ( i == 0 ) dim = ( pl >= 3 ) ? 3 : 2;   /* 先頭頂点で次元を確定 */
 		if ( pl < dim ) {
 			result = mfa_err(thNEW(stdString,(
-			    dim == 3 ? "tube: vertex position must be [x,y,z] (3D path)"
-			             : "tube: vertex position must be [x,y] (2D path)")));
+			    dim == 3 ? "tube_ruled: vertex position must be [x,y,z] (3D path)"
+			             : "tube_ruled: vertex position must be [x,y] (2D path)")));
 			return;
 		}
 		Praw[(size_t)i] = TubeV3(pos->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt(),
@@ -155,7 +160,7 @@ mfaTube_::compute()
 		                         dim == 3 ? pos->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt() : 0.0);
 		Rraw[(size_t)i] = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
 		if ( Rraw[(size_t)i] < 0.0 ) {
-			result = mfa_err(thNEW(stdString,("tube: radius must be >= 0")));
+			result = mfa_err(thNEW(stdString,("tube_ruled: radius must be >= 0")));
 			return;
 		}
 	}
@@ -166,7 +171,7 @@ mfaTube_::compute()
 	srava_geo::tube_dedup(Praw, Rraw, P, R);
 	if ( P.size() < 2 ) {
 		result = mfa_err(thNEW(stdString,(
-		    "tube: needs >= 2 distinct path vertices (all given vertices coincide)")));
+		    "tube_ruled: needs >= 2 distinct path vertices (all given vertices coincide)")));
 		return;
 	}
 
@@ -185,11 +190,11 @@ mfaTube_::compute()
 	int st = srava_geo::make_tube_3d(P, R, segs, sink);
 	if ( st == srava_geo::TUBE_ERR_ZERO_SEGMENT ) {
 		result = mfa_err(thNEW(stdString,(
-		    "tube: two consecutive zero-radius vertices (degenerate segment)")));
+		    "tube_ruled: two consecutive zero-radius vertices (degenerate segment)")));
 		return;
 	}
 	if ( st != srava_geo::TUBE_OK ) {
-		result = mfa_err(thNEW(stdString,("tube: duplicate consecutive path vertices")));
+		result = mfa_err(thNEW(stdString,("tube_ruled: duplicate consecutive path vertices")));
 		return;
 	}
 	/* 共通生成器は外向き右手系で三角形を出すので、cg 側のような向き反転の保険は要らない

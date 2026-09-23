@@ -6,6 +6,7 @@
 #include	"pig/c++/pigData.h"
 #include	"nf/c++/nfMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"common/geodesic.h"   /* seg_to_n / SEED_OCTAHEDRON (cgal/manifold と共通) */
 #include	<vector>
 #include	"_ts2/c++/nfaSphere_.h"
@@ -29,7 +30,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -43,7 +44,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -66,23 +67,25 @@ nfaSphere_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r   = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
-	int    seg = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 円周分割数。0=既定 */
+	int    seg_in = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 0 = 未指定 */
+	int    seg = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(seg_in, 0, &seg) != srava_geo::SEGS_OK ) {
+		result = nfa_err(thNEW(stdString,(srava_geo::segs_error("sphere").c_str()))); return;
+	}
 	int    n   = srava_geo::seg_to_n(seg);
+	/* ★ #3516: 退化・負の半径を弾く (icosphere / cylinder / cone などは元から持っていた検査を
+	 *   sphere にも揃えた)。⚠ 弾かないと半径 0 が「体積 0 の球」として黙って下流へ流れる。 */
+	if ( !(r > 0) ) {
+		result = nfa_err(thNEW(stdString,("sphere: radius must be > 0")));
+		return;
+	}
 
-	nfMesh::Mesh m;
-	struct GeoSink {
-		nfMesh::Mesh&                           m;
-		std::vector<nfMesh::Mesh::Vertex_index> vs;
-		GeoSink(nfMesh::Mesh& mm) : m(mm) {}
-		int  add_vertex(double x, double y, double z) {
-			vs.push_back(m.add_vertex(nfMesh::Point_3(x, y, z)));
-			return (int)vs.size() - 1;
-		}
-		void add_triangle(int a, int b, int c) { m.add_face(vs[a], vs[b], vs[c]); }
-	} sink(m);
-	srava_geo::make_geodesic(srava_geo::SEED_OCTAHEDRON, n, r, sink);
-	mesh = thNEW(nfMesh,());
-	mesh->set_from_mesh(m);
+	/* ★ #3545: 測地球の受け皿 (Surface_mesh) は **幾何 lib 側**に置いた。
+	 *   ここで持つと、この TU が CGAL を引き込んで可変大域のコピーができる。 */
+	mesh = thNEW(NF_MESH,());
+	mesh->build_geodesic((int)srava_geo::SEED_OCTAHEDRON, n, r);
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して mesh 未設定で return するので

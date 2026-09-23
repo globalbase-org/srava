@@ -3,23 +3,33 @@
 # env: SRAVA_AGENT, SRAVA_CACHE_DIR, SRAVA_PATH。
 #
 # ★ TrueType の字形を **2D の曲線 (Bezier / B-spline) のまま** 取り込み、平面上の Face
-#   (oc-cross2d) にする。押し出すと側面は平面の帯ではなく **厳密な押し出し面**になる。
+#   (oc-face3d) にする。押し出すと側面は平面の帯ではなく **厳密な押し出し面**になる。
 SRAVA="${1:?srava binary not given}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 NG=0
 MOD='include "module/all.sra";'
 
 # ★ フォントが無い機械では **スキップする** (テストの前提であって検証対象ではない)。
+# ⚠ パスは **必ず引用する**。`for f in … ; do` のリストで空白入りのパスを裸で書くと
+#   語に割れて黙って見つからなくなる (Times New Roman が実例・2026-09-17 に macMINI が指摘)。
+#   ★ 実測: 引用あり → 見つかる / 引用なし → 空。⇒ *その機体でだけ黙る* いちばん気づきにくい形。
+#   ⚠ いま並んでいるものに空白入りは Times New Roman だけだが、次に足す人のために揃えておく。
 FONT=""
-for f in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
-         /usr/share/fonts/dejavu/DejaVuSans.ttf \
-         /usr/share/fonts/TTF/DejaVuSans.ttf \
-         /Library/Fonts/Arial.ttf ; do
+for f in "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf" \
+         "/usr/share/fonts/dejavu/DejaVuSans.ttf" \
+         "/usr/share/fonts/TTF/DejaVuSans.ttf" \
+         "/Library/Fonts/Arial.ttf" \
+         "/System/Library/Fonts/Supplemental/Arial.ttf" \
+         "/System/Library/Fonts/Helvetica.ttc" ; do
 	[ -f "$f" ] && { FONT="$f"; break; }
 done
 FONT2=""
-for f in /usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf \
-         /usr/share/fonts/dejavu/DejaVuSerif.ttf ; do
+for f in "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf" \
+         "/usr/share/fonts/dejavu/DejaVuSerif.ttf" \
+         "/System/Library/Fonts/Supplemental/Times New Roman.ttf" \
+         "/System/Library/Fonts/Supplemental/Georgia.ttf" ; do
 	[ -f "$f" ] && { FONT2="$f"; break; }
 done
 
@@ -38,14 +48,26 @@ if [ -n "$OP" ] && [ -n "$CP" ] && [ "$(near "$OP" "$CP" 1e-12)" = "0" ]; then
 else echo "TEXT_FAIL: prism が cgal と一致しない (occt=$OP cgal=$CP)"; NG=1; fi
 
 if [ -z "$FONT" ]; then
+	# ⚠⚠ スキップを **緑と同じ顔にしない** — 「1 度も検定していないのに緑」になり、
+	#   その陰で期待値が古びても気づけない (実際 2026-09-17 にそれで 1 件隠れていた)。
+	#   ⇒ 終端の文言を変えてログで見分けられるようにする (ctest の判定は従来どおり)。
 	echo "  (フォントが見つからないので text 系はスキップ)"
-	[ "$NG" -eq 0 ] && echo "OCCT-TEXT-OK"
+	echo "  ⚠ 探した場所: /usr/share/fonts/truetype/dejavu ・ /usr/share/fonts/dejavu ・"
+	echo "    /usr/share/fonts/TTF ・ /Library/Fonts — macOS は /System/Library/Fonts/Supplemental/ かも"
+	[ "$NG" -eq 0 ] && echo "OCCT-TEXT-OK (⚠ text 系は **スキップ** — フォント無し)"
 	exit "$NG"
 fi
 
 # ---- ② text は oc-cross2d を作る ----
+# ★★ #3544 段 1 (2026-09-17) で **名乗りを幾何から導く**ようになった
+#   (ocShape.h:314 @type_name() = on_z0_plane() ? oc-cross2d : oc-face3d@)。
+#   グリフは z=0 に載るので、正しい名乗りは **oc-cross2d**。
+# ⚠ 期待値を oc-face3d のままにしていたのを 2026-09-17 の統合で直した。
+#   mac 側で緑のままだったのは、下のフォント探索が **macOS の実際の置き場所を含んでおらず**
+#   (/Library/Fonts/Arial.ttf は現行 macOS では /System/Library/Fonts/Supplemental/ に在る)
+#   text 系が丸ごとスキップされていたためと見ている ⇒ **スキップは緑と区別できる形にした** (下)。
 case "$(msg "print(\"occt\"::text(\"$FONT\", \"O\", 10));")" in
-	*oc-cross2d*) echo "  ok text は oc-cross2d を作る" ;;
+	*oc-cross2d*) echo "  ok text は oc-cross2d を作る (z=0 に載るので幾何から導いた名乗り)" ;;
 	*) echo "TEXT_FAIL: text が oc-cross2d を作らない"; NG=1 ;;
 esac
 
@@ -70,6 +92,13 @@ if [ -n "$FONT2" ]; then
 	if [ -n "$A2" ] && [ "$(near "$A" "$A2" 1e-6)" != "0" ]; then
 		echo "  ok フォントを変えると形が変わる ($A -> $A2)"
 	else echo "TEXT_FAIL: フォントを変えても形が変わらない ($A / $A2)"; NG=1; fi
+else
+	# ⚠⚠ ここも **黙って消える節** だった (2026-09-17・macMINI の実測ログで判明)。
+	#   2 本目のフォントが無いと if がまるごと飛び、*その行が出ないこと* 以外に痕跡が残らない。
+	#   ⇒ ⑤の丸ごとスキップと同じ形が **同じファイルの中に 2 つ**あった。
+	#   ★ 飛ばすなら「飛ばした」と言う — 出力の有無を読み手に数えさせない。
+	echo "  ⚠ 2 本目のフォントが無いので「フォントを変えると形が変わる」は **スキップ**"
+	SKIPPED2=1
 fi
 
 # ---- ⑥ revolve が回転体を作る ----
@@ -109,5 +138,5 @@ case "$(msg "print(area(polygonize(\"occt\"::text(\"$FONT\", \"O\", 10), 0)));")
 	*) echo "TEXT_FAIL: polygonize の粒度 0 が明示エラーにならない"; NG=1 ;;
 esac
 
-[ "$NG" -eq 0 ] && echo "OCCT-TEXT-OK"
+[ "$NG" -eq 0 ] && echo "OCCT-TEXT-OK${SKIPPED2:+ (⚠ 2 本目のフォント無しで 1 項目スキップ)}"
 exit "$NG"

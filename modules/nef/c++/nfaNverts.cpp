@@ -9,7 +9,6 @@
 #include	"pig/c++/pigData.h"
 #include	"nf/c++/nfMesh.h"
 #include	"ts2/c++/stdString.h"
-#include	<CGAL/Polygon_mesh_processing/measure.h>
 #include	"_ts2/c++/nfaNverts_.h"
 
 CLASS_TINYSTATE(nf/c++/nfaNverts,pig/c++/ptsCalcBody)
@@ -43,7 +42,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -65,17 +64,18 @@ void
 nfaNverts_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	if ( ! in.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("nverts: needs a Nef mesh")));
 		return;
 	}
-	nfMesh::Mesh m;
-	if ( ! in->to_mesh(m) ) {
+	/* ★ #3545: Mesh をここで持たない — 持つとこの TU が CGAL を引き込む。 */
+	int nv = 0, nf = 0;
+	if ( ! in->boundary_counts(&nv, &nf) ) {
 		char b[256];
 		::snprintf(b, sizeof b, "nverts: this Nef has no boundary mesh (%s)", nf_why(in));
 		result = nfa_err(thNEW(stdString,(b)));
 		return;
 	}
-	result = thNEW(pigDataInteger,((INTEGER64)m.number_of_vertices()));
+	result = thNEW(pigDataInteger,((INTEGER64)nv));
 }

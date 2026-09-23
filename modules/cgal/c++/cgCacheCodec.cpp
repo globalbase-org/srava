@@ -16,9 +16,10 @@
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/ptsObject.h"
 #include	"pig/c++/ptsApplication.h"   /* ptsObject 派生 TU の作法 (ptsApp 完全型) */
-#include	"cg/c++/cgMesh.h"
+#include	"cg/c++/cgMeshCgal.h"
 #include	"cg/c++/ptscgWireCacheStreamReaderMesh.h"
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
+#include	"pt/c++/ptCloud.h"   /* ★ #3528: 点群は中立の libsrava_pt が持つ (借りる) */
 
 static sPtr<tinyState>
 cg_mk_reader(sPtr<ptsObject> parent, sPtr<stdString> path)
@@ -59,8 +60,16 @@ PIG_WIRE_DEF(cgMesh, cg_mk_reader, cg_mk_writer);
  *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
 extern const pigModuleType cgal_provides[];
 const pigModuleType cgal_provides[] = {
-	{ &cgMesh::WIRE, "cg-mesh3d,cg-cross2d",
+	/* ★ #3533: 2D は **2 型が 1 つの 4CC (PLY2) を共有する**。逆引き (4CC → 型) は
+	 *   2026-08-19 に撤去済みなので曖昧さは出ない — 正引き (型名 → 4CC) は一意のまま。 */
+	{ &cgMesh::WIRE, "cg-mesh3d,cg-cross2d,cg-face3d",
 	  "MESH,PLY2,MFM3,MFC2,NEFB" },   /* ★ #3499: NEF3 (nef_snc = 常に SNC) は読まない → 橋 nef_cg.so */
+	/* ★ #3528: **自前のクラスを作らず libsrava_pt のクラスをそのまま並べる** (occt_mf が mfGeom を
+	 *   借りるのと同じ作法)。estimate_normals が pt-cloud3d を読み書きするため、agent プロセスに
+	 *   cgal.so しか load されない process 実行でも codec がここから届く必要がある。
+	 *   ★ #3528 続き: hull が **2D の点群も受ける**ようになったので pt-cloud2d も名乗る
+	 *     (estimate_normals だけの頃は 3D しか要らなかった)。 */
+	{ &ptCloud::WIRE, PT_TYPE_2D "," PT_TYPE_3D, PT_TAG_2D "," PT_TAG_3D },
 	{ 0, 0, 0 },
 };
 

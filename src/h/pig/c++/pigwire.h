@@ -41,6 +41,19 @@ enum {
    *   agent 側は pig_value_parse() で戻し、そのモジュールの descriptor->configure() を呼ぶ
    *   (docs/srava_load_control_design.md §17.6・module_design.md)。 */
   C_ENV        = 10,
+  /* ★ #3417 (2026-09-06): **相手が消えた** の通知。C_ARG_DATA と同じく
+   *   **ワイヤには乗らない** — ptsWirePipe が read の EOF を検出したときに
+   *   ptsMediatorPacket の type としてだけ上へ投げる (payload なし)。
+   *
+   *   ⚠ W_END と混ぜてはいけない。W_END は「もう送るものは無い」= **正常**で、
+   *     planner は要求 (C_ARG_END) と同時に必ず送る。計算開始のたびに届くので、
+   *     これを撤収の合図に使うと **正常実行が自分の実行体を destroy する**。
+   *     W_EOF は「返す先がもう居ない」= **異常**で、意味が正反対。
+   *
+   *   受け手: agent プロセスの ptsAgentApplication::forward_packet が
+   *   agent->destroy() を撃つ (計算中の実行体へ中断を届ける唯一の非シグナル経路)。
+   *   planner 側 (ptsMediatorExternal) は無視する — 自分が閉じた側なので用が無い。 */
+  W_EOF        = 11,
 
   /* データプレーン (pigCacheStream: キャッシュファイル本体) */
   D_META       = 64,  /* メタ(repr_type で分岐) */

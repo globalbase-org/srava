@@ -17,7 +17,7 @@
 extern const pigModuleType nef_mf_provides[];
 const pigModuleType nef_mf_provides[] = {
 	/* 入力: nef_snc の SNC。★ NEFB (hybrid) は名乗らない (nfmtsAgent.cpp 冒頭参照)。 */
-	{ &nfGeom::WIRE, "nf-mesh3d", "NEF3" },
+	{ &nfMeshSnc::WIRE, "nf-mesh3d", "NEF3" },
 	/* 出力: Manifold の raw double mesh。 */
 	{ &mfGeom::WIRE, "mf-mesh3d", "MFM3" },
 	{ 0, 0, 0 },

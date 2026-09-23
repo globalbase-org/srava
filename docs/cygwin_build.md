@@ -48,7 +48,7 @@ Cygwin は **TBB と OpenCASCADE をパッケージしていない**(`cygcheck -
 | モジュール | Cygwin | 理由 |
 |---|---|---|
 | `cgal` / `nef_hybrid` / `manifold` / `pipe_proximity` | **可** | 既定 ON のまま使える |
-| `nef_snc` | **可** | ただし**全プラットフォームで既定 OFF**。要るなら `-DSRAVA_MODULE_NEF_SNC=ON` |
+| `nef_snc` | **可** | 既定 ON のまま使える（2026-09-16 に既定 ON へ。以前は全プラットフォームで OFF） |
 | `geogram` / `openvdb`(+ 橋渡し 3 本) | **不可** | TBB が要る(下記)。他では既定 ON・Cygwin では自動 OFF |
 | `occt` / `occt_mf` | **不可** | OpenCASCADE が無い。他では既定 ON・Cygwin では自動 OFF |
 | `cherchi` | **不可** | 依存の abseil が Cygwin を明示的に拒否する。他では既定 ON・Cygwin では自動 OFF |

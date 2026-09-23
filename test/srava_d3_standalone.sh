@@ -11,6 +11,8 @@
 # 引数: $1=srava  $2=srava_agent  $3=d3.so
 set -u
 SRAVA="$1"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 AGENT="$2"
 D3SO="$3"
 

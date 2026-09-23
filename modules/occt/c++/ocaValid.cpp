@@ -66,10 +66,25 @@ ocaValid_::compute()
 {
 	ocShape::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
-	if ( ! in.is_notNull() ) {
-		result = oca_err(thNEW(stdString,("valid: needs an OCCT shape")));
+	/* ★★ #3547 (2026-09-18): **2D も受ける**。定義は共通 (#3487 を 2D へ写した 3 条件・
+	 *   src/h/common/ringprops.h)。⚠ 3D の「境界辺が無い」は 2D では条件にならない
+	 *   (縁を持つのが正常) — 中身は ocFace2D::op_valid のほうに書いてある。 */
+	sPtr<ocFace2D> f2 = ( na > 0 ) ? sPtr<ocFace2D>::d_cast((*args)[0]) : sPtr<ocFace2D>();
+	if ( f2.is_notNull() ) {
+		int v2 = f2->op_valid(&brk_);
+		if ( (result = oc_abort_err(brk_, "valid")) != thNULL ) return;
+		result = thNEW(pigDataInteger,((INTEGER64)v2));
 		return;
 	}
-	result = thNEW(pigDataInteger,((INTEGER64)in->op_valid()));
+	sPtr<ocShape> in = ( na > 0 ) ? sPtr<ocShape>::d_cast((*args)[0]) : sPtr<ocShape>();
+	if ( ! in.is_notNull() ) {
+		result = oca_err(thNEW(stdString,(
+		    "valid: input must be a 3D shape (oc-brep3d) or a 2D region (oc-face3d)")));
+		return;
+	}
+	int v = in->op_valid(&brk_);
+	/* ★ #3498: 中断された検査は 0 (= 妥当でない) を返してくる。それを答えとして通すと
+	 *   「Ctrl+C を押したら形が壊れていることになった」になるので、先に中断を見る。 */
+	if ( (result = oc_abort_err(brk_, "valid")) != thNULL ) return;
+	result = thNEW(pigDataInteger,((INTEGER64)v));
 }

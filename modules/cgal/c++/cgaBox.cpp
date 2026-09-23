@@ -13,8 +13,6 @@
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/cgaBox_.h"
 
-#include	<CGAL/boost/graph/generators.h>
-#include	<CGAL/Polygon_mesh_processing/triangulate_faces.h>
 
 CLASS_TINYSTATE(cg/c++/cgaBox,pig/c++/ptsCalcBody)
 
@@ -88,14 +86,22 @@ cgaBox_::compute()
 		if ( na > 1 ) h = (*args)[1]->get_flt();
 		if ( na > 2 ) d = (*args)[2]->get_flt();
 	}
+	/* ★ #3516: 退化・負の寸法を弾く (occt / openvdb は元から持っていた検査を揃えた)。
+	 *   ⚠ 弾かないと「体積 0 の立体」や「負を正として扱った立体」が**黙って**下流へ流れる。
+	 *     実測 (2026-09-12): 同じ box(-1,1,1) が nef=1 / cgal=-1 / manifold=0 / geogram=1 と
+	 *     カーネルごとに違う値になり、nef は box(1,1,0) で **SIGSEGV** していた
+	 *     (CGAL の SNC 構築が厚みゼロの面で落ちる。例外ではないので呼び手では受けられない)。
+	 *   ★ boxa も同じクラスが受けるので、ここ 1 箇所で両方に効く。 */
+	if ( !(w > 0) || !(h > 0) || !(d > 0) ) {
+		result = cga_err(thNEW(stdString,("box: sizes must be > 0")));
+		return;
+	}
 
+	/* ★ #3535②: 構成は libsrava_cg 側 (cgMesh3D::build_box) が持つ。**この TU は CGAL を
+	 *   1 つも参照しない** — 参照すると cgal.so に CGAL の可変大域状態の実体ができ、
+	 *   libsrava_cg 側のものと別物になる (理由は cgMesh.h の build_box の宣言のところ)。 */
 	mesh = thNEW(cgMesh3D,());
-	cgMesh::Mesh& m = mesh->mesh();
-	typedef cgMesh::Point_3 cgP;
-	CGAL::make_hexahedron(
-		cgP(0,0,0), cgP(w,0,0), cgP(w,h,0), cgP(0,h,0),
-		cgP(0,0,d), cgP(w,0,d), cgP(w,h,d), cgP(0,h,d), m);
-	CGAL::Polygon_mesh_processing::triangulate_faces(m);
+	mesh->build_box(w, h, d);
 }
 
 /* mesh 出力: parent=cgatsAgent で WriterMesh を生成し cgMesh を渡す(writer が encode で D_CHUNK

@@ -7,6 +7,7 @@
 #include	"mf/c++/mfMesh.h"
 #include	"mf/c++/ptsmfWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/mfaNgon_.h"
 
 CLASS_TINYSTATE(mf/c++/mfaNgon,pig/c++/ptsCalcBody)
@@ -67,6 +68,12 @@ mfaNgon_::compute()
 	(void)na;
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double r = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
+	/* ★ #3516 続き: 他の実装 (occt) が元から持っていた検査を揃えた。
+	 *   ⚠ 無いと ngon(2,1) が「2 角形」として面積 1.299 を返し、ngon(6,-1) は
+	 *   ngon(6,1) と同じ面積を返していた (符号が黙って落ちる)。 */
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = mfa_err(thNEW(stdString,(srava_geo::sides_error("ngon").c_str()))); return; }
+	if ( !(r > 0) )  { result = mfa_err(thNEW(stdString,("ngon: radius must be > 0"))); return; }
 	cross = mfCross::ngon(n, r);
 }
 

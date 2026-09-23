@@ -17,6 +17,7 @@
 #include	"cg/c++/cgTriSink.h"
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"common/solids.h"
 #include	"_ts2/c++/cgaPyramid_.h"
 
@@ -78,13 +79,15 @@ cgaPyramid_::compute()
 	int    n = ( na > 0 ) ? (int)(*args)[0]->get_int() : 3;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
 	double r = ( na > 2 ) ? (*args)[2]->get_flt() : 1.0;
-	if ( !(n >= 3) ) { result = cga_err(thNEW(stdString,("pyramid: n must be >= 3"))); return; }
+	if ( srava_geo::check_sides(n, &n) != srava_geo::SEGS_OK ) {   /* ★ #3530: n は形そのもの = 既定値なし */
+		result = cga_err(thNEW(stdString,(srava_geo::sides_error("pyramid").c_str()))); return; }
 	if ( !(h > 0) ) { result = cga_err(thNEW(stdString,("pyramid: height must be > 0"))); return; }
 	if ( !(r > 0) ) { result = cga_err(thNEW(stdString,("pyramid: radius must be > 0"))); return; }
 
 	mesh = thNEW(cgMesh3D,());
-	cgTriSink sink(mesh->mesh());
+	cgTriSink sink;
 	srava_geo::make_pyramid(n, h, r, sink);
+	sink.flush_to(mesh);   /* ★ #3545: CGAL へ積むのは幾何 lib 側 */
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

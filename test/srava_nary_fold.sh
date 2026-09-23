@@ -10,14 +10,14 @@
 #   ④ module(so,{arity:k}) の検証 (k は 2 以上の有限整数)
 SRAVA="$1"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 FAIL=0
 
-# ★ #3452: 起動時 eager-load 撤去に伴い、box/union/difference/translate の実行に実カーネルの
-#   明示ロードが要る。include "module/all.sra" の解決に要る SRAVA_PATH も併せて渡す
-#   (cmake ENVIRONMENT が設定していないため)。
-export SRAVA_MODULE_ALL=1
-SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
-export SRAVA_PATH
+# ★ #3569: 要るのは **cgal 1 本だけ** — box / union / difference / volume / translate は
+#   すべて cgal (priority 20) が答える。#3452 の互換スイッチ (all.sra 16 本) は外した。
+#   ★ ④⑤ のように **自分で module() を書くケース**はそのまま — 後から書いた opts が上書きとして効く。
+MCG='module("cgal.so",{});'
 
 # $1=ラベル $2=期待 $3=実際
 eq() {
@@ -27,7 +27,7 @@ eq() {
 
 # ソースを走らせ "hit miss value" を返す。
 run() {
-	OUT=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="$1" "$SRAVA" 2>&1)
+	OUT=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="$MCG$1" "$SRAVA" 2>&1)
 	H=$(echo "$OUT" | sed -n 's/.*cache: \([0-9]*\) hit(s), \([0-9]*\) miss.*/\1 \2/p')
 	V=$(echo "$OUT" | sed -n 's/.*result value=\([0-9.]*\).*/\1/p')
 	echo "$H $V"
@@ -79,14 +79,18 @@ rm -rf "$D"; C4=$(run "module(\"cgal.so\",{priority:99,arity:4}); $BOX4 print(vo
 eq "⑤ cgal は sig(2) なので arity:4 でも木が同じ" "$(echo "$C2" | awk '{print $2}')" "$(echo "$C4" | awk '{print $2}')"
 
 # ⑥ ★ planner 側の引数種別検査 (§6.2)。従来この検査は agent 側にしか無く、**計算が全部
-#    走ってから**落ちていた。いまはモジュールが決まった直後に落ちるので、幾何の cache が
-#    1 つも完成しない。
+#    走ってから**落ちていた。いまはモジュールが決まった直後に落ちる。
+#
+# ⚠⚠ **「幾何 cache が 1 つも完成していない」は検定にできない** (ひさ 2026-09-19・削除した)。
+#   @translate([1,0,0], box(2,2,2))@ では *box の計算と translate の引数チェックが並列に走る*
+#   ので、**どちらが先に終わるかは決まらない**。box が先に完成する回もあるのが正常であって、
+#   それを 0 個と決めつけていたこの検定は **間欠的に赤くなっていた**
+#   (2026-09-19 に ctest -j8 で 2 回観測 ・ 単独 10 回 / 8 コア負荷 20 回では再現せず)。
+#   ★ *時間で決まる性質は検定にならない*。ここで固定してよいのは **エラーが出ること**だけ。
 rm -rf "$D"
-M=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE='print(volume(translate([1,0,0], box(2,2,2))));' "$SRAVA" 2>&1)
+M=$(SRAVA_CACHE_DIR="$D" SRAVA_SOURCE="$MCG"'print(volume(translate([1,0,0], box(2,2,2))));' "$SRAVA" 2>&1)
 case "$M" in *"argument 1 should be a mesh"*) echo "  ok ⑥ 引数種別のエラーが出る";;
              *) echo "NARY_FAIL: ⑥ 引数種別のエラーが出ない: $M"; FAIL=1;; esac
-NC=$(ls "$D" 2>/dev/null | grep -c cache)
-eq "⑥ エラー時に幾何 cache が完成していない" "0" "$NC"
 
 rm -rf "$D"
 [ "$FAIL" = 0 ] && echo "NARY-FOLD-OK"

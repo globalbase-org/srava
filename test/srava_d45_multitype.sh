@@ -18,6 +18,8 @@
 # 引数: $1=srava (build-bench in-place・兄弟 .so を auto-load)。SRAVA_AGENT は env。
 set -u
 SRAVA="$1"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 BOGUS_AGENT=/nonexistent/srava_agent_bogus   # 偽 agent = manifold/d4/d5 が全て in-proc の証明
 
 SRC='

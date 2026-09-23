@@ -30,6 +30,8 @@ TOL="${3:-1e-9}"
 DX="$4"
 TUBEV="${5:-0}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 
 if [ -n "$DX" ]; then A=",$DX"; else A=""; fi
 # ⚠ empty3d は引数を 1 つも取らない形なので、dx は **カンマ無し**で渡す (openvdb だけ)。
@@ -37,7 +39,7 @@ E="$DX"
 
 # ★ 自己交差する掃引 (#3445 の受け入れモデル)。各カーネル **自身の** tube で作るので、
 #   別カーネルを持ち込まずに済む (生成元が変わると見ているものが変わる → #3485)。
-SELFX="tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12$A)"
+SELFX="tube_ruled([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12$A)"
 if [ "$TUBEV" = "-" ]; then
 	SELFXLINE=""
 	TUBEBIT=""
@@ -47,7 +49,7 @@ else
 fi
 
 SRC=$(cat <<EOF
-module("$SO",{priority:99});
+module("$SO",{priority:99});module("geomutils.so",{});
 var b = translate(box(2,3,4$A),[1,1,1]);
 var bb = bbox(b);
 print("VAL", bb[0][0]); print("VAL", bb[0][1]); print("VAL", bb[0][2]);

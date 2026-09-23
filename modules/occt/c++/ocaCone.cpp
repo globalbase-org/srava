@@ -8,14 +8,7 @@
 #include	"oc/c++/ocShape.h"
 #include	"common/solids.h"   /* SOLID_PI (座標規約を共通ヘッダと共有) */
 
-#include	<BRepPrimAPI_MakeCone.hxx>
-#include	<TopoDS_Shape.hxx>
-#include	<gp_Pnt.hxx>
-#include	<gp_Dir.hxx>
-#include	<gp_Ax2.hxx>
-#include	<Standard_Failure.hxx>
 #include	<cmath>
-#include	<string>
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ocaCone_.h"
 
@@ -77,25 +70,21 @@ ocaCone_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r   = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double h   = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
-	int    seg = ( na > 2 ) ? (int)(*args)[2]->get_int() : 0;   /* 円周分割数。0=既定 32 */
+	/* ★ #3570 段3: segs の引数そのものを撤去した (記述子の nin を減らした) ので、
+	 *   ここに在った #3530 の「受けるが無視し、検査はする」は **届かなくなった**。
+	 *   原則が「そのモジュールで必要のない引数は撤去する」に変わったため。 */
 	if ( !(r > 0) ) { result = oca_err(thNEW(stdString,("cone: radius must be > 0"))); return; }
 	if ( !(h > 0) ) { result = oca_err(thNEW(stdString,("cone: height must be > 0"))); return; }
-	try {
-		/* ★ 円錐は **解析曲面** (円錐面 1 + 平面 1)。cylinder と同じく原点中心・軸 +Z で、
-		 *   BRepPrimAPI_MakeCone の基準点が底面中心なので h/2 下げる。seg は近似しないので無視する
-		 *   (occt の sphere が seg を無視するのと同じ理由)。 */
-		gp_Ax2 ax(gp_Pnt(0, 0, -h/2), gp_Dir(0, 0, 1));
-		BRepPrimAPI_MakeCone mk(ax, r, 0.0, h);
-		TopoDS_Shape sh = mk.Shape();
-		if ( sh.IsNull() ) { result = oca_err(thNEW(stdString,("cone: OCCT produced a null shape"))); return; }
-		out = thNEW(ocShape,());
-		out->set_shape(sh);
-	} catch ( const Standard_Failure& e ) {
-		std::string m = std::string("cone: OCCT failed [") + e.DynamicType()->Name() + "] (" +
-		    ( ( e.GetMessageString() && e.GetMessageString()[0] ) ? e.GetMessageString() : "no message" ) + ")";
-		result = oca_err(thNEW(stdString,(m.c_str())));
+	/* ★ #3545 段 5: 幾何の組み立ては **幾何 lib 側** (ocShape::make_cone)。
+	 *   ⇒ この TU は OCCT を触らない — 触ると投げうる inline を通っただけで
+	 *     RTTI の型インスタンスが .o に出る (ocShape.h の注記)。 */
+	char why[320]; why[0] = '\0';
+	out = ocShape::make_cone(r, h, why, (int)sizeof why);
+	if ( ! out.is_notNull() ) {
+		result = oca_err(thNEW(stdString,( why[0] ? why : "cone: failed" )));
 		return;
 	}
+
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して本体未設定で return するので

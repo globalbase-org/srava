@@ -59,7 +59,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -83,7 +83,7 @@ nfaExport_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	refPath = ( na > 0 ) ? (*args)[0]->get_str()
 	                     : sPtr<stdString>(thNEW(stdString,("/tmp/srava-out.off")));
-	sPtr<nfMesh> mIn = ( na > 1 ) ? sPtr<nfMesh>::d_cast((*args)[1]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> mIn = ( na > 1 ) ? sPtr<nfNefMesh>::d_cast((*args)[1]) : sPtr<nfNefMesh>();
 	const char *p = refPath->get_str();
 	if ( ! mIn.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("export: no mesh to write")));

@@ -158,13 +158,15 @@ ocaTube_::compute()
 	}
 
 	/* opts: {closed:1} は周期スプライン (srava に真偽値リテラルは無いので 0/1。
-	 *   module(so,{optional:1}) と同じ書き方)。★ 2 つめの引数が数値なら segs とみなして無視する
-	 *   (メッシュ系と同じ書き方をそのまま通すため。occt では分割数に意味が無い)。 */
+	 *   module(so,{optional:1}) と同じ書き方)。
+	 *   ★ #3570 段3: 第 2 引数が **ハッシュのときだけこの行が成立する** (記述子の
+	 *     マッチ関数 @oc_match_tube_opts@)。⇒ ここへ来た時点で数値ではないので、
+	 *     #3530 の「数値なら segs とみなして検査する」枝は **撤去した**。
+	 *     @tube(path, 24)@ は occt の行が成立せず、候補から外れる。 */
 	bool closed = false;
 	if ( na > 1 && (*args)[1] != thNULL ) {
-		sPtr<pigData> o = (*args)[1];
-		sPtr<pigData> vc = o->get_ix(thNEW(pigDataString,("closed")));
-		if ( vc != thNULL && ! vc->is_error() ) closed = ( vc->get_int() != 0 );
+		sPtr<pigData> vc = (*args)[1]->get_ix(thNEW(pigDataString,("closed")));
+		if ( vc != thNULL && ! vc->is_error() ) { closed = ( vc->get_int() != 0 ); }
 	}
 
 	/* ---- パス読み取り: 各要素 [位置, r]。★ 2D ([x,y]) は z=0 として受ける (メッシュ系と同じ) ---- */

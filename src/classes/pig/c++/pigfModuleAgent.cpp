@@ -24,6 +24,8 @@
 #include	"pig/c++/pigModuleRegistry.h"   /* .so 化 Phase 2: 記述子登録・カーネル属性クエリ */
 #include	"pig/c++/pigModule.h"
 #include	"pig/c++/pigSigGrammar.h"   /* ★ #3436 P4: sig の文法と照合規則 (単体テスト可能なヘッダ) */
+#include	"pig/c++/pigOpEntry.h"   /* ★ #3554 段1: 行 (op / op#変種) の完全型 */
+#include	"pig/c++/pigfApply.h"   /* ★ #3555 段3: 擬似モジュールの match / body (ラムダ適用) */
 #include	"_ts2/c++/pigfModuleAgent_.h"
 
 #include	<stdlib.h>   /* getenv */
@@ -68,22 +70,44 @@ protected:
 	 * .so 化 Phase 4c: 旧 env SRAVA_INPROC は撤去。実行方式は descriptor.exec_default +
 	 * agent(so,{exec_default}) 上書きで決まる。 */
 	virtual sPtr<stdString>	agent_module_name();
+	/* ★ #3482: 表示用のカーネル名 (実行方式に関係なく返す。agent_module_name との違いは基底の宣言参照)。 */
+	virtual sPtr<stdString>	agent_kernel_name();
 	/* ★ pig/srava 境界フック(基底 pigfAgent の汎用フローから virtual で呼ばれる)。
 	 *   try_shortcircuit: srava 演算子の単位元 {} 代数で CGAL を呼ばず畳む。
 	 *   decide_out_module: 入力カーネル伝播 + 既定カーネル (priority 最大) で CGAL/Manifold を選ぶ。 */
 	virtual int		try_shortcircuit();
 	/* ★ #3436 P4: n 項ノードを k 項の木へ分解する (docs/sig_grammar_design.md §5)。 */
 	virtual int		try_decompose();
+	/* ★★ #3555 段3: 候補列の中の **擬似モジュール** (定義ハッシュ) を順番どおりに見る。 */
+	virtual int		try_pseudo_module();
 	virtual int		decide_out_module();
 	/* rev4 B-2b: 型ディスパッチ (解決不能 -1)。
-	 * ★ #3467: onlyModule >= 0 なら **その module だけ**を候補にする (`module::op` の指名)。
-	 *   指名は sig の代わりではなく候補の絞り込みなので、絞ったうえで sig 照合はそのまま走る。 */
-	int			decide_executor(const char *op, int onlyModule);
+	 * ★★ #3555 段1: cands != 0 なら **その並びを候補列**として順に見る (`module::op` の指名)。
+	 *   0 なら従来どおり **全モジュール × priority 最大**。#3467 の onlyModule は
+	 *   「要素 1 個の候補列」として吸収されたので引数から消えた。
+	 *   ★ 指名は sig の代わりではなく候補の絞り込みなので、絞ったうえで sig 照合はそのまま走る。 */
+	/* ★ #3554 最後の段 2/5: matchedButSig は **-1 を返したときの言い分け**
+	 *   (0 = マッチする行が無い / 1 = 行は在ったが sig が外れた)。要らなければ 0 を渡す。 */
+	int			decide_executor(const char *op, const std::vector<int> *cands,
+					int *matchedButSig = 0);
+	/* ★★ #3555 段2: 予約変数 @USE_MODULES@ の値 (指名が無いときの候補列)。束縛が無ければ thNULL。
+	 *   ★ env は親チェーンで引けるので、ブロック / lambda の中の代入が **その中だけ**効く。 */
+	sPtr<pigData>		use_modules_var();
 	/* routing 不能のエラー文 (入力型 + その op が受け付ける sig の列挙)。 */
 	std::string		unroutable_message(const sPtr<pigModuleRegistry> &reg, const char *op);
 	/* ★ #3436 P4 §6.2: 引数の種別/個数を op 表 (in[]/nin/variadic) と突き合わせる。合致なら空。 */
-	std::string		arg_kind_violation(const sPtr<pigModuleRegistry> &reg, int module_id, const char *op);
+	std::string		arg_kind_violation(const sPtr<pigModuleRegistry> &reg, int module_id, const char *op,
+				                   const char *rowName = 0);
 private:
+	/* ★★ 2026-09-18: 配列 1 個の n 項展開 (#3511) を **1 度しか行わない**ための印。
+	 *   ⚠⚠ @ACT_START@ は compact ゲートで yield すると **状態の頭から再走する**。
+	 *     try_shortcircuit はその 1.5) にあり、**args を書き換える唯一の処理**なので、
+	 *     印が無いと再走のたびに 1 段ずつ展開が進む:
+	 *         loft_ruled([[a,b]])  1 回目 → args=[[a,b]] (要素 1)  ⇒ 型が合わずエラー
+	 *                              2 回目 → args=[a,b]            ⇒ **通ってしまう**
+	 *     = 同じ式が「何回再走したか」で別の意味になる。⇒ 状態関数の中身は再入可能でなければ
+	 *       ならない、という tinyState の約束に反していた。 */
+	int			scArrayExpanded;
 };
 
 TS_END_IMPLEMENT
@@ -100,7 +124,8 @@ TS_END_INTERFACE
 
 pigfModuleAgent_::pigfModuleAgent_(TS_ARGS0)
         : pigfAgent_(parent,_front),
-	  parent(tinyState_::parent)
+	  parent(tinyState_::parent),
+	  scArrayExpanded(0)
 {
 }
 
@@ -130,6 +155,21 @@ pigfModuleAgent_::agent_module_name()
 	if ( reg->exec_default(outModule) != EXEC_THREAD )
 		return thNULL;   /* 既定 process 起動 (agent(so,{exec_default:"process"}) で切替) */
 	return thNEW(stdString,(reg->name_of_id(outModule)));
+}
+
+
+/* ★★ #3482: **表示用**のカーネル名。⚠ agent_module_name と違い実行方式を見ない —
+ * エラー文の前置き (#3475 の module/op: message) は process 実行のカーネルでも要る。
+ * 型ディスパッチ前 (outModule 未確定) は thNULL = 前置き無しで素の文言になる。 */
+sPtr<stdString>
+pigfModuleAgent_::agent_kernel_name()
+{
+	sPtr<pigModuleRegistry> reg = ( ptsApp != thNULL ) ? ptsApp->module_registry
+	                                                   : sPtr<pigModuleRegistry>(thNULL);
+	if ( reg == thNULL || outModule < 0 )
+		return thNULL;
+	const char *n = reg->name_of_id(outModule);
+	return ( n != 0 && n[0] != '\0' ) ? sPtr<stdString>(thNEW(stdString,(n))) : sPtr<stdString>(thNULL);
 }
 
 
@@ -292,11 +332,68 @@ static int srava_is_identity(sPtr<pigData> a)
  *   export({}) は実体化不能 → 明示エラー。値返し valid({})=0 / volume・area・perimeter({})=0。
  *   → CGAL を呼ばず畳めるので `var acc={}; for(..) acc = acc ||| x;` が書ける。
  *   戻り 0=非該当(agent 起動へ) / 1=_front に結果セット済み / 2=err セット済み。 */
+/* ★★ #3511 (2026-09-13): この op を **cache の配列 1 個**で呼べると宣言しているか。
+ *   sig の可変部の末尾 "[]" (pigSigGrammar.h) を見る。どれか 1 つのモジュールが宣言していれば真。
+ *   ⇒ パーサは op 名を知らないままでよい (従来 union/intersection/combine はパーサに直書きだった)。 */
+static int
+op_takes_array(const sPtr<pigModuleRegistry> &reg, const char *op)
+{
+	if ( reg == thNULL || op == 0 || op[0] == '\0' ) return 0;
+	int nmod = reg->count();
+	for ( int m = 1 ; m < nmod ; ++m ) {
+	  /* ★ #3554 段1: ここも「どれかの行が "[]" を持つか」なので **全候補行**を見る。 */
+	  for ( int ci = 0 ; ; ++ci ) {
+		const pigOpEntry *row = reg->op_row(m, op, ci);
+		if ( row == 0 ) break;
+		const char *sig = row->sig;
+		if ( sig == 0 ) continue;
+		std::string all = sig; size_t sp = 0;
+		while ( sp <= all.size() ) {
+			size_t sc = all.find(';', sp);
+			std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
+			pigSigLine L; parse_sigline(one, L);
+			if ( ! L.bad && L.array_ok ) return 1;
+			if ( sc == std::string::npos ) break;
+			sp = sc + 1;
+		}
+	  }
+	}
+	return 0;
+}
+
 int
 pigfModuleAgent_::try_shortcircuit()
 {
 	sPtr<stdString> opn = agent_op_name();
 	const char *op = ( opn != thNULL ) ? opn->get_str() : "";
+	/* ★★ #3511 (2026-09-13): **cache の配列 1 個を n 項へ展開する**。
+	 *   sig の可変部が "[]" を宣言している op だけ (loft / loft_ruled 等)。
+	 *     loft(A)  →  loft(A[0], A[1], …)
+	 *   ★ ここでやる理由: パース時にはモジュールが未ロードで sig を引けない。評価時なら
+	 *     記述子が読めるので **op 名をパーサに直書きしなくて済む**
+	 *     (従来 union/intersection/combine は ns_sravaParser.y に直書きされていた)。
+	 *   ★ 展開後は普通の n 項呼び出しと **完全に同じ** — キャッシュキーも routing も
+	 *     loft(a,b,c) と一致する (別の書き方が別のキャッシュ実体を作らない)。
+	 *   ⚠ 空配列は展開しない (引数 0 個になって sig の arity 検査が読めない形で落ちる)。
+	 *   ⚠ 要素が mesh でない配列はそのまま展開し、型の不一致は routing が名指しで断る。 */
+	/* ⚠⚠ **1 度しか展開しない** (scArrayExpanded の宣言のところに理由)。この状態は
+	 *   compact ゲートの yield で頭から再走するので、印が無いと展開が段々進んでしまう。 */
+	if ( /*[cal]*/ args.length() == 1 && ! pig_is_delayed(args[0]) ) {
+		sPtr<pigDataArray> av = args[0]->obt_array();
+		if ( av != thNULL && av->length() > 0 ) {
+			sPtr<pigModuleRegistry> areg = ( ptsApp != thNULL ) ? ptsApp->module_registry
+			                                                    : sPtr<pigModuleRegistry>();
+			if ( op_takes_array(areg, op) ) {
+				int n = av->length();
+				scArrayExpanded = 1;
+				/* ⚠ sArray は代入できないので、長さを変えてから詰める。
+				 *   av は args[0] とは別に握ってあるので、args を書き換えても生きている。 */
+				args.length(n);
+				for ( int i = 0 ; i < n ; ++i )
+					args[i] = av->get_ix(thNEW(pigDataInteger,((INTEGER64)i)));
+			}
+		}
+	}
 	int isbool = ( ::strcmp(op,"union")==0 || ::strcmp(op,"intersection")==0
 	            || ::strcmp(op,"difference")==0 || ::strcmp(op,"combine")==0 );
 	/* ★ mesh を取る op に **配列**が来たら、その場で読めるエラーにする (2026-08-15 bench 提案)。
@@ -419,158 +516,859 @@ arg_type_set(sPtr<pigData> v, int *stampless = 0)
 	return std::string();                         /* 値/スカラ = 型なし (ディスパッチ対象外) */
 }
 
-/* ★ rev4 Phase C: 型付き import_exts ("stl:cg-mesh3d,svg:cg-cross2d") から ext の **出力型** を取る。
- *   一致 ext の ':' 以降。無型/未一致は空。 */
-static std::string
-ext_type_in_csv(const char* csv, const char* ext)
-{
-	if ( csv == 0 || ext == 0 ) return std::string();
-	if ( *ext == '.' ) ++ext;
-	size_t el = ::strlen(ext);
-	for ( const char* p = csv ; *p ; ) {
-		const char* c = ::strchr(p, ',');
-		size_t seg = c ? (size_t)(c - p) : ::strlen(p);
-		const char* colon = (const char*)::memchr(p, ':', seg);
-		size_t extlen = colon ? (size_t)(colon - p) : seg;
-		if ( extlen == el && ::strncasecmp(p, ext, el) == 0 )
-			return colon ? std::string(colon + 1, (p + seg) - (colon + 1)) : std::string();
-		if ( ! c ) break;
-		p = c + 1;
-	}
-	return std::string();
-}
+/* ⚠ #3554 最後の段 3/5: 旧 ext_type_in_csv (型付き import_exts から出力型を引く) は
+ *   ここから消えた。import の専用ブロックが唯一の利用者で、判定は pigModuleRegistry.h の
+ *   @pig_ext_out_type@ (マッチ関数と共有) へ一本化してある — **同じ判定を 2 つ持たない**。 */
 
 /* ★ Stage 2 (export sig 化): モジュール m の op sig が入力型 type を受理するか (どれかの sig の
  *   どれかの入力スロット == type)。export の「その mesh を読めるか」を旧 can_read_module の代わりに
  *   **型軸**で判定する (export sig に foreign 入力型を明示列挙してある)。単一 mesh 入力の op 向け。 */
+/* ★ #3554 最後の段 4/5 (2026-09-19): routing の利用者は居なくなった (cast/import/export の
+ *   専用ブロックが全部 AK_MATCH へ移ったため)。残る利用者は **内省 op `which`** だけ。
+ *   ⚠⚠ そのため **行を全部見る**ようにした — @op_sig()@ は *最初の候補行*しか返さないので、
+ *     変種行に分かれた op (cast / import) では which が「受け付けない」と嘘をつく。
+ *     ⚠ routing が正しくても *診断が嘘をつく*状態は、routing のバグより見つけにくい。 */
 static int
 sig_accepts_input(const sPtr<pigModuleRegistry> &reg, int m, const char *op, const std::string& type)
 {
-	const char *sig = reg->op_sig(m, op);
-	if ( sig == 0 || type.empty() ) return 0;
-	std::string all = sig; size_t sp = 0;
-	while ( sp <= all.size() ) {
-		size_t sc = all.find(';', sp);
-		std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
-		pigSigLine L; parse_sigline(one, L);
-		for ( size_t i = 0 ; i < L.fixed.size() ; ++i )
-			if ( L.fixed[i] == type ) return 1;
-		for ( size_t i = 0 ; i < L.set.size() ; ++i )   /* ★ 可変部の型集合も入力スロット */
-			if ( L.set[i] == type ) return 1;
-		if ( sc == std::string::npos ) break;
-		sp = sc + 1;
-	}
-	return 0;
-}
-
-/* ★ P2c (cast 型軸化): モジュール m の op sig が出力型 type を **産出**するか (どれかの sig の出力 == type)。
- *   cast は「目標型を産出できるモジュール」へ振るのに使う (旧 module_of_tag(tag_of_type) 撤去)。
- *   各モジュールの cast 出力型は自カーネル型に閉じている (cgal→cg-*・mf→mf-*) ので目標型で一意に決まる。 */
-static int
-sig_str_produces(const char *sig, const char *type)
-{
-	if ( sig == 0 || type == 0 || type[0] == '\0' ) return 0;
-	std::string all = sig; size_t sp = 0;
-	while ( sp <= all.size() ) {
-		size_t sc = all.find(';', sp);
-		std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
-		pigSigLine L; parse_sigline(one, L);
-		if ( L.out == type ) return 1;
-		if ( sc == std::string::npos ) break;
-		sp = sc + 1;
-	}
-	return 0;
-}
-
-static int
-sig_produces(const sPtr<pigModuleRegistry> &reg, int m, const char *op, const char *type)
-{
-	return sig_str_produces(reg->op_sig(m, op), type);
-}
-
-/* ★ P2d (⑤ 型軸化): 型 T を **産出する** module を返す (priority 最大・無ければ -1)。判定は
- *   「その module の *いずれかの* op sig の出力が T か」= op sig の出力集合から導く。cgal は cg-* を
- *   出力し mf を出力しない (mf は読むだけ)・manifold は mf-* を出力する、と sig が disjoint なので
- *   型ごとに産出 module は一意。
- *   ★これは旧 module_of_tag(tag_of_type(T)) の **型軸置換**: 「型 → その型を産む home module」を
- *   codec_tags (owner 表) でなく op sig の出力から導く。routing は入力の *型* (arg_type_set) を読み、
- *   その型を産む module を引く (値に格納された module id を読む旧 arg_module ではない)。 */
-static int
-module_of_type(const sPtr<pigModuleRegistry> &reg, const char *type)
-{
-	if ( type == 0 || type[0] == '\0' ) return -1;
-	int best = -1; long bestPrio = LONG_MIN;
-	int nmod = reg->count();
-	for ( int m = 1 ; m < nmod ; ++m ) {
-		const srava_module_descriptor *d = reg->descriptor(m);
-		if ( d == 0 || d->ops == 0 ) continue;
-		for ( int i = 0 ; i < d->n_ops ; ++i ) {
-			if ( sig_str_produces(d->ops[i].sig, type) ) {
-				long pr = reg->priority(m);
-				if ( pr > bestPrio ) { bestPrio = pr; best = m; }
-				break;
-			}
+	if ( type.empty() ) return 0;
+	for ( int ci = 0 ; ; ++ci ) {                       /* ★ 候補行を全部見る */
+		const pigOpEntry *row = reg->op_row(m, op, ci);
+		if ( row == 0 ) break;
+		const char *sig = row->sig;
+		if ( sig == 0 ) continue;
+		std::string all = sig; size_t sp = 0;
+		while ( sp <= all.size() ) {
+			size_t sc = all.find(';', sp);
+			std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
+			pigSigLine L; parse_sigline(one, L);
+			for ( size_t i = 0 ; i < L.fixed.size() ; ++i )
+				if ( L.fixed[i] == type ) return 1;
+			for ( size_t i = 0 ; i < L.set.size() ; ++i )   /* ★ 可変部の型集合も入力スロット */
+				if ( L.set[i] == type ) return 1;
+			if ( sc == std::string::npos ) break;
+			sp = sc + 1;
 		}
 	}
-	return best;
+	return 0;
 }
+
+/* ★ #3554 最後の段 2/5: モジュール m の op が **どれかの行で** 型 type を産出するか。
+ *   ⚠⚠ 旧 sig_produces は @op_sig()@ (= **最初の候補行**の sig) を見ていた。cast が目標型ごとの
+ *     変種行に分かれた以上それでは *2 行目以降が見えない* ので、@op_row()@ で 1 行ずつ引く。
+ *   ★ いまの用途は **診断で「その型を作れるモジュール」を名指しする**ことだけ (routing は
+ *     行のマッチ関数がやる)。 */
+static int
+any_row_produces(const sPtr<pigModuleRegistry> &reg, int m, const char *op, const char *type)
+{
+	if ( reg == thNULL || type == 0 || type[0] == '\0' ) return 0;
+	for ( int ci = 0 ; ; ++ci ) {
+		const pigOpEntry *row = reg->op_row(m, op, ci);
+		if ( row == 0 ) break;
+		if ( pig_sig_produces(row->sig, type) ) return 1;
+	}
+	return 0;
+}
+
+/* ⚠ #3554 最後の段 5/5 (2026-09-19): ここに在った sig_str_produces / module_of_type
+ *   (= 「型 T を産出する module」) を **撤去**した。
+ *   ★ 最後の利用者は export の規約① (入力型の home カーネルを優先する) と、その下の
+ *     到達不能な home 伝播だけで、4/5 で規約① を撤去した時点で **生きた呼び出しは 0** に
+ *     なっていた。⇒ 「型 → その型を産む module」という問いは routing にもう無い
+ *     (行き先は priority × sig × マッチ関数だけで決まる)。
+ *   ⚠ 診断で「その型を作れるモジュール」を名指しするのは上の any_row_produces の仕事で、
+ *     あちらは *op を指定して行を全部見る* 別物 (同じ問いではない)。 */
 
 /* ★ decide_executor: (op, 入力型集合[]) を実行できる module を返す。解決不能/対象外 = -1
  *   (呼び元 decide_out_module が既存カーネルロジックへフォールバック)。解決時は outTypeList に出力型を memo。
  *   allow_coerce=false: 直接型一致のみ / true: 1 ホップ coerce を許す (2 パスで直接優先)。 */
 /* ★ #3436 P4: 型列 insets を受ける照合コア (decide_executor / try_decompose が共有)。
  *   マッチした module id を返す (無ければ -1)。outType にはその行の出力型、foldN には
- *   **fold 形の行なら申告された N** (上限なし = INT_MAX・fold 形でなければ -1) を返す。 */
-/* ★ 2026-08-28: wantOut != 0 なら **出力型がそれに一致する行だけ**を候補にする (cast 用)。
- *   0 なら従来どおり入力型の照合のみ。 */
+ *   **分解してよい行なら申告された N** (上限なし = INT_MAX) を返す。
+ *   ★ #3528: **分解できない行は -1**。fold 形でない行 (固定形・繰り返し形) と、
+ *     "(N!)" = 分解禁止の fold 行がこれに当たる。 */
+/* ★★ #3554 最後の段 2/5 (2026-09-19): **wantOut は廃止した**。cast 専用の第 5 引数で
+ *   「出力型がこれの行だけ」と絞っていたが、その判定は行の **マッチ関数** (pig_match_cast_target)
+ *   へ移り、cast も普通の検索 (priority × sig × マッチ) で決まるようになった。
+ * ★ matchedButSig != 0 なら **失敗の言い分け**を返す (ひさ 2026-09-19):
+ *       0 … マッチする行が **無かった**        (cast なら「その型を産出できるモジュールが無い」)
+ *       1 … 行は在ったが **sig が外れた**      (cast なら「その型は作れるが入力型を受けない」)
+ *   ⚠ 呼び手が見てよいのは **戻り値が -1 のとき**だけ (成立したときの中身は未定義)。 */
 /* ★ #3467: onlyModule >= 0 なら **その module だけ**を候補にする (`module::op` の指名)。
  *   指名は候補の絞り込みであって sig の代わりではないので、絞ってから通常どおり sig を照合する
  *   ⇒ 指名したモジュールの sig が入力型を受けなければ -1 = エラー (暗黙の cast は入れない)。 */
+/* ★★ #3554 段2 (2026-09-19): 行の **マッチ関数**を呼ぶ。全スロット真なら 1 (= その行は成立)。
+ *   ⚠ 値を待つのは **マッチ関数の中** — どの部分が要るかは関数しか知らず、routing が代わりに
+ *     待つと必ず過剰になる (ひさ 2026-09-19)。
+ *   ★ ただし *マッチ関数が @compact()@ を明示的に呼ぶ必要は無い* — 値を読む口
+ *     (@get_int@ / @get_str@ / @is_error@ …) が既にゲートウェイで、@pigDataDelay@ 側が
+ *     @compact()->…@ に委譲している (pigData.h:728-735)。⇒ **読めば自動的に待つ**。
+ *     ⚠ 配列 / ハッシュの **要素**は eager に解決されないので、要素を見るなら要素ごとに口を通す。
+ *   ⚠ マッチ関数は **純粋**と決めてあるので、候補ごとに何度呼んでも同じ答えになる。
+ *   ⚠⚠ 待ちが入ると ACT_START は **頭から再走する**。routing より前 (1.5 try_shortcircuit /
+ *     1.6 try_decompose) が再入に耐えることが前提 (2026-09-18 に #3511 で 1 件直した)。 */
 static int
-sig_dispatch(const sPtr<pigModuleRegistry> &reg, const char *op,
-             const std::vector<std::string>& insets, std::string *outType, int *foldN,
-             const char *wantOut = 0, int onlyModule = -1)
+row_matches_values(const srava_module_descriptor *d, const pigOpEntry *row,
+                   sArray<sPtr<pigData> > *args)
 {
-	if ( reg == thNULL ) return -1;
-	int nmod = reg->count();
-	int best = -1; long bestPrio = LONG_MIN; std::string bestOut; int bestN = -1;
-	for ( int m = 1 ; m < nmod ; ++m ) {
-		if ( onlyModule >= 0 && m != onlyModule ) continue;   /* ★ #3467: 指名で絞る */
-		const char *sig = reg->op_sig(m, op);
-		if ( sig == 0 ) continue;               /* この module は op 未注釈 */
-		std::string all = sig;
+	if ( row == 0 || row->match == 0 ) return 1;     /* 無条件の行 */
+	/* ⚠ args が無い文脈 (分解の可否を見るだけの照合など) は **引数 0 個と同じ**に扱う
+	 *   ⇒ ループが回らず成立する (ひさ 2026-09-19)。*見えなくする*より、甘く見ておいて
+	 *     実際の routing で値を見て外すほうが見落としが無い。 */
+	int n = ( args != 0 ) ? args->length() : 0;
+	for ( int i = 0 ; i < n ; ++i )                  /* ★ 引数 1 個ずつ。可変部の尾部にも当たる */
+		if ( ! row->match(d, row, i, (*args)[i]) ) return 0;
+	return 1;
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ * ★★ #3555 段3 (2026-09-20): **擬似モジュール** — srava のラムダへ配線する候補。
+ *
+ *   ⚠⚠ これは **値**の話であって **.so** の話ではない (ひさ 2026-09-19)。対応する .so が
+ *     無いので、@srava_module_descriptor@ の合成も @register_descriptor@ への登録も、
+ *     C の関数ポインタへ繋ぐ trampoline も寿命管理も **全部要らない**。候補列の要素として
+ *     *値のまま*扱い、当たったら @body@ を呼んで @_front->set_result@ するだけ。
+ *   ★ 登録の口 (@module({type:"pseudo_module",…})@) は **作らない** (ひさ 2026-09-20)。
+ *     ハッシュをそのまま配列に置く / 直に指名する。
+ *     ⇒ 記述子の **ロード時検査に当たるものが無い** ので、*op 名が一致した行の形が壊れていたら
+ *       飛ばさずエラー*にする。飛ばすと「その op を使ったときだけ静かに別のカーネルへ行く」
+ *       = 定義の誤りが緑と同じ顔になる。
+ *
+ *   定義ハッシュ:
+ *       { type:"pseudo_module", name:…,
+ *         ops:[ { name:"op名", in:[…], variadic:0|1, nreq:…, vtail:"value"|"cache",
+ *                 sig:["(a)->b", …], body:\(…){…} }, … ] }
+ *
+ *   ★★ 欄の仕様 (ひさ 2026-09-21 確定):
+ *
+ *     モジュール階層
+ *       type / priority / *_exts   **読まない** (書いてあっても無視する)
+ *       name                       省略可。在れば **エラー表示の札**・無ければ `{pseudo}`
+ *                                  ⚠ *指名には使えない* / 実モジュールと同名なら {pseudo} に倒す
+ *       ops 無し                   無視 (組込 pig と同じく ops を持たない記述子は在りうる)
+ *
+ *     行 (ops の 1 要素)
+ *       name / body / in           **必須**。無ければ明示エラー
+ *       sig                        省略可。**無い / "" / [] の 3 つは同じ = 入力型で絞らない**
+ *       nreq                       既定 = in の長さ (全部必須)。nreq..in の長さ が許される個数で、
+ *                                  **足りない末尾は null で埋める** ⇒ body は `== null` で読む
+ *       variadic                   1 なら in の最後のスロットが繰り返す。body は **配列 1 個**を受ける
+ *       vtail                      "value" | "cache" ・既定 "cache" (可変部の種別)
+ *       body の引数の数             in の長さ (variadic なら 1) と一致。不一致は明示エラー
+ *
+ *     行の選択   name ∧ 述語 ∧ sig ∧ **引数の数と種別**。外れたら **次の行** →
+ *                同名が尽きたら **黙って通常の routing へ降りる**
+ *     違反の報告 routing でも解けなかったときだけ・**候補を全部並べる** (decide_out_module)
+ *
+ *   in[] のスロット:
+ *       "value"  値/スカラ (= AK_INLINE)     "cache"  幾何 (= AK_CACHE)
+ *       ラムダ   **述語**。その引数を渡して返り値を見る。種別は問わない
+ *
+ *   ★ @op#変種@ は作らない — 変種は *記述子側*で「同名 2 行が静かに死ぬ」を避ける仕掛けで、
+ *     擬似モジュールは **同名エントリを許す**。行は頭から見るが、**引数の数と種別で振り分かる**
+ *     ので「1 行目で必ず止まる」ことはない (それが変種の代わりになる)。
+ *   ★ キャッシュは作らない ⇒ ソルトも版も要らない。下流が読むのは *返ってきた値が自分で
+ *     持っている型* なので、@body@ の返り値と sig は照合しない (sig は候補選びにだけ使う)。
+ * ═════════════════════════════════════════════════════════════════════ */
+
+/* ハッシュからキーを引く。無ければ thNULL。
+ * ⚠ @pigDataHash::get_ix@ は **無いキーに pigDataError を返す** ので、それを「無い」に畳む。 */
+static sPtr<pigData>
+pig_hash_get(sPtr<pigData> h, const char *key)
+{
+	sPtr<pigDataHash> hh = h.is_notNull() ? h->obt_hash() : sPtr<pigDataHash>(thNULL);
+	if ( ! hh.is_notNull() ) return sPtr<pigData>(thNULL);
+	sPtr<pigData> v = hh->get_ix(thNEW(pigDataString,(key)));
+	if ( ! v.is_notNull() || v->is_error() ) return sPtr<pigData>(thNULL);
+	return v;
+}
+
+/* ハッシュの整数欄 (無ければ dflt)。 */
+static int
+pig_hash_int(sPtr<pigData> h, const char *key, int dflt)
+{
+	sPtr<pigData> v = pig_hash_get(h, key);
+	return v.is_notNull() ? (int)v->get_int() : dflt;
+}
+
+/* ラムダに args[from..from+n) を渡す **適用ノード** を作る (まだ評価しない)。
+ * ★ ラムダ適用の現物は @pigfApply@。@pigDataFunction::_start@ が caller を辿って実態親を
+ *   見つけるので、状態関数の中から作ってよい (pigfMap と同じ形)。 */
+static sPtr<pigData>
+pig_apply_node(sPtr<pigData> fn, sArray<sPtr<pigData> > *args, int from, int n, sPtr<pigInfo> info)
+{
+	sPtr<pigDataFunction<pigfApply> > app = thNEW(pigDataFunction<pigfApply>,(info));
+	app->pushArg(fn);
+	for ( int i = 0 ; i < n ; ++i ) app->pushArg((*args)[from + i]);
+	return app;
+}
+
+/* ops 配列 (無ければ thNULL)。 */
+static sPtr<pigDataArray>
+pig_pseudo_ops(sPtr<pigData> pseudo)
+{
+	sPtr<pigData> ov = pig_hash_get(pseudo, "ops");
+	return ov.is_notNull() ? ov->obt_array() : sPtr<pigDataArray>(thNULL);
+}
+
+/* その擬似モジュールが op 名を宣言しているか (診断の言い分けに使う安いフィルタ)。 */
+static int
+pig_pseudo_declares_op(sPtr<pigData> pseudo, const char *op)
+{
+	sPtr<pigDataArray> oa = pig_pseudo_ops(pseudo);
+	if ( ! oa.is_notNull() ) return 0;
+	for ( int i = 0 ; i < oa->length() ; ++i ) {
+		sPtr<pigData> e  = oa->get_ix(thNEW(pigDataInteger,((INTEGER64)i)));
+		sPtr<pigData> nv = pig_hash_get(e, "name");
+		sPtr<stdString> ns = nv.is_notNull() ? nv->get_str() : sPtr<stdString>(thNULL);
+		if ( ns.is_notNull() && ::strcmp(ns->get_str(), op) == 0 ) return 1;
+	}
+	return 0;
+}
+
+/* ★★ #3555 (ひさ 2026-09-21 確定): 擬似モジュールの **札** — 診断に出す名前。
+ *
+ *   欄 `name` は **省略可**。在ればエラー表示の札として使い、無ければ `{pseudo}`。
+ *   ⚠ 札は **指名には使えない** (`"glue"::op` と書いても、擬似モジュールは値なので
+ *     名前からは引けない)。⇒ *実モジュールと同名なら `{pseudo}` に倒して黙認する* —
+ *     倒さずにそのまま出すと「その名前で指名できる」と読まれ、指名すると実モジュールの
+ *     方へ行く、という一番たちの悪い食い違いになる。
+ *   ★ 2026-09-19 に「名乗らない (エラー文にも出ない)」と決めたのを **改訂**した:
+ *     候補列に擬似を 2 つ以上置けるので、どれの話かを言えないと直す場所が指せない。 */
+static std::string
+pig_pseudo_label(const sPtr<pigModuleRegistry> &reg, sPtr<pigData> pseudo)
+{
+	sPtr<pigData> nv = pig_hash_get(pseudo, "name");
+	sPtr<stdString> ns = nv.is_notNull() ? nv->get_str() : sPtr<stdString>(thNULL);
+	if ( ! ns.is_notNull() || ns->get_str()[0] == '\0' ) return std::string("{pseudo}");
+	const char *nm = ns->get_str();
+	if ( reg != thNULL && reg->id_of_name(nm) > 0 ) return std::string("{pseudo}");
+	return std::string(nm);
+}
+
+/* ★★ #3555 (ひさ 2026-09-21 確定): 擬似 op の 1 行が **選ばれるか**。
+ *     1 = 選ばれる / 0 = 選ばれない (**次の行へ**) / -1 = 定義が壊れている (*emsg に理由)
+ *
+ *   ⚠⚠ この関数の要は「**選ばれない**」と「**壊れている**」を分けることにある:
+ *
+ *       選ばれない   引数の数 / 種別 / 述語 / sig が合わない
+ *                    ⇒ 次の行 → 同名の行が尽きたら **黙って通常の routing へ降りる**
+ *                      (同名 2 行で引数の数を振り分けられる、が (b) の狙い)
+ *       壊れている   欄が無い / 綴りが違う / body の引数の数が in[] と食い違う
+ *                    ⇒ **明示エラー**。擬似モジュールには記述子のロード時検査に当たるものが
+ *                      無いので、ここで言わないと「その op を使ったときだけ静かに別のカーネルへ
+ *                      行く」= 定義の誤りが緑と同じ顔になる
+ *
+ *   欄の仕様 (ひさ 2026-09-21):
+ *       name      **必須**。この行がどの op の行かを言う (無ければ判定すらできない)
+ *       body      **必須**。ラムダ。引数の数は in[] の長さ (variadic:1 なら 1) と一致
+ *       in        **必須**。スロットの並び。"value" / "cache" / 述語ラムダ
+ *       sig       省略可 (無い / "" / [] の 3 つは同じ = **入力型で絞らない**)
+ *       nreq      省略可 (既定 = in の長さ = 全部必須)。nreq..in の長さ が許される個数で、
+ *                 **足りない末尾は null で埋める** ⇒ body は `== null` で省略を読む (#3567)
+ *       vtail     "value" | "cache" ・既定 "cache" (可変部の種別)
+ *
+ *   ⚠ 述語ラムダの適用は **待ちうる** ⇒ ACT_START が頭から再走する (#3554 と同じ前提)。
+ *     述語は **純粋**であること — 候補ごとに何度でも呼ばれうる。 */
+static int
+pig_pseudo_row_fit(sPtr<pigData> row, const char *op,
+                   const std::vector<std::string>& insets,
+                   sArray<sPtr<pigData> > *args, sPtr<pigInfo> info,
+                   int *pnin, int *pvariadic, std::string *emsg)
+{
+	char buf[288];
+	if ( pnin != 0 )      *pnin = 0;
+	if ( pvariadic != 0 ) *pvariadic = 0;
+
+	/* ---- 行 name。★ 仕様変更: 無ければ **エラー** (以前は「別の op の行」として飛ばしていた) ---- */
+	sPtr<pigData> nv = pig_hash_get(row, "name");
+	sPtr<stdString> ns = nv.is_notNull() ? nv->get_str() : sPtr<stdString>(thNULL);
+	if ( ! ns.is_notNull() || ns->get_str()[0] == '\0' ) {
+		*emsg = "pseudo module: an 'ops' row has no 'name' "
+		        "(every row must name the op it implements)";
+		return -1;
+	}
+	if ( ::strcmp(ns->get_str(), op) != 0 ) return 0;      /* 別の op の行 */
+
+	/* ★ ここから先は **op 名が一致した行**。形が壊れていたら飛ばさずエラーにする。 */
+
+	/* ---- body ---- */
+	sPtr<pigDataLambda> bl = sPtr<pigDataLambda>::d_cast(pig_hash_get(row, "body"));
+	if ( ! bl.is_notNull() )
+		{ *emsg = std::string("pseudo module: op '") + op + "' has no lambda 'body'"; return -1; }
+
+	/* ---- in[]。★ 仕様変更: 無ければ **エラー** (以前は「種別も個数も問わない」で素通しだった) ---- */
+	sPtr<pigData> iv = pig_hash_get(row, "in");
+	sPtr<pigDataArray> ia = iv.is_notNull() ? iv->obt_array() : sPtr<pigDataArray>(thNULL);
+	if ( ! ia.is_notNull() ) {
+		::snprintf(buf, sizeof buf,
+		    "pseudo module: op '%s' has no 'in' "
+		    "(list the argument slots: \"value\" / \"cache\" / a match lambda)", op);
+		*emsg = buf; return -1;
+	}
+	int nin      = ia->length();
+	int variadic = pig_hash_int(row, "variadic", 0);
+	if ( pnin != 0 )      *pnin = nin;
+	if ( pvariadic != 0 ) *pvariadic = variadic;
+
+	/* ---- body の引数の数 = in[] の長さ (variadic なら **配列 1 個**) ---- */
+	int wantp = variadic ? 1 : nin;
+	if ( bl->paramc() != wantp ) {
+		::snprintf(buf, sizeof buf,
+		    "pseudo module: op '%s' body takes %d argument(s) but 'in' declares %d%s",
+		    op, bl->paramc(), nin,
+		    variadic ? " (variadic:1 ⇒ the body takes exactly 1 argument: the array)" : "");
+		*emsg = buf; return -1;
+	}
+
+	/* ---- nreq。★ 既定は **in の長さ** (全部必須)。範囲外は定義の誤り ---- */
+	int nreq = pig_hash_int(row, "nreq", nin);
+	if ( nreq < 0 || nreq > nin ) {
+		::snprintf(buf, sizeof buf,
+		    "pseudo module: op '%s' has nreq=%d, which is outside 0..%d (the length of 'in')",
+		    op, nreq, nin);
+		*emsg = buf; return -1;
+	}
+
+	/* ---- vtail。★ 仕様変更: 擬似モジュールの欄は 旧 `vtail_value` (整数 0/1) から
+	 *   **`vtail` = "value" / "cache" の文字列**へ (ひさ 2026-09-21)。in[] のスロットが
+	 *   同じ 2 語で書かれているので、可変部だけ 0/1 なのは綴りが揃っていなかった。
+	 *   ⚠ **C++ の記述子側 (@pigOpEntry::vtail_value@) は そのまま** — あちらは OPS[] の
+	 *     位置指定初期化子で書かれていて、改名は ABI の話になる (ここは値の話)。 */
+	int vtailCache = 1;
+	{
+		sPtr<pigData> vv = pig_hash_get(row, "vtail");
+		if ( vv.is_notNull() ) {
+			sPtr<stdString> vs = vv->get_str();
+			const char *v = vs.is_notNull() ? vs->get_str() : "";
+			if      ( ::strcmp(v, "value") == 0 ) vtailCache = 0;
+			else if ( ::strcmp(v, "cache") == 0 ) vtailCache = 1;
+			else {
+				::snprintf(buf, sizeof buf,
+				    "pseudo module: op '%s' has vtail='%s' (must be \"value\" or \"cache\")", op, v);
+				*emsg = buf; return -1;
+			}
+		}
+	}
+
+	/* ════ ここから下は「選ばれるか」 — 外れても **エラーにしない** ════ */
+
+	int n = ( args != 0 ) ? args->length() : 0;
+
+	/* ---- ① 引数の **数** ---- */
+	if ( variadic ) { if ( n < nin ) return 0; }
+	else            { if ( n < nreq || n > nin ) return 0; }
+
+	/* ---- ② 引数の **種別** (幾何か値か)。★ ラムダのスロットは *述語* なので種別は見ない ---- */
+	for ( int i = 0 ; i < n ; ++i ) {
+		int wantCache;
+		if ( i < nin ) {
+			sPtr<pigData> slot = ia->get_ix(thNEW(pigDataInteger,((INTEGER64)i)));
+			if ( sPtr<pigDataLambda>::d_cast(slot).is_notNull() ) continue;   /* 述語 */
+			sPtr<stdString> ss = slot.is_notNull() ? slot->get_str() : sPtr<stdString>(thNULL);
+			const char *sk = ss.is_notNull() ? ss->get_str() : "";
+			if      ( ::strcmp(sk, "cache") == 0 ) wantCache = 1;
+			else if ( ::strcmp(sk, "value") == 0 ) wantCache = 0;
+			else {
+				/* ★ スロットの綴りが違うのは **定義の誤り** (選ばれる / 選ばれない の話ではない) */
+				::snprintf(buf, sizeof buf,
+				    "pseudo module: op '%s' in[%d] must be \"value\", \"cache\" or a match lambda "
+				    "(got '%s')", op, i, sk);
+				*emsg = buf; return -1;
+			}
+		} else {
+			wantCache = vtailCache;          /* ★ 可変部の種別は vtail の申告から */
+		}
+		std::string ts = arg_type_set((*args)[i]);
+		int gotCache = ( ! ts.empty() && ts != "value" && ts != "ref" ) ? 1 : 0;
+		if ( wantCache != gotCache ) return 0;       /* ★ 合わない = **次の行へ** */
+	}
+
+	/* ---- ③ 述語ラムダ ---- */
+	if ( args != 0 && nin > 0 ) {
+		for ( int i = 0 ; i < n ; ++i ) {
+			int si = i;
+			if ( si >= nin ) {
+				if ( ! variadic ) break;
+				si = nin - 1;                  /* 可変部は **最後のスロットが繰り返す** */
+			}
+			sPtr<pigData> slot = ia->get_ix(thNEW(pigDataInteger,((INTEGER64)si)));
+			if ( ! sPtr<pigDataLambda>::d_cast(slot).is_notNull() ) continue;   /* 種別の申告 */
+			sPtr<pigData> r = pig_apply_node(slot, args, i, 1, info)->compact();
+			if ( r.is_notNull() && r->is_error() ) {
+				sPtr<stdString> em = r->error_message();
+				*emsg = std::string("pseudo module: op '") + op + "' match lambda for argument "
+				      + std::to_string(i + 1) + " failed: " + ( em.is_notNull() ? em->get_str() : "?" );
+				return -1;
+			}
+			if ( ! r.is_notNull() || r->get_bool() == 0 ) return 0;             /* 述語が偽 */
+		}
+	}
+
+	/* ---- ④ sig。★ 仕様変更: **無い / "" / [] の 3 つは同じ = 入力型で絞らない** ----
+	 *   以前は「無い = エラー」「"" = 入力 0 個として当たる」「[] = 候補 0 本で当たらない」と
+	 *   3 通りに割れていた。擬似モジュールの sig は *入力型の並びしか見ない* (出力型は照合にも
+	 *   下流にも使われない ⇒ 実測で `->cg-mesh3d` / `->zzz-nonsense` / `->value` が同結果) ので、
+	 *   「書かない」を **絞らない** に倒すのが素直で、3 つの綴りも揃う。 */
+	sPtr<pigData> sv = pig_hash_get(row, "sig");
+	if ( ! sv.is_notNull() ) return 1;                      /* 欄が無い = 絞らない */
+	sPtr<pigDataArray> sa = sv->obt_array();
+	if ( sa.is_notNull() && sa->length() == 0 ) return 1;   /* [] = 絞らない */
+	if ( ! sa.is_notNull() ) {
+		sPtr<stdString> ss = sv->get_str();
+		if ( ! ss.is_notNull() || ss->get_str()[0] == '\0' ) return 1;   /* "" = 絞らない */
+	}
+	int nsig = sa.is_notNull() ? sa->length() : 1;
+	for ( int k = 0 ; k < nsig ; ++k ) {
+		sPtr<pigData> one = sa.is_notNull() ? sa->get_ix(thNEW(pigDataInteger,((INTEGER64)k))) : sv;
+		sPtr<stdString> os = one.is_notNull() ? one->get_str() : sPtr<stdString>(thNULL);
+		if ( ! os.is_notNull() ) continue;
+		/* ★ 1 本の中の ';' 区切りも C++ 側と同じに読む (書き方を揃えられるように)。 */
+		std::string all = os->get_str();
 		size_t sp = 0;
 		while ( sp <= all.size() ) {
 			size_t sc = all.find(';', sp);
-			std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
-			pigSigLine L; parse_sigline(one, L);
-			if ( sigline_matches(L, insets) &&
-			     ( wantOut == 0 || L.out == wantOut ) ) {
-				long pr = reg->priority(m);
-				if ( pr > bestPrio ) {
-					bestPrio = pr; best = m; bestOut = L.out;
-					bestN = ( L.kind == SK_FOLD ) ? ( L.arity < 0 ? INT_MAX : L.arity ) : -1;
-				}
-			}
+			std::string t = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
+			pigSigLine L; parse_sigline(t, L);
+			if ( sigline_matches(L, insets) ) return 1;
 			if ( sc == std::string::npos ) break;
 			sp = sc + 1;
 		}
 	}
+	return 0;
+}
+
+/* ★ #3555 (c): その擬似モジュールが op について **受けられる引数の個数**。
+ *   見つかれば 1 を返し lo..hi を入れる (variadic は hi = -1 = 上限なし)。
+ *   ⚠ 同名の行が複数あるときは **それぞれの範囲の和** を lo..hi に丸める (診断に出すだけなので
+ *     穴の空いた集合を正確に持つ必要はない)。定義が壊れている行はここでは言わない
+ *     (言うのは選ぶ側 = pig_pseudo_row_fit の仕事で、二重に口を持たせない)。 */
+static int
+pig_pseudo_arity_range(sPtr<pigData> pseudo, const char *op, int *plo, int *phi)
+{
+	sPtr<pigDataArray> oa = pig_pseudo_ops(pseudo);
+	if ( ! oa.is_notNull() ) return 0;
+	int found = 0, lo = 0, hi = 0;
+	for ( int j = 0 ; j < oa->length() ; ++j ) {
+		sPtr<pigData> row = oa->get_ix(thNEW(pigDataInteger,((INTEGER64)j)));
+		sPtr<pigData> nv = pig_hash_get(row, "name");
+		sPtr<stdString> ns = nv.is_notNull() ? nv->get_str() : sPtr<stdString>(thNULL);
+		if ( ! ns.is_notNull() || ::strcmp(ns->get_str(), op) != 0 ) continue;
+		sPtr<pigData> iv = pig_hash_get(row, "in");
+		sPtr<pigDataArray> ia = iv.is_notNull() ? iv->obt_array() : sPtr<pigDataArray>(thNULL);
+		if ( ! ia.is_notNull() ) continue;
+		int nin  = ia->length();
+		int vari = pig_hash_int(row, "variadic", 0);
+		int nreq = pig_hash_int(row, "nreq", nin);
+		if ( nreq < 0 || nreq > nin ) nreq = nin;
+		int rlo = vari ? nin : nreq;
+		int rhi = vari ? -1  : nin;
+		if ( ! found ) { lo = rlo; hi = rhi; found = 1; continue; }
+		if ( rlo < lo ) lo = rlo;
+		if ( hi >= 0 ) { if ( rhi < 0 ) hi = -1; else if ( rhi > hi ) hi = rhi; }
+	}
+	if ( found ) { *plo = lo; *phi = hi; }
+	return found;
+}
+
+/* ★ 個数の範囲を "takes 2" / "takes 1 to 3" / "takes 2 or more" に整える (診断用)。 */
+static std::string
+pig_arity_phrase(int lo, int hi)
+{
+	char buf[64];
+	if ( hi < 0 )       ::snprintf(buf, sizeof buf, "takes %d or more", lo);
+	else if ( lo == hi) ::snprintf(buf, sizeof buf, "takes %d", lo);
+	else                ::snprintf(buf, sizeof buf, "takes %d to %d", lo, hi);
+	return std::string(buf);
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ * ★★ #3555 段1 (2026-09-19): **候補列** — `module::op` の指名を「並び」として読む。
+ *
+ *   決着規則 (ひさ 2026-09-19):
+ *
+ *       候補列なし (指名も無し)   モジュール間は **priority 最大** (従来どおり)
+ *       候補列あり                **候補列の順に先勝ち** ・ priority は **見ない**
+ *                                 ⚠ *列に無いモジュールは呼ばれない*
+ *
+ *   ★ 同じモジュールの中で行を OPS 順に先勝ちする規則は **どちらでも変わらない**。
+ *
+ *   指名式の型:
+ *       テキスト "cgal"   候補列 = [cgal]  (= 従来の onlyModule)。"" は **指名なし**と同一 (#3467)
+ *       配列 ["a","b"]    候補列 = その並びそのもの
+ *
+ *   ★★ #3555 段2: **指名が無ければ予約変数 @USE_MODULES@** を同じ規則で読む
+ *     (= `<変数>::op` と書いたのと同じ意味)。それも無ければ候補列なし = 従来どおり priority 順。
+ *
+ *   ⚠ 解決できない名前は **飛ばす** (ひさ 2026-09-19)。all.sra が既定の順を書くと、
+ *     nef off / occt 無しの構成では列の一部が必ず未ロードになるため。
+ *     ★ ただし **全要素が未解決なら**エラーにする ⇒ `["ocdt"]` の誤字は `"ocdt"::op` と
+ *       同じ顔で落ち、誤字が黙って priority 順に戻ることはない。
+ * ═════════════════════════════════════════════════════════════════════ */
+/* 候補列の 1 要素。★ 段3: **実モジュール**か **擬似モジュール (値)** のどちらか。 */
+struct pigModCand {
+	int           id;       /* 実モジュール id ・ -1 = 擬似 */
+	sPtr<pigData> pseudo;   /* 擬似モジュールの定義ハッシュ (id < 0 のとき) */
+	std::string   label;    /* ★ #3555: 診断に出す札 (実 = モジュール名 / 擬似 = name 欄 or "{pseudo}") */
+	pigModCand() : id(-1) {}
+};
+
+struct pigModCands {
+	int                      given;   /* 1 = 候補列が与えられた (未指定と "" は 0) */
+	int                      nelem;   /* 列の要素数 (0 = 空配列 ⇒ 呼べる候補がゼロ)。★ 段5: **穴を除いた**数 */
+	int                      nholes;  /* ★ 段5: 読み飛ばした穴 (null / "" / 0) の個数。診断の言い方に使う */
+	std::vector<sPtr<pigData> > vals; /* 書かれたとおりの要素 (文字列 / ハッシュ)・順序どおり */
+	std::vector<std::string> names;   /* その表示名 (擬似は "{pseudo}")・診断用 */
+	std::vector<pigModCand>  elems;   /* 解決できた候補。**並びが優先順位** */
+	std::vector<int>         ids;     /* そのうち実モジュールの id (sig_dispatch へ渡す形) */
+	std::vector<int>         withOp;  /* そのうち op を持つもの (診断の言い分けに使う) */
+	int                      nPseudo; /* 擬似モジュールの要素数 (0 なら段3 の枝に入らない) */
+	int                      nPsWithOp; /* そのうち op 名を宣言しているもの */
+	int                      fromVar; /* ★ 段2: 1 = 指名ではなく USE_MODULES から来た (診断の言い方) */
+	pigModCands() : given(0), nelem(0), nholes(0), nPseudo(0), nPsWithOp(0), fromVar(0) {}
+	/* sig_dispatch へ渡す形。指名が無ければ 0 = 全モジュール × priority */
+	const std::vector<int> *list() const { return given ? &ids : 0; }
+	/* エラー文の主語 (どこに書いた列の話かで直す場所が違う)。 */
+	std::string where() const { return fromVar ? "USE_MODULES" : "module candidate list"; }
+};
+
+/* 名前の列を "'a', 'b'" に整える (エラー文用)。 */
+static std::string
+cand_names_str(const pigModCands &c)
+{
+	std::string r;
+	for ( size_t i = 0 ; i < c.names.size() ; ++i ) {
+		if ( ! r.empty() ) r += ", ";
+		r += "'"; r += c.names[i]; r += "'";
+	}
+	return r;
+}
+
+/* ★★ #3555 段5 (ひさ 2026-09-21): 候補列の **穴** = *書かなかったのと同じ*に扱う要素。
+ *   `null` / `""` / 数値 `0` の 3 つ。狙いは **枠を先に敷いて、条件で埋めた所だけ使う**こと:
+ *
+ *       var u = ["", "", "cgal"];                     // 優先順位の枠を先に作る
+ *       if ( want_occt )     u[0] = "occt";
+ *       if ( want_manifold ) u[1] = "manifold";
+ *       use u;                                        // 埋めなかった枠は消える
+ *
+ *       var a = []; a[2] = "occt";  use a;            // 添字伸長が空けた穴 (= null) が混ざる形
+ *
+ *   ⚠ srava に三項演算子は無く、`&&` / `||` は **1/0 を返す** (被演算子を返さない) ので、
+ *     「条件で要素を 1 つ落とす」はこの枠方式でしか書けない。配列は伸ばす (`a[length(a)]=v`)
+ *     ことしかできず **途中を詰められない**ので、穴を飛ばす側で吸収する必要がある。
+ *
+ *   ⚠ 判定は言語の**真偽そのもの** (@get_bool@) に乗せてある — 規則が 1 つで済み、
+ *     「偽なら書かなかったのと同じ」で読み手も覚えることが増えない。
+ *   ⚠ 文字列 `"0"` は **穴ではない** (非空文字列 = 真)。名前として扱い、解決できなければ
+ *     従来どおり「そんなモジュールは無い」で落ちる ⇒ 数値 0 と書き分けられる。
+ *   ⚠ ハッシュは **擬似モジュール**なので先に除く。空ハッシュ `{}` は get_bool が偽だが、
+ *     これは「op を 1 つも宣言していない擬似モジュール」であって穴ではない
+ *     (黙って消すと、定義を書き損じた擬似モジュールが *無言で* 無視される)。 */
+static int
+cand_is_hole(sPtr<pigData> v)
+{
+	if ( ! v.is_notNull() ) return 1;                   /* null (添字伸長の穴・値なしの var) */
+	if ( v->obt_hash().is_notNull() ) return 0;         /* 擬似モジュール */
+	return v->get_bool() ? 0 : 1;
+}
+
+/* 1 要素ぶんを積む。★ 段3: ハッシュなら **擬似モジュール**なので名前を引かない。 */
+static void
+cand_push_elem(pigModCands &o, sPtr<pigData> ev)
+{
+	o.vals.push_back(ev);
+	if ( ev.is_notNull() && ev->obt_hash().is_notNull() ) { o.names.push_back("{pseudo}"); return; }
+	sPtr<stdString> es = ev.is_notNull() ? ev->get_str() : sPtr<stdString>(thNULL);
+	o.names.push_back(es.is_notNull() ? es->get_str() : "");
+}
+
+/* ★★ #3573 (2026-09-22): 候補列の **入れ子は平坦化**する。
+ *     ["cgal", ["occt","manifold"], "geogram"]  ≡  ["cgal", "occt", "manifold", "geogram"]
+ *
+ *   ★ 狙いは **既にある列を部品として並べられる**ようにすること。候補列は「優先順位表」なので、
+ *     使う側は自然に *表の断片に名前を付けて並べる* 書き方をする:
+ *
+ *         var mesh_first = ["cgal", "manifold"];
+ *         use [ mesh_first, "occt" ];            // ← 平坦化が無いと配列の配列になる
+ *
+ *     ⇒ これが #3574 (擬似モジュール集) の前提でもある。擬似モジュールは
+ *       「擬似 + 落ち先の実名」を **組**で書きたいが、組を並べた瞬間に入れ子になる。
+ *
+ *   ⚠ 平坦化前は入れ子が *1 つの名前* として読まれていた (要素の get_str が
+ *     `[occt,manifold]` を返し、「そんなモジュールは無い」で落ちる)。⇒ 黙って無視は
+ *     していなかったので、この変更で **通るようになるのは今まで落ちていた形だけ**。
+ *
+ *   ⚠ 深さは数えて止める — 自己参照する配列 (`var a = []; a[0] = a;`) を言語が禁じて
+ *     いないので、ここで止めないとスタックを食い潰す。★ 打ち切るときは **黙って捨てず**に
+ *     エラーにする (捨てると「書いた候補が消える」= 穴と同じ顔になり、追えなくなる)。 */
+#define CAND_MAX_DEPTH 8
+
+static int cand_read_array(sPtr<pigDataArray> ar, pigModCands &out, sPtr<pigData> *errv, int depth);
+
+static int
+cand_read_array(sPtr<pigDataArray> ar, pigModCands &out, sPtr<pigData> *errv, int depth)
+{
+	if ( depth > CAND_MAX_DEPTH ) {
+		if ( errv != 0 ) {
+			char buf[192];
+			::snprintf(buf, sizeof buf,
+			    "module candidate list: nested more than %d levels deep "
+			    "(a list that contains itself?)", CAND_MAX_DEPTH);
+			*errv = thNEW(pigDataError,(buf, thNULL, 1));
+		}
+		return 0;
+	}
+	int n = ar->length();
+	for ( int i = 0 ; i < n ; ++i ) {
+		sPtr<pigData> ev = ar->get_ix(thNEW(pigDataInteger,((INTEGER64)i)));
+		if ( ev.is_notNull() && ev->is_error() ) { if ( errv != 0 ) *errv = ev; return 0; }
+		/* ⚠ 要素が遅延ノードなら compact して実体を取る (ハッシュ / 配列の判定に要る)。 */
+		if ( ev.is_notNull() ) ev = ev->compact();
+		if ( ev.is_notNull() && ev->is_error() ) { if ( errv != 0 ) *errv = ev; return 0; }
+		/* ★ #3573: 入れ子は **その場に開く**。⚠ 穴の判定より **先に**見る —
+		 *   空配列 `[]` は get_bool が偽なので、順が逆だと穴として数えられ、
+		 *   「全部穴だった (null / "" / 0)」という *別件の* 文言が出てしまう。
+		 *   平坦化した空配列は「要素 0 個」であって穴ではない。 */
+		sPtr<pigDataArray> sub = ev.is_notNull() ? ev->obt_array() : sPtr<pigDataArray>(thNULL);
+		if ( sub.is_notNull() ) {
+			if ( ! cand_read_array(sub, out, errv, depth + 1) ) return 0;
+			continue;
+		}
+		/* ★ 段5: 穴は **積まない**。⇒ 名前も診断に出ない = 書かなかったのと同じ顔になる。
+		 *   ⚠ 「未ロードだから飛ばす」とは別の枝。未ロード名は names に残って
+		 *     「どれも解決できなかった」の文言に出るが、穴は最初から候補ではない。 */
+		if ( cand_is_hole(ev) ) { ++out.nholes; continue; }
+		cand_push_elem(out, ev);
+	}
+	return 1;
+}
+
+/* 1 つの値を候補列として読む (テキスト / 配列)。読めたら out.given を立てる。
+ * ⚠ その値がエラーなら *errv に入れて 0 を返す。★ 名前の解決 (id 引き) はまだしない。 */
+static int
+read_cand_list(sPtr<pigData> v, pigModCands &out, sPtr<pigData> *errv)
+{
+	if ( ! v.is_notNull() ) return 1;
+	/* ⚠ 値を読む口はゲートウェイなので、ここで **待ちうる** (ACT_START の再走前提は #3554 と同じ)。 */
+	sPtr<pigData> mv = v->compact();
+	if ( ! mv.is_notNull() ) return 1;
+	if ( mv->is_error() ) { if ( errv != 0 ) *errv = mv; return 0; }
+
+	/* ★ 配列 = 候補列そのもの。⚠ 要素は eager に解決されないので **要素ごとに口を通す**。
+	 *   ★ #3573: 入れ子は平坦化する (cand_read_array が再帰する)。 */
+	sPtr<pigDataArray> ar = mv->obt_array();
+	if ( ar.is_notNull() ) {
+		out.given = 1;
+		if ( ! cand_read_array(ar, out, errv, 0) ) return 0;
+		out.nelem = (int)out.vals.size();      /* ★ 段5: 穴を除いた数 (全部穴なら 0 = 空配列と同じ) */
+		return 1;
+	}
+	/* ★ 段3: ハッシュそのもの = **擬似モジュール単体**の指名。 */
+	if ( mv->obt_hash().is_notNull() ) {
+		out.given = 1;
+		out.nelem = 1;
+		cand_push_elem(out, mv);
+		return 1;
+	}
+	/* ★ "" は **指名なし**と完全に同一 (#3467)。★ 段5: `null` / `0` も同じ穴として揃えた
+	 *   — ⚠ ここは *要素* ではなく **列そのもの** なので、飛ばすのではなく「書かなかった」に倒す
+	 *   (`[""]` は候補ゼロ = エラー、`""` は planner に任せる。スカラと配列で意味が違う)。 */
+	if ( cand_is_hole(mv) ) return 1;
+	out.given = 1;
+	out.nelem = 1;
+	cand_push_elem(out, mv);
+	return 1;
+}
+
+/* 指名式 (無ければ USE_MODULES) → 候補列。★ *解決だけ*を行い、エラーにするかどうかは呼び手が決める
+ *   (decide_out_module は明示エラー / try_decompose は黙って分解をやめる)。
+ * ⚠ 指名式そのものがエラー値なら *errv に入れて 0 を返す。 */
+static int
+resolve_cands(const sPtr<pigModuleRegistry> &reg, sPtr<pigData> me, sPtr<pigData> useModules,
+              const char *op, pigModCands &out, sPtr<pigData> *errv)
+{
+	if ( errv != 0 ) *errv = sPtr<pigData>(thNULL);
+	if ( ! read_cand_list(me, out, errv) ) return 0;
+	if ( ! out.given ) {
+		/* ★ 段2: 指名なし (書いていない / "") なら予約変数を見る。"" は「planner に任せる」
+		 *   という意味なので、**USE_MODULES まで含めて**同じ扱いにする。 */
+		if ( ! read_cand_list(useModules, out, errv) ) return 0;
+		if ( out.given ) out.fromVar = 1;
+	}
+	if ( ! out.given ) return 1;
+
+	for ( size_t i = 0 ; i < out.vals.size() ; ++i ) {
+		sPtr<pigDataHash> ph = out.vals[i].is_notNull() ? out.vals[i]->obt_hash()
+		                                                : sPtr<pigDataHash>(thNULL);
+		if ( ph.is_notNull() ) {                               /* ★ 段3: 擬似モジュール */
+			/* ★ #3555: 札 (欄 name)。read_cand_list は reg を持たないのでここで入れ直す。 */
+			out.names[i] = pig_pseudo_label(reg, out.vals[i]);
+			pigModCand c; c.id = -1; c.pseudo = out.vals[i]; c.label = out.names[i];
+			out.elems.push_back(c);
+			++out.nPseudo;
+			if ( op != 0 && pig_pseudo_declares_op(out.vals[i], op) ) ++out.nPsWithOp;
+			continue;
+		}
+		int id = reg->id_of_name(out.names[i].c_str());
+		if ( id <= 0 || reg->descriptor(id) == 0 ) continue;   /* ★ 未ロードは飛ばす */
+		pigModCand c; c.id = id; c.label = out.names[i];
+		out.elems.push_back(c);
+		out.ids.push_back(id);
+		/* ★★ #3555 段5: **`== 1` (持つと分かっているもの) だけ**数える。
+		 *   ⚠ @supports_op@ は ops 表を持たない記述子に **-1 (不明・万能フォールバック扱い)**
+		 *     を返すが、同じ条件で @op_row@ は **0 (行なし)** を返す ⇒ そういう記述子は
+		 *     sig_dispatch で **構造的に絶対に勝てない**。-1 を「持つ」側に数えると、
+		 *     ② の「どれもその op を持たない」という *正確な*診断が握り潰され、
+		 *     代わりに「入力型を受けられない (pig: '(none)')」という筋違いの文言が出る
+		 *     (組込 "pig" を列に入れると実際にそうなった)。
+		 *   ★ 勝てないものを候補の数に入れない = 診断が「実際にどう振られるか」と一致する。 */
+		if ( op != 0 && reg->supports_op(id, op) == 1 ) out.withOp.push_back(id);
+	}
+	return 1;
+}
+
+/* ★★ #3570 段2 (2026-09-21): **行が引数の数を受けられるか** の純粋な述語。
+ *   判定規則は記述子に書いてあるもの (pigOpEntry.nreq のコメント) と同じ:
+ *       n > nin かつ可変長でない → 多すぎ
+ *       n < (nreq ? nreq : nin)  → 少なすぎ   (可変長は n < nin が少なすぎ)
+ *   ⚠ **種別 (幾何/値) は見ない** — 種別違いは「どれも受けない」ではなく *この行に対する誤り*
+ *     なので、隣へ降りずに @arg_kind_violation@ が名指しで言うべきもの。ここで降ろすと
+ *     「argument 1 should be a mesh」が出なくなる ⇒ [[i3568]] で直した診断の劣化になる。
+ *   ★ 引数の**総数**で見る (insets は幾何型だけなので使えない)。 */
+static int
+row_arity_fits(const pigOpEntry *e, int n)
+{
+	if ( e == 0 ) return 1;                       /* 行が無ければ判定しない (従来どおり) */
+	/* ★★ #3570 段4: **個数を申告していない行**は弾かない。
+	 *   @in[]@ も @nin@ も無く、計算本体の配線 (@wiring@) も持たない行 = *sig だけの行*
+	 *   (テスト fixture の @{ "box", 0, 0, (pigArgKind)0, 0, 0, "->cg-mesh3d" }@ 等)。
+	 *   ⚠ 本当に 0 引数の op (@empty2d@ / @empty3d@) とは **wiring の有無**で分かれる —
+	 *     あちらは @OPWIRE(cgaEmpty3D)@ を持つので「0 個だけを受ける」が正しい申告になる。
+	 *   ⚠ 可変長 (@loft@ / @loft_ruled@ は nin=0 + variadic=1) は下の式が n>=0 を常に許す。
+	 *   ⇒ これを入れないと fixture の box/union が routing から落ちる (pigfagent / cgatsagent
+	 *     が全滅して気づいた。**申告していないものを申告 0 と読んではいけない**)。 */
+	if ( pig_op_row_declares_nothing(e) ) return 1;   /* ★ #3572: 判定は pigOpEntry.h に 1 本 */
+	if ( n > e->nin && ! e->variadic ) return 0;
+	int req = ( e->nreq > 0 ) ? e->nreq : e->nin;
+	if ( e->variadic ? ( n < e->nin ) : ( n < req ) ) return 0;
+	return 1;
+}
+
+/* ★★ #3554 段1 (2026-09-19): 候補は **行** になった。基底名 op に対して `op` と `op#変種` を
+ *   OPS の並び順で 1 行ずつ引き (@op_row@)、*頭から先勝ち*で最初に成立した行を採る。
+ *   ⇒ 勝った行の名前を @outRow@ で返し、呼び手がそれを C_OP に載せる (agent 側の @lookup_op@ は
+ *     完全一致のままで当たる)。
+ *   ⚠ 行の順序が効くのは *同じモジュールの中*だけ。
+	 * ★★ #3555 段1 (2026-09-19): **外側ループを候補列で駆動する**。cands != 0 なら
+	 *   その並びを順に見て **先に成立したモジュールを採る** (priority は見ない)。
+	 *   cands == 0 なら従来どおり全モジュールを回して priority 最大を採る。 */
+static int
+sig_dispatch(const sPtr<pigModuleRegistry> &reg, const char *op,
+             const std::vector<std::string>& insets, std::string *outType, int *foldN,
+             const std::vector<int> *cands = 0, std::string *outRow = 0,
+             sArray<sPtr<pigData> > *args = 0, int *matchedButSig = 0, int checkArity = 0,
+             /* ★★ #3580: **勝った行そのもの**の出口。名前では足りない —
+              *   @op_entry(id, 基底名)@ は **OPS の最初の行**を返す規則なので、同じモジュールに
+              *   @op@ と @op#変種@ が並び、かつ *基底行が勝った* とき、名前で引き直すと
+              *   変種の申告 (nin / in[]) で検査してしまう。#3570 のコメントが
+              *   「いまそういう組は 0 件だが、書いた瞬間に静かに誤判定になる」と予告していた
+              *   組を #3580 (openvdb の intersection と intersection#pt) で初めて作った。
+              *   ⇒ 名前を往復させず **行を持ち回る**。 */
+             const pigOpEntry **outRowPtr = 0)
+{
+	if ( outRow != 0 ) outRow->clear();
+	if ( outRowPtr != 0 ) *outRowPtr = 0;
+	if ( matchedButSig != 0 ) *matchedButSig = 0;
+	if ( reg == thNULL ) return -1;
+	int nmod = reg->count();
+	int best = -1; long bestPrio = LONG_MIN; std::string bestOut; int bestN = -1;
+	std::string bestRow;
+	const pigOpEntry *bestRowPtr = 0;
+	int nloop = ( cands != 0 ) ? (int)cands->size() : nmod - 1;
+	for ( int ii = 0 ; ii < nloop ; ++ii ) {
+		int m = ( cands != 0 ) ? (*cands)[ii] : ii + 1;
+		if ( m <= 0 || m >= nmod ) continue;          /* 念のため (候補列は解決済みのはず) */
+		for ( int ci = 0 ; ; ++ci ) {                         /* ★ OPS に書かれた順 = 先勝ち */
+			const pigOpEntry *row = reg->op_row(m, op, ci);
+			if ( row == 0 ) break;                        /* 候補行を尽くした */
+			/* ★ #3554 段2: **マッチ関数 ∧ sig** で行を選ぶ。どちらか一方でも外れれば不成立。
+			 *   ⚠ args が無い文脈では引数 0 個と同じ = マッチ関数は呼ばれず成立する。 */
+			if ( ! row_matches_values(reg->descriptor(m), row, args) ) continue;
+			/* ★ #3570 段2: **引数の数**も行の成立条件に入れる (checkArity のときだけ)。
+			 *   ⇒ 数が合わない実モジュールは候補から外れ、**隣 (擬似) へ降りられる**。
+			 *   ⚠ 段4 で全経路に広げる。それまでは通常 routing は 1 バイトも変わらない。 */
+			if ( checkArity && args != 0 && ! row_arity_fits(row, args->length()) ) continue;
+			const char *sig = row->sig;
+			if ( sig == 0 ) continue;           /* その行は未注釈 */
+			std::string all = sig;
+			size_t sp = 0;
+			int hit = 0;
+			while ( sp <= all.size() ) {
+				size_t sc = all.find(';', sp);
+				std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
+				pigSigLine L; parse_sigline(one, L);
+				if ( sigline_matches(L, insets) ) {
+					hit = 1;
+					long pr = reg->priority(m);
+					/* ★ #3555 段1: 候補列があるときは **先勝ち** (priority を見ない)。
+					 *   外側ループが下で break するので、ここへ来るのは列の中で
+					 *   最初に成立したモジュールだけ。 */
+					if ( cands != 0 || pr > bestPrio ) {
+						bestPrio = pr; best = m; bestOut = L.out;
+						bestRow = ( row->op != 0 ) ? row->op : op;
+						bestRowPtr = row;
+						/* ★ #3528: **分解してよい行なら N / そうでなければ -1**。
+						 *   fold 形でない行 (固定形・繰り返し形) に加え、"(N!)" = 分解禁止も -1。 */
+						bestN = ( L.kind == SK_FOLD && ! L.nosplit )
+						        ? ( L.arity < 0 ? INT_MAX : L.arity ) : -1;
+					}
+					break;                      /* この行で成立 = これ以上 sigline を見ない */
+				}
+				if ( sc == std::string::npos ) break;
+				sp = sc + 1;
+			}
+			/* ★ 最後の段 2/5: **値では成立したのに sig で落ちた** 行が在った、と覚えておく。
+			 *   呼び手 (cast/import/export の診断) はこれで原因を 2 つに分けて言える。 */
+			if ( ! hit && matchedButSig != 0 ) *matchedButSig = 1;
+			if ( hit ) break;                   /* ★ このモジュールでは **先に成立した行**を採る */
+		}
+		if ( cands != 0 && best >= 0 ) break;        /* ★ #3555 段1: 候補列は **先勝ち** */
+	}
 	if ( outType != 0 ) *outType = bestOut;
 	if ( foldN   != 0 ) *foldN   = bestN;
+	if ( outRow  != 0 ) *outRow  = bestRow;
+	if ( outRowPtr != 0 ) *outRowPtr = bestRowPtr;
 	return best;
 }
 
-int
-pigfModuleAgent_::decide_executor(const char *op, int onlyModule)
+/* ★★ #3555 段2: 予約変数 @USE_MODULES@ を引く。
+ * ⚠ **束縛の有無**で判断する (@has_var@) — @get_var@ は未定義のとき pigDataError を返すので、
+ *   is_error() で倒すと「未定義」と「エラー値を代入した」が同じ顔になり、後者が黙って
+ *   priority 順へ落ちる。⇒ 値がエラーなら **そのまま返し**、呼び手に伝播させる。 */
+sPtr<pigData>
+pigfModuleAgent_::use_modules_var()
 {
-	/* 文字列引数でカーネルが決まる op (cast=目標カーネル名・import/export=拡張子) は型では振れない
-	 *   → -1 で既存の専用ロジックへ委ねる。 */
-	/* ★ 2026-08-19: export_vox はここから外した。可変長は sig の "T..." で表現できるように
-	 *   なったので、型ディスパッチで解決できる (専用ロジックが要らない)。 */
-	if ( ::strcmp(op, "cast") == 0 || ::strcmp(op, "import") == 0 ||
-	     ::strcmp(op, "export") == 0 )
-		return -1;
+	if ( ! env.is_notNull() ) return sPtr<pigData>(thNULL);
+	sPtr<stdString> nm = thNEW(stdString,("USE_MODULES"));
+	if ( ! env->has_var(nm) ) return sPtr<pigData>(thNULL);
+	return env->get_var(nm);
+}
+
+int
+pigfModuleAgent_::decide_executor(const char *op, const std::vector<int> *cands, int *matchedButSig)
+{
+	/* ★★ #3554 最後の段 4/5 (2026-09-19): **「型では振れない op」の門は無くなった**。
+	 *   ここには長らく cast / import / export の 3 つが並んでいた — どれも「文字列引数で
+	 *   行き先が決まる」ので型ディスパッチから外す、という特例だった。
+	 *   いまは 3 つとも **行のマッチ関数**が値を見る (目標型 / 拡張子) ので、普通の検索で決まる:
+	 *       cast    pig_match_cast_target   第 1 引数の型名が この行の sig の出力型か
+	 *       import  pig_match_import_ext    拡張子が産む型 (import_exts) が この行の sig の出力型か
+	 *       export  pig_match_export_ext    拡張子を この行のモジュールが書けるか (export_exts)
+	 *   ★ 2026-08-19 に export_vox が先に外れており (可変長は sig の "T..." で書けるように
+	 *     なった)、これで **特例は 1 つも残っていない**。
+	 *   ⚠ 門を消すのは「op 名で routing を変える最後の場所」を消すことでもある。
+	 *     新しい op で同じことをしたくなったら、**ここではなくマッチ関数**を書く。 */
 
 	/* 幾何入力の候補型集合を集める (値/スカラは除外)。 */
 	std::vector<std::string> insets;
@@ -592,9 +1390,28 @@ pigfModuleAgent_::decide_executor(const char *op, int onlyModule)
 	/* ★ 直接一致のみの単パス (旧 pass 1 の coercion は撤去)。クロスカーネルの受理は各 op の sig に
 	 *   foreign 入力型を **明示列挙** する方式へ移行 (cgal は universal reader なので (cg,mf)/(mf,cg) 等を
 	 *   直接持つ・all-foreign は自型カーネルが持つので書かない = sig が disjoint で priority 曖昧なし)。 */
-	std::string bestOut;
-	int best = sig_dispatch(reg, op, insets, &bestOut, 0, 0, onlyModule);
+	std::string bestOut, bestRow;
+	/* ★ #3554 段2: ここが **実際の routing** なので args を渡してマッチ関数を効かせる。
+	 *   ⚠ try_decompose 側の sig_dispatch には渡していない — あちらは「この型の組を受けられる
+	 *     モジュールがあるか」を見るだけで、args の並びが実引数と違うことがあるため。
+	 *     ⇒ *マッチ関数を持つ行は分解の判定からは見えない*。分解する op (union 等) に変種行を
+	 *       足すときは、ここを見直すこと。 */
+	/* ★★ #3570 段4 (2026-09-21): **引数の数を行の成立条件に入れる** (checkArity=1)。
+	 *   ⇒ 数が合わない行は候補から外れ、隣のモジュールへ降りる。段2 では候補列の中だけ
+	 *     だったものを、ここ (通常の routing) へ広げた。
+	 *   例: sphere(1,32,0.05) は cgal/manifold が 2 個までなので外れ、**openvdb だけ**が受ける。
+	 *   ⚠ どれも受けないときの文言は decide_out_module の「no candidate takes N argument(s)」
+	 *     に集約した (以前は勝った行に対する arg_kind_violation が言っていた)。 */
+	const pigOpEntry *bestRowPtr = 0;
+	int best = sig_dispatch(reg, op, insets, &bestOut, 0, cands, &bestRow, &args, matchedButSig, 1,
+	                        &bestRowPtr);
+	routedRow = bestRowPtr;   /* ★ #3580: 検査は **勝った行そのもの**で行う (名前で引き直さない) */
 	if ( best >= 0 ) {
+		/* ★ #3554 段1: **勝った行の名前**を memo する。以後の op 名 (ハッシュ・C_OP・ps 表示) は
+		 *   agent_op_name() がこれを返す。⚠ 基底行が勝ったときは基底名そのものなので機能不変。
+		 *   ⚠ _front は書き換えない (再走で候補集合が変わらないようにするため)。 */
+		routedOpName = ( ! bestRow.empty() && bestRow != op )
+		             ? thNEW(stdString,(bestRow.c_str())) : sPtr<stdString>(thNULL);
 		/* ★ 2026-08-19: sig の出力トークンを **そのまま** memo する。以前は "value" を thNULL へ
 		 *   畳んでいたが、それだと「値出力だから型が無い」と「型が絞れなかった」が同じ thNULL に
 		 *   なり、下流のスタンプが両者を区別できなかった (値キャッシュに mesh 型リストが載っていた)。
@@ -604,6 +1421,114 @@ pigfModuleAgent_::decide_executor(const char *op, int onlyModule)
 	}
 	return -1;   /* 型ディスパッチで解決できず → 既存ロジックへ */
 }
+
+/* ★★ #3555 段3 (2026-09-20): 候補列に **擬似モジュール**が居るとき、候補列の順どおりに
+ *   先勝ちを決める。0 = 非該当 (通常の routing へ) / 1 = _front 解決済み / 2 = err 済み。
+ *
+ * ★ 実モジュールが先に当たったら **0 を返して通常の routing に任せる** — 順序の判定を
+ *   ここ 1 か所に閉じ込め、routing (sig_dispatch) は擬似を知らないまま同じ勝者に辿り着く。
+ *   ⇒ 擬似が居ないときの経路は 1 バイトも変わらない (この関数は即 0 を返す)。
+ * ⚠ 述語ラムダは **待ちうる** ⇒ ACT_START が頭から再走する。この関数は再入に耐える
+ *   (args を書き換えない・印を持たない・純粋な述語しか呼ばない)。 */
+int
+pigfModuleAgent_::try_pseudo_module()
+{
+	sPtr<stdString> opn = agent_op_name();
+	const char *op = ( opn != thNULL ) ? opn->get_str() : 0;
+	if ( op == 0 ) return 0;
+
+	sPtr<pigModuleRegistry> reg = ( ptsApp != thNULL ) ? ptsApp->module_registry
+	                                                   : sPtr<pigModuleRegistry>(thNULL);
+	if ( reg == thNULL ) return 0;
+
+	pigModCands cands;
+	{
+		sPtr<pigData> me = ( _front.is_notNull() ) ? _front->get_module_expr()
+		                                           : sPtr<pigData>(thNULL);
+		sPtr<pigData> cerr;
+		/* ⚠ 指名式のエラーはここでは言わない — 分解と同じく decide_out_module が必ず走って
+		 *   同じ入力で言い分ける (エラー文の持ち主を 1 か所にする)。 */
+		if ( ! resolve_cands(reg, me, use_modules_var(), op, cands, &cerr) ) return 0;
+	}
+	if ( ! cands.given || cands.nPseudo == 0 ) return 0;   /* ★ 擬似が居なければ何もしない */
+
+	/* 入力型列 (decide_executor と同じ作り方)。★ 型が絞れないなら擬似にも振らない。 */
+	std::vector<std::string> insets;
+	for ( int k = 0 ; k < args.length() ; ++k ) {
+		int stampless = 0;
+		std::string ts = arg_type_set(args[k], &stampless);
+		if ( stampless ) return 0;
+		if ( ts.empty() || ts == "value" || ts == "ref" ) continue;
+		if ( ts.find(',') != std::string::npos ) return 0;
+		insets.push_back(ts);
+	}
+
+	for ( size_t i = 0 ; i < cands.elems.size() ; ++i ) {
+		if ( cands.elems[i].id >= 0 ) {
+			/* 実モジュール: この 1 個だけで引いて当たれば **そちらが勝ち** ⇒ 通常の routing へ。 */
+			std::vector<int> one(1, cands.elems[i].id);
+			std::string ot;
+			/* ★ #3570 段2: **引数の数が合う行が在るときだけ** 実モジュールが勝つ。
+			 *   以前は sig だけを見ていたので、@cgal@ が受けられない個数で呼んでも
+			 *   「実モジュールが居る」で降りてしまい、擬似に届かなかった。 */
+			if ( sig_dispatch(reg, op, insets, &ot, 0, &one, 0, &args, 0, 1) >= 0 ) return 0;
+			continue;
+		}
+		sPtr<pigDataArray> oa = pig_pseudo_ops(cands.elems[i].pseudo);
+		if ( ! oa.is_notNull() ) continue;
+		for ( int j = 0 ; j < oa->length() ; ++j ) {
+			sPtr<pigData> row = oa->get_ix(thNEW(pigDataInteger,((INTEGER64)j)));
+			std::string emsg;
+			int nin = 0, vari = 0;
+			int r = pig_pseudo_row_fit(row, op, insets, &args, _front->get_info(),
+			                           &nin, &vari, &emsg);
+			if ( r < 0 ) {
+				err = thNEW(pigDataError,(emsg.c_str(), _front->get_info(), 1));
+				return 2;
+			}
+			/* ★★ #3555 (b): 外れたら **次の行**。同名の行が尽きたらこのループを抜け、
+			 *   候補が尽きたら 0 を返して **黙って通常の routing へ降りる**。
+			 *   ⇒ 同名 2 行で「引数の数と種別」を振り分けられる (以前は 1 行目で止まり、
+			 *     どちらの順に書いても片方だけが通った)。 */
+			if ( r == 0 ) continue;
+
+			/* ★ キャッシュを作らず @body@ を呼び、返った値を @_front@ に載せる。
+			 *   前例: try_decompose が分解した木を @_front->set_result(root)@ している。
+			 *   ⚠ 継続にスタンプを刻まないので、下流が読むのは **返ってきた値が自分で持つ型**
+			 *     ⇒ 「sig が嘘をつく」状態が構造的に作れない (だから返り値と sig は照合しない)。 */
+			sPtr<pigData> bv = pig_hash_get(row, "body");
+			sPtr<pigData> call;
+			if ( vari ) {
+				/* 可変長は **引数配列をそのまま** 1 個で渡す (定義ハッシュの約束)。 */
+				sPtr<pigDataArray> av = thNEW(pigDataArray,());
+				for ( int k = 0 ; k < args.length() ; ++k ) av->push_nocheck(args[k]);
+				sArray<sPtr<pigData> > one;
+				one.length(1);
+				one[0] = av;
+				call = pig_apply_node(bv, &one, 0, 1, _front->get_info());
+			} else if ( args.length() == nin ) {
+				call = pig_apply_node(bv, &args, 0, nin, _front->get_info());
+			} else {
+				/* ★★ #3555: @nreq@ で省略された **末尾を null で埋める** (ひさ 2026-09-21)。
+				 *   body の引数の数は in[] の長さに固定されている (定義のときに照合済み) ので、
+				 *   呼ぶ側がここで揃える。
+				 *   ⇒ body は `if ( n == null )` で「省略された」を読む (#3567 でリテラルと
+				 *     `null == null` が入った)。⚠ 真偽 `if (n)` では **0 を渡した人も**
+				 *     省略扱いになるので、埋め値を下流へ流す行では == null で見ること。 */
+				sArray<sPtr<pigData> > full;
+				full.length(nin);
+				for ( int k = 0 ; k < nin ; ++k )
+					full[k] = ( k < args.length() ) ? args[k]
+					                                : sPtr<pigData>(thNEW(pigDataNull,()));
+				call = pig_apply_node(bv, &full, 0, nin, _front->get_info());
+			}
+			_front->set_result(call);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 
 /* ─────────────────────────────────────────────────────────────────────
  * ★ #3436 P4: n 項ノードの **評価時**分解 (docs/sig_grammar_design.md §5)
@@ -627,17 +1552,25 @@ op_is_decomposable(const sPtr<pigModuleRegistry> &reg, const char *op)
 	if ( reg == thNULL ) return false;
 	int nmod = reg->count();
 	for ( int m = 1 ; m < nmod ; ++m ) {
-		const char *sig = reg->op_sig(m, op);
+	  /* ★ #3554 段1: 「**どれかの行が**そう申告しているか」を問うので、候補行を全部見る。
+	   *   ⚠ op_sig() は最初の候補行しか返さない ⇒ 変種行が増えると *黙って「持っていない」と
+	   *     答える* (2026-09-19 に洗い出した・ひさ指摘)。 */
+	  for ( int ci = 0 ; ; ++ci ) {
+		const pigOpEntry *row = reg->op_row(m, op, ci);
+		if ( row == 0 ) break;
+		const char *sig = row->sig;
 		if ( sig == 0 ) continue;
 		std::string all = sig; size_t sp = 0;
 		while ( sp <= all.size() ) {
 			size_t sc = all.find(';', sp);
 			std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
 			pigSigLine L; parse_sigline(one, L);
-			if ( ! L.bad && L.kind == SK_FOLD && L.fixed.empty() ) return true;
+			/* ★ #3528: "(N!)" の行は分解禁止なので、この関門でも数えない。 */
+			if ( ! L.bad && L.kind == SK_FOLD && L.fixed.empty() && ! L.nosplit ) return true;
 			if ( sc == std::string::npos ) break;
 			sp = sc + 1;
 		}
+	  }
 	}
 	return false;
 }
@@ -728,20 +1661,15 @@ pigfModuleAgent_::try_decompose()
 	/* ★ #3467: 指名があれば **群のサイズ決定 (k) も指名したモジュールの N/N' で決める**。
 	 *   ここでは解決できないケースを黙って -1 に倒す (エラーの出し分けは decide_out_module の
 	 *   仕事で、分解しなければそちらが同じ入力で必ず走る)。 */
-	int qualModule = -1;
+	pigModCands cands;
 	{
 		sPtr<pigData> me = ( _front.is_notNull() ) ? _front->get_module_expr()
 		                                           : sPtr<pigData>(thNULL);
-		if ( me.is_notNull() ) {
-			sPtr<pigData> mv = me->compact();
-			sPtr<stdString> ms = ( mv.is_notNull() && ! mv->is_error() ) ? mv->get_str()
-			                                                            : sPtr<stdString>(thNULL);
-			const char *mn = ms.is_notNull() ? ms->get_str() : "";
-			if ( mn[0] != '\0' ) {
-				qualModule = reg->id_of_name(mn);
-				if ( qualModule <= 0 ) return 0;   /* 解決できない → decide_out_module がエラーにする */
-			}
-		}
+		sPtr<pigData> cerr;
+		/* ★ #3555 段1: 指名は **候補列**。ここで出せるエラーは無い (分解しなければ
+		 *   decide_out_module が同じ入力で必ず走り、そちらが言い分ける)。 */
+		if ( ! resolve_cands(reg, me, use_modules_var(), op, cands, &cerr) ) return 0;
+		if ( cands.given && cands.ids.empty() ) return 0;
 	}
 
 	/* 幾何引数の型列。★ 値引数が 1 つでもあれば「固定部あり」= 分解しない (§5.1)。
@@ -761,7 +1689,7 @@ pigfModuleAgent_::try_decompose()
 	 *   何項で投げるかは **N' (policy)** が決める。両方が n を許すときだけそのまま投げる。 */
 	{
 		std::string ot; int foldN = -1;
-		int m0 = sig_dispatch(reg, op, insets, &ot, &foldN, 0, qualModule);
+		int m0 = sig_dispatch(reg, op, insets, &ot, &foldN, cands.list());
 		if ( m0 >= 0 ) {
 			int lim0 = reg->arity(m0);                        /* N' */
 			if ( foldN >= 2 && foldN < lim0 ) lim0 = foldN;   /* N  */
@@ -774,16 +1702,25 @@ pigfModuleAgent_::try_decompose()
 	 *   群ごとに型が偏りうる (docs §5.2 / §9-4: 群のサイズ決定は混成でしか出ないので後回し可)。 */
 	std::vector<std::string> probe(insets.begin(), insets.begin() + 2);
 	std::string ot; int foldN = -1;
-	int m = sig_dispatch(reg, op, probe, &ot, &foldN, 0, qualModule);
+	int m = sig_dispatch(reg, op, probe, &ot, &foldN, cands.list());
 	if ( m < 0 )
 		return 0;                                  /* 2 項でも行き先が無い → 通常経路が明示エラー */
+	/* ★★ #3528: **実際にマッチした行**が分解可でなければ分解しない。
+	 *   仕様 (docs/sig_grammar_design.md §5.1) は「fold 形**の行**を持つ op」と行の話なのに、
+	 *   上の op_is_decomposable() は **op 単位**の安いフィルタでしかない
+	 *   (どれか 1 モジュールの 1 行が fold なら true)。⇒ 繰り返し形の行にマッチした呼び出しまで
+	 *   ここへ来て、N' で群を切られていた。sig_dispatch は既に foldN でこれを答えているので拾う。
+	 *   ⚠ この取りこぼしは "(N!)" を入れる前から在った (繰り返し形の「分解しない」という
+	 *     約束が、op 単位の関門が開いている限り守られていなかった)。 */
+	if ( foldN < 0 )
+		return 0;
 	int lim = reg->arity(m);                       /* N' (policy) */
 	if ( foldN >= 2 && foldN < lim ) lim = foldN;  /* N  (capability・正しさの上限) */
 	if ( lim > n - 1 ) lim = n - 1;                /* 分解する以上、群は n より必ず小さい */
 	int k = lim;
 	while ( k > 2 ) {                              /* 受け手が居なければ群を縮めて引き直す */
 		std::vector<std::string> pk(insets.begin(), insets.begin() + k);
-		if ( sig_dispatch(reg, op, pk, 0, 0, 0, qualModule) >= 0 ) break;
+		if ( sig_dispatch(reg, op, pk, 0, 0, cands.list()) >= 0 ) break;
 		--k;
 	}
 	if ( k < 2 )
@@ -921,9 +1858,26 @@ pigfModuleAgent_::unroutable_message(const sPtr<pigModuleRegistry> &reg, const c
 
 /* args から「幾何か値か」を作って §6.2 の検査へ渡す (メンバ側)。 */
 std::string
-pigfModuleAgent_::arg_kind_violation(const sPtr<pigModuleRegistry> &reg, int module_id, const char *op)
+pigfModuleAgent_::arg_kind_violation(const sPtr<pigModuleRegistry> &reg, int module_id, const char *op,
+                                     const char *rowName)
 {
-	const pigOpEntry *e = ( reg != thNULL ) ? reg->op_entry(module_id, op) : 0;
+	/* ★★ #3570 (一緒に直す小さいもの): **勝った行**で検査する。
+	 *   @op_entry(id, op)@ は基底名で引くと *OPS の最初の行* を返すので、同じモジュールに
+	 *   @op@ と @op#変種@ が並んでいて **nin / in[] が違う**場合、*別の行の申告*で検査して
+	 *   いた (いまそういう組は 0 件だが、書いた瞬間に静かに誤判定になる)。
+	 *   ⇒ 呼び手が持っている *勝った行の名前* (routedOpName) を渡す。完全一致で引ける。
+	 *   ⚠ 文言に使う名前は **基底名** のまま (利用者は @sphere#vox@ とは書いていない)。 */
+	/* ★★ #3580: **勝った行そのもの**が分かっているならそれを使う。名前で引き直すと
+	 *   @op_entry(id, 基底名)@ が *OPS の最初の行* を返すので、同じモジュールに @op@ と
+	 *   @op#変種@ が並び、かつ **基底行が勝った**とき (= routedOpName が空のとき) に
+	 *   変種の申告で検査してしまう。#3570 のコメントが予告していた組を openvdb の
+	 *   @intersection@ / @intersection#pt@ で初めて作り、grid 同士の 2 項 intersection が
+	 *   「expected 3 argument(s), got 2」で落ちた (2026-09-22 実測)。 */
+	const pigOpEntry *e = routedRow;
+	if ( e == 0 ) {
+		const char *key = ( rowName != 0 && rowName[0] != '\0' ) ? rowName : op;
+		e = ( reg != thNULL ) ? reg->op_entry(module_id, key) : 0;
+	}
 	if ( e == 0 ) return std::string();          /* 未注釈 = 検査しない */
 	/* ★ in[] が無い記述子は **引数の種別を何も申告していない** (nin だけあっても意味を持たない)。
 	 *   申告が無いものを検査すると、sig だけ書いた最小記述子 (テスト fixture・値専用 op) を
@@ -970,264 +1924,126 @@ pigfModuleAgent_::decide_out_module()
 	 *   ⚠ 指名は args に入っていないので compute_arg_hash には現れない。キーに現れるのは
 	 *     **解決結果 (outModule) から作られるソルト** (#3466) だけ ⇒ 「同じモジュールに解決されれば
 	 *     同じキー」が自動的に成立する。 */
-	int qualModule = -1;
+	/* ★★ #3555 段1 (2026-09-19): 指名は **候補列** (テキスト = 要素 1 個 / 配列 = その並び)。
+	 *   ⚠ 未ロードの名前は *飛ばす* が、**どれも解決できなければ**エラー (ひさ 2026-09-19)
+	 *     ⇒ 要素 1 個の誤字は従来の `"ocdt"::op` と同じ文言で落ちる。 */
+	pigModCands cands;
 	{
 		sPtr<pigData> me = ( _front.is_notNull() ) ? _front->get_module_expr()
 		                                           : sPtr<pigData>(thNULL);
-		if ( me.is_notNull() ) {
-			sPtr<pigData> mv = me->compact();
-			if ( mv.is_notNull() && mv->is_error() )
-				{ err = mv; return MODULE_NONE; }      /* 指名式そのもののエラーを伝播 */
-			sPtr<stdString> ms = ( mv.is_notNull() ) ? mv->get_str() : sPtr<stdString>(thNULL);
-			const char *mn = ms.is_notNull() ? ms->get_str() : "";
-			if ( mn[0] != '\0' ) {
-				int id = reg->id_of_name(mn);
-				/* ① そのモジュールが未ロード / 名前が違う。 */
-				if ( id <= 0 || reg->descriptor(id) == 0 ) {
+		sPtr<pigData> cerr;
+		if ( ! resolve_cands(reg, me, use_modules_var(), op, cands, &cerr) )
+			{ err = cerr; return MODULE_NONE; }      /* 指名式 / USE_MODULES のエラーを伝播 */
+		if ( cands.given ) {
+			std::string ns = cand_names_str(cands);
+			/* ⓪ 空の候補列 = 呼べるものがゼロ (ひさ 2026-09-19)。「planner に任せる」は
+			 *   従来どおり "" で書く ⇒ 空配列を指名なしへ倒すと口が 2 つになる。 */
+			if ( cands.nelem == 0 ) {
+				std::string m = cands.where() + " is empty: nothing can run op '" + op + "' (";
+				/* ★ 段5: 書いた要素が全部 **穴** だった場合は、そう言わないと「[] なんて
+				 *   書いていない」と読まれる (画面には空配列に見えないため)。 */
+				if ( cands.nholes > 0 ) {
+					char nb[64];
+					::snprintf(nb, sizeof nb, "all %d element(s) are holes (null / \"\" / 0) "
+					                          "and were skipped; ", cands.nholes);
+					m += nb;
+				}
+				m += "an empty list selects no module; write \"\" to let the "
+				     "planner choose)";
+				err = thNEW(pigDataError,(m.c_str(), _front->get_info(), 1));
+				return MODULE_NONE;
+			}
+			/* ① どれも未ロード / 名前が違う (★ 擬似モジュールは常に「解決できた」側)。 */
+			if ( cands.elems.empty() ) {
+				if ( cands.nelem == 1 && ! cands.fromVar ) {
 					char buf[256];
 					::snprintf(buf, sizeof buf,
 					    "module qualifier '%s': no such module is loaded "
 					    "(check the name against `srava --modules`, or load it with module(\"%s.so\", {}))",
-					    mn, mn);
+					    cands.names[0].c_str(), cands.names[0].c_str());
 					err = thNEW(pigDataError,(buf, _front->get_info(), 1));
-					return MODULE_NONE;
+				} else {
+					std::string m = cands.where() + " (" + ns + "): no such module is loaded "
+					                "(names that are not loaded are skipped, but here none of them "
+					                "resolved; check them against `srava --modules`)";
+					err = thNEW(pigDataError,(m.c_str(), _front->get_info(), 1));
 				}
-				/* ② ロードされているが、その op を持たない。 */
-				if ( reg->supports_op(id, op) == 0 ) {
+				return MODULE_NONE;
+			}
+			/* ② ロードされてはいるが、どれもその op を持たない。
+			 *   ⚠ *一部*が持たないだけなら飛ばす (エラーではない) — 候補列は優先順位表であって
+			 *     「全員がこの op を持て」という要求ではない。 */
+			if ( cands.withOp.empty() && cands.nPsWithOp == 0 ) {
+				if ( cands.nelem == 1 && ! cands.fromVar ) {
 					char buf[256];
 					::snprintf(buf, sizeof buf,
 					    "module qualifier '%s': that module does not implement op '%s' "
 					    "(see `srava --module-info %s` for the ops it declares)",
-					    mn, op, mn);
+					    cands.names[0].c_str(), op, cands.names[0].c_str());
 					err = thNEW(pigDataError,(buf, _front->get_info(), 1));
-					return MODULE_NONE;
+				} else {
+					std::string m = cands.where() + " (" + ns + "): none of them implements op '"
+					              + op + "' (see `srava --module-info <name>` for the ops each declares)";
+					err = thNEW(pigDataError,(m.c_str(), _front->get_info(), 1));
 				}
-				qualModule = id;
+				return MODULE_NONE;
 			}
 		}
 	}
 
-	/* ★ rev4 Phase C: cast(target_type, mesh) — **目標型**への明示変換 (§9.3-5)。旧 cast("exact"/"manifold")
-	 *   のカーネル名指しを廃止 (エイリアス互換なし・ひさ判断)。args[0] = 目標型名 ("cg-mesh3d"/"mf-mesh3d"
-	 *   /"cg-cross2d"/"mf-cross2d")。その型をサポートするカーネル (tag→module_of_tag) へ振り、出力型を目標型に固定。
-	 *   cast の calc body は identity で、変換 (別カーネル型入力の昇格読み等) は owner のリーダが担う。
-	 *   入力型に依存せずカーネルを明示指定するので decide_executor をバイパスする (この block が先行)。 */
-	if ( ::strcmp(op, "cast") == 0 && args.length() >= 1 ) {
-		sPtr<pigData> tv = args[0]->compact();
-		if ( tv.is_notNull() && ! tv->is_error() ) {
-			const char *tname = tv->get_str()->get_str();
-			/* ★ P2c: cast は「目標型を **産出できる** モジュール」へ振る (旧 module_of_tag(tag) 撤去)。
-			 *   cast sig の出力型が目標型に一致するモジュールを選ぶ = 型軸。cast の calc body は
-			 *   identity で、foreign 型入力の昇格読みは行き先モジュールの reader が担う。
-			 *
-			 * ★★ 2026-08-28 (ひさ指摘): ここは出力型 **だけ** を見ていた。sig は「その op が受ける
-			 *   幾何引数の型」の申告なのに、cast だけ入力側を読まずに振っていたため、
-			 *   **sig が「受けられない」と申告している型が入力に来ても通っていた**
-			 *   (manifold の cast sig は (mf-mesh3d)/(mf-cross2d) しか申告していないのに
-			 *    cg-mesh3d を受けて動いていた = 申告と実態の食い違いが検出されない)。
-			 *   → sig 本来の照合 (入力型) を通し、**かつ** 出力型が目標型である行に限定する。
-			 *   ⚠ 入力型が確定しないとき (型スタンプの無いストリーム / 多候補の上流) は照合材料が
-			 *     無いので従来どおり出力型だけで振る。その場合も agent 入口の codec 検査
-			 *     (ptsGenericAgent の consumable types × reader_for) が読めない形式を明示エラーに
-			 *     するので、黙って別の型が返ることはない。 */
-			std::vector<std::string> insets;
-			int insets_known = 1;
-			for ( int k = 0 ; k < args.length() ; ++k ) {
-				int stampless = 0;
-				std::string ts = arg_type_set(args[k], &stampless);
-				if ( stampless || ts.find(',') != std::string::npos ) { insets_known = 0; break; }
-				if ( ts.empty() || ts == "value" || ts == "ref" ) continue;   /* 非幾何 (目標型名の文字列を含む) */
-				insets.push_back(ts);
-			}
-			int nmod = reg->count();
-			int m = -1;
-			if ( insets_known ) {
-				m = sig_dispatch(reg, "cast", insets, 0, 0, tname, qualModule);
-			} else {
-				for ( int mm = 1 ; mm < nmod ; ++mm ) {
-					if ( qualModule >= 0 && mm != qualModule ) continue;   /* ★ #3467 */
-					if ( sig_produces(reg, mm, "cast", tname) ) { m = mm; break; }
-				}
-			}
-			if ( m >= 0 ) {
-				outTypeList = thNEW(stdString,(tname));   /* 出力型 = 目標型 */
-				return m;
-			}
-			/* ★ 目標型を産出できるモジュールは在る = 失敗の原因は **入力型**。両者を切り分けて言う
-			 *   (「その型は作れない」と「その型へは変換できない」は利用者の直す場所が違う)。 */
-			if ( insets_known ) {
-				for ( int mm = 1 ; mm < nmod ; ++mm ) {
-					if ( ! sig_produces(reg, mm, "cast", tname) ) continue;
-					/* ★ 2026-08-28 (ひさ指摘): ここで **形式 (4CC) を出さない**。planner は
-					 * 「その型がディスクに落ちたら何の 4CC になるか」を知っている立場ではない —
-					 * in-proc ならその値はまだメモリ上の body でしかなく、シリアライズされる
-					 * 保証も無い。形式は pigDataCache の都合であって、routing の言うことではない。
-					 * 形式に踏み込んだ診断が要る場面 (実際に読めなかった) では、読む側の
-					 * ptsGenericAgent が "cannot convert format 'XXXX'" を出す。 */
-					std::string ins;
-					for ( size_t i = 0 ; i < insets.size() ; ++i )
-						{ if ( i ) ins += ","; ins += insets[i]; }
-					char b2[320];
-					::snprintf(b2, sizeof b2,
-					    "cast: no module declares a conversion from %s to '%s' "
-					    "(module '%s' produces '%s' but its cast sig does not accept that input type)",
-					    ins.empty() ? "(no geometry input)" : ins.c_str(), tname,
-					    reg->name_of_id(mm) ? reg->name_of_id(mm) : "?", tname);
-					err = thNEW(pigDataError,(b2, _front->get_info()));
-					return MODULE_NONE;
-				}
-			}
-			/* ★ #3439 ①: 産出できるモジュールが無いなら **明示エラー**。
-			 *   旧実装はここで一般ロジックへフォールバックしていたが、そうすると cast が
-			 *   identity として実行され **要求した型と違う型が黙って返る**:
-			 *     cast("zz-mesh3d", box)              誰も申告していない型名なのに通っていた
-			 *     module("cgal.so","off") 下で
-			 *       cast("cg-mesh3d", mf の箱)        → mf-mesh3d が返っていた
-			 *   「表現できないならエラー」(ひさ) に反するので撤廃する。
-			 *   ※ args[0] が未解決/エラーのときは下の一般ロジックへ委ねる (引数自体の問題)。 */
-			char buf[224];
-			::snprintf(buf, sizeof buf,
-			    "cast: 型 '%s' を産出できるモジュールが無い "
-			    "(型名の誤り / その型を持つモジュールが未ロード / module(so,\"off\") で無効化)",
-			    tname);
-			err = thNEW(pigDataError,(buf, _front->get_info()));
-			return MODULE_NONE;
-		}
-		/* args[0] が未解決/エラー → 下の一般ロジックへ。 */
-	}
+	/* ★★ #3554 最後の段 2/5 (2026-09-19): **cast の専用ブロックは撤去した**。
+	 *   「目標型を産出できるモジュールへ振る」判定は行の **マッチ関数**
+	 *   (@pig_match_cast_target@ = 第 1 引数の型名が @e->sig@ の出力型か) へ移り、cast は
+	 *   下の decide_executor が **普通の検索** (priority × sig × マッチ) で解く。
+	 *   ⇒ 根拠は行の申告 (sig) そのものなので、行名と二重帳簿にならない。
+	 *   ⚠ cast の行は **1 行 1 出力型**でなければならない — 行の中に出力型が 2 つあると
+	 *     マッチは成立するのに *入力型で先に当たった sigline* が選ばれ、**要求と違う型が返る**
+	 *     (= routing と計算本体が別の述語で判定する形)。これは記述子のロード時に
+	 *     pig_descriptor_violation が弾く。
+	 *   ★ 失敗したときの **言い分け**だけは下に残っている (「cast の診断」)。 */
 
-	/* ★ import/export: 対象拡張子を扱えないカーネルは万能側 (cgal) に振る (import_exts/export_exts)。
+	/* ★ export: 対象拡張子を扱えないカーネルは万能側 (cgal) に振る (export_exts)。
 	 *   #3404: mf の write_to/import は STL/OFF だけ。旧実装は export の .svg/.dxf だけ固定で、
-	 *   manifold 既定の .3mf が無言で STL 化していた (2026-08-06 修正) + import は拡張子未検査で
-	 *   .obj/.ply が失敗する潜在バグがあった → 両方 registry の拡張子申告で対称に塞ぐ。
-	 *   引数 path はどちらも args[0]。 */
-	/* ★ rev4 Phase C: import(path) を **形式 → (出力型, reader をサポートするカーネル)** で N カーネル routing。
-	 *   拡張子を import できるカーネルのうち priority 最大へ。出力型は型付き import_exts から取り継続
-	 *   スタンプに載せる (下流が型で振れる = polymorphic import の型不明を解消)。idMani/idCgal 名指し撤去。 */
-	if ( ::strcmp(op, "import") == 0 && args.length() >= 1 ) {
-		sPtr<pigData> pv = args[0]->compact();
-		if ( pv.is_notNull() && ! pv->is_error() ) {
-			const char *p = pv->get_str()->get_str();
-			const char *dot = ::strrchr(p, '.');
-			const char *ext = dot ? dot : "";
-			int best = -1; long bestPrio = LONG_MIN; std::string bestType;
-			int nmod = reg->count();
-			for ( int m = 1 ; m < nmod ; ++m ) {
-				if ( qualModule >= 0 && m != qualModule ) continue;   /* ★ #3467 */
-				if ( reg->can_import_ext(m, ext) != 1 ) continue;   /* 読めない/不明は除外 */
-				long pr = reg->priority(m);
-				if ( pr > bestPrio ) {
-					bestPrio = pr; best = m;
-					const srava_module_descriptor *d = reg->descriptor(m);
-					bestType = ext_type_in_csv(d ? d->import_exts : 0, ext);
-				}
-			}
-			if ( best >= 0 ) {
-				outTypeList = bestType.empty() ? thNULL : thNEW(stdString,(bestType.c_str()));
-				return best;
-			}
-			/* ★ #3439 ⑦: 一般ロジックへ落とさず明示エラー。落とすと leaf → 既定カーネルへ振られ、
-			 *   実行時に「読めない」以外の的外れなエラーになりうる (cast と同じ構造の欠陥)。
-			 *   ★ ⑦前半で「import op を持つのに import_exts 未申告」はロード時に拒否されるので、
-			 *   ここへ来るのは本当にどのモジュールも読めない拡張子だけ。 */
-			char buf[288];
-			::snprintf(buf, sizeof buf,
-			    "import: 拡張子 '%s' を読めるモジュールが無い "
-			    "(未対応の形式 / そのモジュールが未ロード / module(so,\"off\") で無効化)",
-			    ( ext[0] == '.' ) ? ext + 1 : "(無し)");
-			err = thNEW(pigDataError,(buf, _front->get_info()));
-			return MODULE_NONE;
-		}
-	}
+	 *   manifold 既定の .3mf が無言で STL 化していた (2026-08-06 修正)。引数 path は args[0]。 */
+	/* ★★ #3554 最後の段 3/5 (2026-09-19): **import の専用ブロックは撤去した**。
+	 *   「拡張子を読めるカーネルのうち priority 最大へ・出力型は import_exts から」は
+	 *   そのまま普通の検索になる — 行のマッチ関数 @pig_match_import_ext@ が
+	 *   *拡張子が産む型 = この行の sig の出力型か* を見て行を選び、モジュール間は priority、
+	 *   出力型は **その行の sig** から載る。
+	 *   ⚠⚠ import は cast と違い **出力型が引数の型名ではなく拡張子で決まる**ので、
+	 *     行を出力型ごとに分けないと *入力型 0 個の sigline が先頭から当たる* ＝
+	 *     .svg を読んでも cg-mesh3d を名乗る。⇒ 1 行 1 出力型 (ロード時に弾く)。
+	 *   ★ 申告の一致 (import_exts の型 ⊆ どれかの行の sig の出力型) もロード時に見る
+	 *     ⇒ 「読めると言うのに その型を産まない」記述子の嘘が routing より前に外れる。
+	 *   ★ 失敗の言い分けだけは下に残っている (「import の診断」)。 */
 
-	/* ★ rev4 Phase C: export(path, mesh, unit) を **形式 capability × mesh 読解性** で N カーネル routing。
-	 *   grammar (ns_sravaParser.y) が export を常に 3 引数 (path, mesh, unit) に正規化するので args[0]=path・
-	 *   args[1]=mesh が確定 (export(mesh) 単独は passthrough で routing に来ない)。
-	 *   規則: ① mesh の自カーネルが拡張子を書けるならそこ (不要な昇格をしない) ② そうでなければ拡張子を
-	 *   書けるカーネルのうち **export sig が mesh の入力型を受理する** (=読める) priority 最大へ (Stage 2 で
-	 *   旧 can_read_module を sig 判定に置換)。形式と mesh 次元の整合は cgaExport が実行時に明示エラーにする。 */
-	if ( ::strcmp(op, "export") == 0 && args.length() >= 2 ) {
-		sPtr<pigData> pv = args[0]->compact();
-		if ( pv.is_notNull() && ! pv->is_error() ) {
-			const char *p = pv->get_str()->get_str();
-			const char *dot = ::strrchr(p, '.');
-			const char *ext = dot ? dot : "";
-			std::string inType = arg_type_set(args[1]);
-			/* ① mesh を **産出する** module (= その型の home) が拡張子を書けるならそこ (不要な昇格をしない)。
-			 *   P2d: 旧 arg_module (値に格納された module id を読む) を module_of_type (入力の型 → 産出 module)
-			 *   の型軸判定へ置換。自型の mesh 型はその module が自明に読めるので export できる。 */
-			int meshK = module_of_type(reg, inType.c_str());
-			if ( qualModule >= 0 && meshK != qualModule ) meshK = -1;   /* ★ #3467: 指名を優先 */
-			if ( meshK > 0 && reg->can_export_ext(meshK, ext) == 1 ) {
-				outTypeList = thNEW(stdString,("ref"));          /* 出力 = D_REF レコード */
-				return meshK;                                   /* ① 自カーネルが書ける */
-			}
-			/* ② 書ける & mesh を **読める** priority 最大。読解 capability は旧 can_read_module を廃し、
-			 *   export sig が入力型を受理するかで判定 (Stage 2・型軸)。入力型が不定/多候補なら保守的に読める扱い。 */
-			bool typed = ! inType.empty() && inType.find(',') == std::string::npos;
-			int best = -1; long bestPrio = LONG_MIN;
-			int nExtOk = 0;   /* 拡張子は書けるが型で弾かれた、を区別するため (#3439 ⑦) */
-			int nmod = reg->count();
-			for ( int m = 1 ; m < nmod ; ++m ) {
-				if ( qualModule >= 0 && m != qualModule ) continue;   /* ★ #3467 */
-				if ( reg->can_export_ext(m, ext) != 1 ) continue;
-				++nExtOk;
-				if ( typed && ! sig_accepts_input(reg, m, "export", inType) ) continue;
-				long pr = reg->priority(m);
-				if ( pr > bestPrio ) { bestPrio = pr; best = m; }
-			}
-			if ( best >= 0 ) {
-				outTypeList = thNEW(stdString,("ref"));          /* 出力 = D_REF レコード */
-				return best;
-			}
-			/* ★ #3439 ⑦: 一般ロジックへ落とさず明示エラー。落とすと mesh の自カーネルへ振られ、
-			 *   実行時に「書けない」ではない的外れなエラーになる (実例: cgal を off にして .svg を
-			 *   export すると rect が manifold へ落ち、export が "no mesh to write" と言っていた)。
-			 *   ★ ⑦前半で「export op を持つのに export_exts 未申告」はロード時に拒否されるので、
-			 *   ここへ来るのは本当に扱えない形式か、型が合わない場合だけ。両者は原因が違うので分ける。 */
-			char buf[288];
-			if ( nExtOk == 0 )
-				::snprintf(buf, sizeof buf,
-				    "export: 拡張子 '%s' を書けるモジュールが無い "
-				    "(未対応の形式 / そのモジュールが未ロード / module(so,\"off\") で無効化)",
-				    ( ext[0] == '.' ) ? ext + 1 : "(無し)");
-			else
-				::snprintf(buf, sizeof buf,
-				    "export: 拡張子 '%s' は書けるが、入力の型 '%s' を受け取れるモジュールが無い",
-				    ( ext[0] == '.' ) ? ext + 1 : "(無し)", inType.c_str());
-			err = thNEW(pigDataError,(buf, _front->get_info()));
-			return MODULE_NONE;
-		}
-	}
+	/* ★★ #3554 最後の段 4/5 (2026-09-19): **export の専用ブロックは撤去した**。
+	 *   行のマッチ関数 @pig_match_export_ext@ (= 第 1 引数の拡張子を @d->export_exts@ が
+	 *   書けるか) と sig (= その入力型を受け取れるか) で、普通の検索が同じことをする。
+	 *   出力は常に @ref@ なので **行を分ける必要は無い** (cast / import と違う点)。
+	 *
+	 *   ⚠⚠ 同時に **規約① (自型優先) を撤去した** (ひさ明言)。
+	 *     「入力型の home カーネル (当時の @module_of_type(inType)@ ・ 5/5 で撤去) が
+	 *      拡張子を書けるならそこへ振る」
+	 *     という特例で、*sig でも記述子でもない 3 つめの規則*だった。⇒ いまは
+	 *     **priority × sig × 拡張子** の普通の決着になる。
+	 *   ⇒ 実際の行き先が変わる例: @export("a.stl", <mf-mesh3d>)@ は manifold (10) ではなく
+	 *     **cgal (20)** が書く (cgal の export sig は mf-mesh3d を受けると申告している)。
+	 *     同じ立体でもバイト列は違う (STL ヘッダ: manifold は空・cgal は "FileType: Binary")。
+	 *   ★ 失敗の言い分けだけは下に残っている (「export の診断」)。 */
+
+
 
 	/* ★ rev4 Phase B-2b: 型ディスパッチを先に試す。(op, 入力型[]) が注釈済み handler で確定できれば
 	 *   そのモジュールへ (offset の次元・単一モジュールの novel op・既定カーネルを型で統一的に解決)。解決不能 (未注釈 op /
 	 *   入力型が多候補で未確定 / cast・import・export) は -1 が返り、下の既存カーネルロジックへフォールバック
 	 *   (op 単位 coexistence)。全 op が精密な単一型を伝播できるようになれば下のロジックと名指しは撤去可。 */
 	{
-		int te = decide_executor(op, qualModule);
-		/* ★ #3467 ③: 指名したモジュールは op を持つ (② で確認済) のに解決できなかった
-		 *   = その op の **sig が入力型を受け付けない**。①② と直す場所が違うので分けて言う。 */
-		if ( te == -1 && qualModule >= 0 ) {
-			std::string ins;
-			for ( int k = 0 ; k < args.length() ; ++k ) {
-				std::string ts = arg_type_set(args[k]);
-				if ( ts.empty() || ts == "value" || ts == "ref" ) continue;
-				if ( ! ins.empty() ) ins += ",";
-				ins += ts;
-			}
-			const char *mn = reg->name_of_id(qualModule);
-			const char *sg = reg->op_sig(qualModule, op);
-			char buf[416];
-			::snprintf(buf, sizeof buf,
-			    "module qualifier '%s': op '%s' does not accept input type(s) %s "
-			    "(its sig is '%s'; qualification narrows the candidates, it does not insert a cast — "
-			    "convert explicitly with cast(<target type>, ...))",
-			    mn ? mn : "?", op,
-			    ins.empty() ? "(no geometry input)" : ins.c_str(), sg ? sg : "(none)");
-			err = thNEW(pigDataError,(buf, _front->get_info(), 1));
-			return MODULE_NONE;
-		}
+		int matchedButSig = 0;
+		int te = decide_executor(op, cands.list(), &matchedButSig);
+		/* ★ #3555 (c): 執行者は決まったが **引数の種別 / 個数**が外れたときの文言を控えておく。
+		 *   候補列があるときは (c) の列挙を優先し、それが言えなければこちらを使う。 */
+		std::string kindViolation;
 		if ( te >= 0 ) {
 			/* ★ #3436 P4 §6.2: モジュールが決まった直後に **引数の種別と個数**を
 			 *   in[]/nin/variadic と突き合わせる。従来この検査は agent 側 (ptsGenericAgent) に
@@ -1235,12 +2051,22 @@ pigfModuleAgent_::decide_out_module()
 			 *   (実測: export_vox("h5","t",{dx},box,box) は正しくエラーになるが、その時点で
 			 *    box 2 個の cache が完成している)。sig は幾何引数の *型* しか見ないので、
 			 *   値引数の取り違えはここでしか捕まらない。 */
-			std::string ae = arg_kind_violation(reg, te, op);
+			std::string ae = arg_kind_violation(reg, te, op,
+			                     routedOpName.is_notNull() ? routedOpName->get_str() : 0);
 			if ( ! ae.empty() ) {
-				err = thNEW(pigDataError,(ae.c_str(), _front->get_info(), 1));
-				return MODULE_NONE;
+				/* ★★ #3555 (c): **候補列があるなら 1 つだけ名指しせず候補を全部並べる**。
+				 *   sig が当たったモジュールが 1 つ見つかった (te >= 0) だけで「takes 1」と
+				 *   言い切ると、列の他の候補が何個を受けるのかが見えない ⇒ 「では何個ならよいか」
+				 *   が読めない。下の (c) が言えなければ、この文言をそのまま使う。 */
+				if ( ! cands.given ) {
+					err = thNEW(pigDataError,(ae.c_str(), _front->get_info(), 1));
+					return MODULE_NONE;
+				}
+				kindViolation = ae;
+				te = -1;              /* ★ 以降の診断へ流す (執行者としては採らない) */
+			} else {
+				return te;
 			}
-			return te;
 		}
 		if ( te == -2 ) {
 			/* ★ 2026-08-19: 型スタンプの無いストリームキャッシュが入力に来た。4CC から型を
@@ -1250,6 +2076,218 @@ pigfModuleAgent_::decide_out_module()
 			    "internal: an input cache carries no type stamp (planner did not record the "
 			    "planned output type; routing must not guess it from the file format)",
 			    _front->get_info(), 1));
+			return MODULE_NONE;
+		}
+
+		/* ★★ #3554 最後の段 2/5 (2026-09-19): **cast の診断**。振り分け自体は上の
+		 *   decide_executor が普通の検索で行う (専用ブロックは撤去) が、*失敗したときに何を
+		 *   直せばよいか*は op ごとに違うので、ここで言い分ける (ひさ 2026-09-19):
+		 *       matchedButSig=0 … 目標型を産出する行が **無い**   → 型名の誤り / 未ロード / off
+		 *       matchedButSig=1 … 行は在るが **入力型を受けない** → その変換が申告されていない
+		 *   ⚠ 2 つは利用者の直す場所が違う (型名を直す / 先に別の型を経由する)。
+		 *   ★ prod は「その型を作れるモジュール」の **名指し**にだけ使う。matchedButSig が
+		 *     立たないまま prod が見つかる経路 (入力型が絞れず sig 照合まで届かなかったとき)
+		 *     もあるので、どちらかが真なら入力側の問題として言う。 */
+		if ( te == -1 && ::strcmp(op, "cast") == 0 && args.length() >= 1 ) {
+			sPtr<pigData> tv = args[0]->compact();
+			sPtr<stdString> tsv = ( tv.is_notNull() ) ? tv->get_str() : sPtr<stdString>(thNULL);
+			const char *tname = ( tsv.is_notNull() ) ? tsv->get_str() : "";
+			int prod = -1;
+			int nmod = reg->count();
+			/* ★ #3555 段1: 「その型を作れるモジュール」の名指しも **候補列の中だけ**で探す。 */
+			int nc = cands.given ? (int)cands.ids.size() : nmod - 1;
+			for ( int jj = 0 ; jj < nc && prod < 0 ; ++jj ) {
+				int mm = cands.given ? cands.ids[jj] : jj + 1;
+				if ( mm <= 0 || mm >= nmod ) continue;
+				if ( any_row_produces(reg, mm, "cast", tname) ) prod = mm;
+			}
+			char buf[416];
+			if ( matchedButSig != 0 || prod > 0 ) {
+				/* ★ 2026-08-28 (ひさ指摘): ここで **形式 (4CC) を出さない** — planner は
+				 *   「その型がディスクに落ちたら何の 4CC になるか」を知っている立場ではない。
+				 *   形式に踏み込んだ診断は、実際に読めなかった側 (ptsGenericAgent) が出す。 */
+				std::string ins;
+				for ( int k = 0 ; k < args.length() ; ++k ) {
+					std::string ts = arg_type_set(args[k]);
+					if ( ts.empty() || ts == "value" || ts == "ref" ) continue;
+					if ( ! ins.empty() ) ins += ",";
+					ins += ts;
+				}
+				const char *pn = ( prod > 0 ) ? reg->name_of_id(prod) : 0;
+				::snprintf(buf, sizeof buf,
+				    "cast: no module declares a conversion from %s to '%s' "
+				    "(module '%s' produces '%s' but its cast sig does not accept that input type)",
+				    ins.empty() ? "(no geometry input)" : ins.c_str(), tname,
+				    pn ? pn : "?", tname);
+			} else {
+				::snprintf(buf, sizeof buf,
+				    "cast: 型 '%s' を産出できるモジュールが無い "
+				    "(型名の誤り / その型を持つモジュールが未ロード / module(so,\"off\") で無効化)",
+				    tname);
+			}
+			err = thNEW(pigDataError,(buf, _front->get_info()));
+			return MODULE_NONE;
+		}
+
+		/* ★★ #3554 最後の段 3/5 (2026-09-19): **import の診断**。
+		 *   ⚠ import の sig は入力 0 個なので、行が成立すれば sig も必ず当たる
+		 *     ⇒ matchedButSig は立たず、失敗は **「その拡張子を読める行が無い」の一択**。
+		 *   ★ 「CSV は読めると言うのに sig がその型を産まない」(記述子の嘘) もここへ落ちるが、
+		 *     そちらは pig_descriptor_violation が **ロード時に**弾くので、ここへ来るのは
+		 *     本当にどのモジュールも読めない拡張子だけ (#3439 ⑦ と同じ立て付け)。 */
+		if ( te == -1 && ::strcmp(op, "import") == 0 && args.length() >= 1 ) {
+			sPtr<pigData> pv = args[0]->compact();
+			sPtr<stdString> ps = ( pv.is_notNull() ) ? pv->get_str() : sPtr<stdString>(thNULL);
+			const char *pth = ( ps.is_notNull() ) ? ps->get_str() : "";
+			const char *dot = ::strrchr(pth, '.');
+			const char *ext = dot ? dot : "";
+			char ibuf[288];
+			::snprintf(ibuf, sizeof ibuf,
+			    "import: 拡張子 '%s' を読めるモジュールが無い "
+			    "(未対応の形式 / そのモジュールが未ロード / module(so,\"off\") で無効化)",
+			    ( ext[0] == '.' ) ? ext + 1 : "(無し)");
+			err = thNEW(pigDataError,(ibuf, _front->get_info()));
+			return MODULE_NONE;
+		}
+
+		/* ★★ #3554 最後の段 4/5 (2026-09-19): **export の診断**。
+		 *     matchedButSig=0 … 拡張子を書ける行が **無い**   → 未対応の形式 / 未ロード / off
+		 *     matchedButSig=1 … 書けるが **入力型を受けない** → その型の読み手が居ない
+		 *   ⚠ 2 つは利用者の直す場所が違う (形式を変える / 先に cast する)。旧ブロックの
+		 *     nExtOk による言い分けが、そのまま matchedButSig に乗り換わった形。 */
+		if ( te == -1 && ::strcmp(op, "export") == 0 && args.length() >= 2 ) {
+			sPtr<pigData> pv = args[0]->compact();
+			sPtr<stdString> ps = ( pv.is_notNull() ) ? pv->get_str() : sPtr<stdString>(thNULL);
+			const char *pth = ( ps.is_notNull() ) ? ps->get_str() : "";
+			const char *dot = ::strrchr(pth, '.');
+			const char *ext = dot ? dot : "";
+			std::string inType = arg_type_set(args[1]);
+			char ebuf[288];
+			if ( matchedButSig == 0 )
+				::snprintf(ebuf, sizeof ebuf,
+				    "export: 拡張子 '%s' を書けるモジュールが無い "
+				    "(未対応の形式 / そのモジュールが未ロード / module(so,\"off\") で無効化)",
+				    ( ext[0] == '.' ) ? ext + 1 : "(無し)");
+			else
+				::snprintf(ebuf, sizeof ebuf,
+				    "export: 拡張子 '%s' は書けるが、入力の型 '%s' を受け取れるモジュールが無い",
+				    ( ext[0] == '.' ) ? ext + 1 : "(無し)", inType.c_str());
+			err = thNEW(pigDataError,(ebuf, _front->get_info()));
+			return MODULE_NONE;
+		}
+
+		/* ★★ #3568 (2026-09-21): 候補列の **汎用**診断は cast / import / export の
+		 *   専用診断より **後ろ**に置く。以前はここが (decide_executor の直後に) 在り、
+		 *   候補列が与えられているだけで早期に return していたので、専用診断には
+		 *   **決して到達しなかった** — 実測: 存在しない型への cast が「入力型を受け付け
+		 *   ない」と言われる ＝ 要求は *出力型* の話なのに、返る文言が *入力型* の話になる
+		 *   (import に至っては入力 0 個なのに "(no geometry input) を受け付けない" と言う)。
+		 *   ⚠ 専用ブロックは **自分の op のときだけ** return するので、それ以外の op が
+		 *     ここへ落ちる経路はこの並べ替えで変わらない。 */
+		/* ★★ #3555 (c) (ひさ 2026-09-21): 候補が **どれも引数の数を受けられない** なら、
+		 *   入力型の話をする前にそう言う。⇒ 「違反の報告は routing でも解けなかったときだけ・
+		 *   候補を全部並べる」。並べるのは *その op を持つ候補* だけ (持たない候補の個数を
+		 *   並べても手掛かりにならない)。
+		 *
+		 *       op 'tube' — no candidate takes 4 argument(s)
+		 *         (glue: takes 1; {pseudo}: takes 3; occt: takes 2)
+		 *
+		 *   ⚠ **個数が合う候補が 1 つでもあれば言わない** — その場合の失敗は入力型か述語の話で、
+		 *     個数を並べると直す場所を取り違える。
+		 *   ⚠ cast / import / export はこれより **前**に専用診断で返る (#3568) ので、ここへは
+		 *     来ない。 */
+		/* ★★ #3570 段4: 候補列が **無い**ときも同じ形で言う。段4 で「数が合わない行は
+		 *   routing から外れる」ようにしたので、以前ここで効いていた
+		 *   arg_kind_violation (勝った行に対する "too many arguments") には *勝つ行が無い*
+		 *   ため到達しない。⇒ その op を宣言している **全モジュール**を並べて同じ文言を出す。
+		 *   ⚠ 並べるのは *その op を持つもの* だけ (持たないものの個数は手掛かりにならない)。 */
+		std::vector<pigModCand> alist;
+		if ( te == -1 && ! cands.given ) {
+			int nmod = reg->count();
+			for ( int mm = 1 ; mm < nmod ; ++mm ) {
+				if ( reg->op_row(mm, op, 0) == 0 ) continue;
+				pigModCand c; c.id = mm;
+				const char *nm = reg->name_of_id(mm);
+				c.label = ( nm != 0 ) ? nm : "?";
+				alist.push_back(c);
+			}
+		}
+		const std::vector<pigModCand> &elems = cands.given ? cands.elems : alist;
+		if ( te == -1 && ( cands.given || ! alist.empty() ) ) {
+			int n = args.length();
+			std::string list;
+			int nCand = 0, anyTakes = 0;
+			for ( size_t i = 0 ; i < elems.size() ; ++i ) {
+				int lo = 0, hi = 0, have = 0;
+				if ( elems[i].id >= 0 ) {
+					/* ★ 実モジュール: 同名の行 (op#変種) を全部見て範囲の和を取る。 */
+					for ( int ri = 0 ; ; ++ri ) {
+						const pigOpEntry *e = reg->op_row(elems[i].id, op, ri);
+						if ( e == 0 ) break;
+						int rlo = e->variadic ? e->nin : ( ( e->nreq > 0 ) ? e->nreq : e->nin );
+						int rhi = e->variadic ? -1 : e->nin;
+						if ( ! have ) { lo = rlo; hi = rhi; have = 1; continue; }
+						if ( rlo < lo ) lo = rlo;
+						if ( hi >= 0 ) { if ( rhi < 0 ) hi = -1; else if ( rhi > hi ) hi = rhi; }
+					}
+				} else {
+					have = pig_pseudo_arity_range(elems[i].pseudo, op, &lo, &hi);
+				}
+				if ( ! have ) continue;
+				++nCand;
+				if ( n >= lo && ( hi < 0 || n <= hi ) ) anyTakes = 1;
+				if ( ! list.empty() ) list += "; ";
+				list += elems[i].label + ": " + pig_arity_phrase(lo, hi);
+			}
+			if ( nCand > 0 && ! anyTakes ) {
+				char nb[32];
+				::snprintf(nb, sizeof nb, "%d", n);
+				std::string m = std::string("op '") + op + "' — no candidate takes " + nb
+				              + " argument(s) (" + list + ")";
+				err = thNEW(pigDataError,(m.c_str(), _front->get_info(), 1));
+				return MODULE_NONE;
+			}
+			/* ★ 個数では説明がつかなかった (種別違い等)。控えておいた文言で言う。 */
+			if ( ! kindViolation.empty() ) {
+				err = thNEW(pigDataError,(kindViolation.c_str(), _front->get_info(), 1));
+				return MODULE_NONE;
+			}
+		}
+
+		/* ★ #3467 ③: 候補は op を持つ (② で確認済) のに解決できなかった
+		 *   = その op の **sig が入力型を受け付けない**。①② と直す場所が違うので分けて言う。
+		 * ★ #3555 段1: 候補列のときは **各候補の sig を並べる** — どれを直せばよいかは
+		 *   候補ごとに違うので、1 つだけ名指しすると読み手が残りを推測することになる。 */
+		if ( te == -1 && cands.given && ! cands.withOp.empty() ) {
+			std::string ins;
+			for ( int k = 0 ; k < args.length() ; ++k ) {
+				std::string ts = arg_type_set(args[k]);
+				if ( ts.empty() || ts == "value" || ts == "ref" ) continue;
+				if ( ! ins.empty() ) ins += ",";
+				ins += ts;
+			}
+			if ( ins.empty() ) ins = "(no geometry input)";
+			std::string m;
+			if ( cands.withOp.size() == 1 && ! cands.fromVar ) {
+				const char *mn = reg->name_of_id(cands.withOp[0]);
+				const char *sg = reg->op_sig(cands.withOp[0], op);
+				m = std::string("module qualifier '") + ( mn ? mn : "?" ) + "': op '" + op
+				  + "' does not accept input type(s) " + ins + " (its sig is '"
+				  + ( sg ? sg : "(none)" ) + "'; ";
+			} else {
+				m = cands.where() + ": op '" + std::string(op)
+				  + "' does not accept input type(s) " + ins + " in any candidate (";
+				for ( size_t i = 0 ; i < cands.withOp.size() ; ++i ) {
+					const char *mn = reg->name_of_id(cands.withOp[i]);
+					const char *sg = reg->op_sig(cands.withOp[i], op);
+					if ( i != 0 ) m += "; ";
+					m += std::string(mn ? mn : "?") + ": '" + ( sg ? sg : "(none)" ) + "'";
+				}
+				m += "); ";
+			}
+			m += "qualification narrows the candidates, it does not insert a cast — "
+			     "convert explicitly with cast(<target type>, ...))";
+			err = thNEW(pigDataError,(m.c_str(), _front->get_info(), 1));
 			return MODULE_NONE;
 		}
 	}
@@ -1268,81 +2306,6 @@ pigfModuleAgent_::decide_out_module()
 		err = thNEW(pigDataError,(unroutable_message(reg, op).c_str(), _front->get_info(), 1));
 		return MODULE_NONE;
 	}
-
-	/* ★ #3440: 「op 名を実装するモジュールが 1 つだけならそこへ直送」という経路を **撤去** した
-	 *   (ひさ判断 2026-08-17)。ディスパッチは **型** で決まるのが設計であって、「その op の持ち主」
-	 *   という概念は srava に無い。名前で振る経路があると、sig の宣言が実態と食い違っていても
-	 *   たまたま動いてしまい (nef の minkowski が (mf,cg) の組を書いていないのに通っていた)、
-	 *   宣言と実態を一致させる方針 (#3439) が検証不能になる。
-	 *   → sig で解決できない呼び出しは、下の home 伝播で行き先が決まらなければ **明示エラー**。
-	 *   ★撤去に伴い、sig 未申告だった値専用 op (pipe_proximity の 5 本・demo の 2 本) に
-	 *     "->value" を申告させた (幾何型入力を取らない op は入力 0 個の sig で routing される)。 */
-
-	/* ★ 入力型の home module 伝播 (decide_executor が -1 = 未型付/多候補入力のフォールバックのみ)。
-	 *   typed 入力 (混在含む) は上の decide_executor が op sig の foreign 入力型で解決済。ここは:
-	 *     - 空 (leaf)            → 既定カーネル (priority 最大)
-	 *     - 全て同一 home K      → K (その型を産む module へ = 案Y の「良いエラー配送」: 型不一致でも
-	 *                              入力型を産む module の op 実装まで届け、実装が親切エラーを出す)
-	 *     - 混在                 → 既定カーネル (priority 最大)。
-	 *   ★ P2d: 旧 arg_module (値に格納された module id を読む) を module_of_type(arg_type_set(arg))
-	 *     (入力の *型* → その型を産む home module) の型軸判定へ置換。 */
-	int inModules[16]; int ninMod = 0;
-	for ( int k = 0 ; k < args.length() ; ++k ) {
-		int ak = module_of_type(reg, arg_type_set(args[k]).c_str());
-		if ( ak <= 0 ) continue;                        /* 非 mesh (値/leaf) / 型不明 */
-		int seen = 0;
-		for ( int j = 0 ; j < ninMod ; ++j ) if ( inModules[j] == ak ) { seen = 1; break; }
-		if ( ! seen && ninMod < 16 ) inModules[ninMod++] = ak;
-	}
-
-	if ( ::strcmp(op, "export_vox") == 0 )
-		outTypeList = thNEW(stdString,("ref"));   /* ★ 出力 = D_REF レコード (sig と同じ・variadic 迂回) */
-
-	int modId;
-	if ( ninMod == 0 ) {
-		/* leaf: 既定カーネル = priority 最大 (agent("…so",{priority}) で切替・cast で個別指定)。
-		 *   モジュール未登録なら modId<=0 → 下でエラー化 (旧 idCgal フォールバックは撤去)。 */
-		modId = reg->id_of_name(reg->default_module_name());
-	} else if ( ninMod == 1 ) {
-		modId = inModules[0];                              /* 全入力同一 home → その module (module_of_type は >0) */
-	} else {
-		/* 混在 (未型付/多候補で decide_executor が解けなかった稀ケース): 既定カーネル (priority 最大)
-		 *   へ寄せる。旧 can_read_module による「全入力を読める候補」絞りは撤去 (typed 混在は上の
-		 *   decide_executor が foreign sig で解決済・ここは untyped フォールバックのみ)。 */
-		modId = reg->id_of_name(reg->default_module_name());
-	}
-
-	/* ★ rev4 Phase C 最終: routing 不能 (対応カーネル無し) は **明示エラー** (旧 cgal 万能フォールバック撤去)。
-	 *   ①leaf で既定カーネル無し / ②混在で全入力を読める候補無し = 真に実行できない → 「無ければ cgal」を
-	 *   やめてここでエラーにする。③「優先候補が op 未対応」は撤去 = modId そのままで下流 agent の op 検索が
-	 *   A_ERROR にする (cgal 名指し不要)。err をセットして MODULE_NONE を返し、基底 ACT_START が ERROR へ。 */
-	if ( modId <= 0 ) {
-		char buf[160];
-		::snprintf(buf, sizeof buf, "no module can execute op '%s' on the given input types", op);
-		err = thNEW(pigDataError,(buf, _front->get_info(), 1));   /* fatal */
-		return MODULE_NONE;
-	}
-	/* ★ #3440: 行き先が op を実装していないなら **ここで明示エラー**にする。
-	 *   旧実装は modId のまま送り、行き先 agent の op 検索が "unknown op: X" を返していたが、
-	 *   これは誤解を招く — op 自体は (別のモジュールに) 存在し、**その入力型の組を受ける sig が
-	 *   無い**のが本当の理由だから。sig の書き漏らしを「未知の op」と誤診させない。 */
-	if ( reg->supports_op(modId, op) != 1 ) {
-		std::string ts;
-		for ( int k = 0 ; k < args.length() ; ++k ) {
-			std::string t = arg_type_set(args[k]);
-			if ( t.empty() ) continue;
-			if ( ! ts.empty() ) ts += ",";
-			ts += t;
-		}
-		char buf[288];
-		::snprintf(buf, sizeof buf,
-		    "no module can execute op '%s' on input types (%s) "
-		    "(no sig declares this combination / the module is not loaded / disabled by module(so,\"off\"))",
-		    op, ts.empty() ? "none" : ts.c_str());
-		err = thNEW(pigDataError,(buf, _front->get_info(), 1));   /* fatal */
-		return MODULE_NONE;
-	}
-	return modId;
 }
 
 /* ═════════════════════════════════════════════════════════════════════
@@ -1365,9 +2328,39 @@ pig_modules_by_priority(const sPtr<pigModuleRegistry> &reg, std::vector<int> &ou
 	    [&](int a, int b) { return reg->priority(a) > reg->priority(b); });
 }
 
+/* ★★ #3555 段5 (ひさ 2026-09-21): @modules()@ は **引数で 2 つの顔**を持つ。
+ *
+ *     modules()            → **名前の配列** (dispatch 順)。`use modules();` にそのまま食わせる形
+ *     modules("priority")  → 従来の `"name:priority"` 空白区切り文字列 (priority の確認用)
+ *
+ *   ⚠ 既定 (引数なし) を配列にしたのは、**候補列へ渡すのが主用途**になったため。文字列は
+ *     「priority がどう効いたか」を目で見る道具として引数つきに残した。
+ *   ★★ 配列の中身は **sig_dispatch が選びうるもの** (`id > 0`・記述子あり・ops 行あり)。
+ *     ⇒ `use modules();` は **挙動を変えない** —
+ *     並びが priority 降順なので「列の先勝ち」= 従来の「priority 最大」と同じ結論になる
+ *     (同点は両方とも登録順)。これが崩れると「内省の答えで配線したら結果が変わる」ことになる。
+ *   ⚠ 2 つの顔は *同じ並びの別表現ではない*。文字列版は **番兵 `delayed` と組込 `pig` も
+ *     隠さずに出す** (#3477 の決め) が、配列版は **op 行を持つもの** だけを返す。
+ *     ⇒ 「載っているものを全部見せる」道具と「候補列へ渡す値」を分けた。 */
 void
 pigDataOperatorModules::_start()
 {
+	/* 形の指定 (省略 = 配列)。★ 名前の文字列なので compact してよい (幾何を force しない)。 */
+	int wantPriority = 0;
+	if ( args.length() >= 1 ) {
+		sPtr<pigData> fv = args[0]->compact();
+		if ( fv->is_error() ) { result = fv; return; }
+		sPtr<stdString> fs = fv->get_str();
+		std::string f = fs.is_notNull() ? fs->get_str() : "";
+		if ( f == "priority" ) wantPriority = 1;
+		else {
+			std::string m = "modules: unknown form '" + f
+			              + "' (modules() = array of module names in dispatch order; "
+			                "modules(\"priority\") = \"name:priority\" string)";
+			result = thNEW(pigDataError,(m.c_str(), info, PE_FATAL));
+			return;
+		}
+	}
 	sPtr<pigModuleRegistry> reg = pig_current_registry();
 	if ( reg == thNULL ) {
 		result = thNEW(pigDataError,("modules: no module registry (no app)", info, PE_FATAL));
@@ -1375,15 +2368,64 @@ pigDataOperatorModules::_start()
 	}
 	std::vector<int> ids;
 	pig_modules_by_priority(reg, ids);
-	std::string s;
-	for ( size_t i = 0 ; i < ids.size() ; ++i ) {
-		const char *nm = reg->name_of_id(ids[i]);
-		if ( nm == 0 ) continue;
-		char buf[128];
-		::snprintf(buf, sizeof buf, "%s%s:%d", s.empty() ? "" : " ", nm, reg->priority(ids[i]));
-		s += buf;
+	if ( wantPriority ) {
+		std::string s;
+		for ( size_t i = 0 ; i < ids.size() ; ++i ) {
+			const char *nm = reg->name_of_id(ids[i]);
+			if ( nm == 0 ) continue;
+			char buf[128];
+			::snprintf(buf, sizeof buf, "%s%s:%d", s.empty() ? "" : " ", nm, reg->priority(ids[i]));
+			s += buf;
+		}
+		result = thNEW(pigDataString,(s.c_str()));
+		return;
 	}
-	result = thNEW(pigDataString,(s.c_str()));
+	sPtr<pigDataArray> a = thNEW(pigDataArray,());
+	for ( size_t i = 0 ; i < ids.size() ; ++i ) {
+		int m = ids[i];
+		/* ★★ 述語は「候補列に書いて **勝ちうる**もの」= **op 行を 1 つでも持つ**こと。
+		 *   落ちるのは ① 番兵 (id 0 = "delayed") ② 記述子を持たない登録
+		 *   ③ ops 表を持たない記述子 — 組込の "pig" (D_REF codec 専用) がこれに当たる。
+		 *   ⚠ ③ を落として安全なのは、@op_row@ が同じ条件で 0 を返す = **sig_dispatch が
+		 *     構造的に選べない**ため。⇒ 配列から抜いても解決結果は 1 つも変わらない
+		 *     (codec の検索は記述子走査で、候補列を通らない — export も cache も無傷)。
+		 *   ★ 逆に **入れると害がある**: ops 表が無いと supports_op が -1 を返すので、
+		 *     「どれもその op を持たない」の診断が握り潰される (上の withOp の注記)。 */
+		const srava_module_descriptor *d = ( m > 0 ) ? reg->descriptor(m) : 0;
+		if ( d == 0 || d->ops == 0 || d->n_ops <= 0 ) continue;
+		const char *nm = reg->name_of_id(m);
+		if ( nm == 0 ) continue;
+		a->push_nocheck(thNEW(pigDataString,(nm)));
+	}
+	result = a;
+}
+
+/* ★★ 内省 op (type_of / kind_of) の共通前処理 (ひさ 2026-09-21):
+ *   **compact して、エラーなら伝播する**。それだけ。
+ *
+ * ⚠⚠ これが無かったときの実害: エラーは **作られていたのに読み捨てられて**いた。
+ *   arg_type_set は @is_cache()@ を訊く — これは pigDataDelay の compact ゲートウェイなので、
+ *   引数は以前から暗黙に compact されていた。にもかかわらず @is_error()@ を誰も訊かないので、
+ *   エラー値の is_cache() が 0 を返し、"" → **"value"** に落ちていた
+ *   (実測: @type_of(nosuchvar)@ → "value" ・ エラー表示なし ・ 終了コードも正常)。
+ *   ⇒ 「compact していないからエラーが出ない」のではなく、**compact の結果を見ていなかった**。
+ *
+ * ★★ **継続の実値までは辿らない** (ひさ判断 2026-09-21: 案③は今回なし)。
+ *   @cdr()->cdr()->compact()@ まで待っても **型の答えは 1 文字も変わらない** — 継続 pair の car と
+ *   pigDataCache::type_stamp() には *同じ文字列* が載るため (pigfAgent::stamp_out_cache)。
+ *   実測でも cold / warm ・ 10 値すべて一致した。⇒ 得る物が無いのに、内省 op を挿しただけで
+ *   **同期点ができる** (上流の agent の完了を待つ) 代償だけが残る。
+ *   ⚠ 引き換えに残る限界: **agent の中で失敗した計算には、宣言された型を答える**
+ *     (@type_of(points3d("not an array"))@ → "pt-cloud3d")。待たない以上、失敗をまだ観測できない。
+ *     ここを塞ぐなら案③ (実値まで待つ) になるが、その判断は今回見送った。
+ * 戻り: compact 済みの値。err が非 thNULL ならそれを結果にして返すこと。 */
+static sPtr<pigData>
+introspect_compact(sPtr<pigData> a, sPtr<pigData> &err)
+{
+	err = thNULL;
+	sPtr<pigData> v = a->compact();
+	if ( v->is_error() ) err = v;
+	return v;
 }
 
 void
@@ -1393,12 +2435,51 @@ pigDataOperatorTypeOf::_start()
 		result = thNEW(pigDataError,("type_of needs one argument", info, PE_FATAL));
 		return;
 	}
-	/* ★ compact しない。compact すると幾何が **その場で force** され、内省したいだけなのに
-	 *   計算を走らせてしまう。型スタンプは継続 pair (delayed) の car に載っているので、
-	 *   arg_type_set は非ブロッキングで読める (dispatch が使っているのと同じ経路)。 */
-	std::string t = arg_type_set(args[0]);
-	if ( t.empty() ) t = "value";       /* スカラ・文字列・配列は幾何型を持たない */
+	sPtr<pigData> err;
+	sPtr<pigData> v = introspect_compact(args[0], err);
+	if ( err != thNULL ) { result = err; return; }
+	/* ★ 型の出どころは arg_type_set 1 本 — 継続なら car ・ キャッシュなら type_stamp()。
+	 *   **どちらも同じ文字列**なので、cold と warm で答えが変わらない。 */
+	std::string t = arg_type_set(v);
+	if ( t.empty() && v->type_name() != 0 )
+		t = v->type_name();                            /* in-proc で実体化済みの本体 */
+	if ( t.empty() ) t = "value";                          /* スカラ・文字列・配列は幾何型を持たない */
 	result = thNEW(pigDataString,(t.c_str()));
+}
+
+void
+pigDataOperatorKindOf::_start()
+{
+	if ( args.length() < 1 ) {
+		result = thNEW(pigDataError,("kind_of needs one argument", info, PE_FATAL));
+		return;
+	}
+	sPtr<pigData> err;
+	sPtr<pigData> v = introspect_compact(args[0], err);
+	if ( err != thNULL ) { result = err; return; }   /* エラーは種別に化けさせず伝播 */
+
+	/* ★★ 型名そのものはここでは返さない — それは type_of() の軸。種別としては
+	 *   pt-cloud3d も oc-brep3d も ref も等しく **キャッシュハンドル** (ひさ 2026-09-21)。
+	 * ★ 幾何は type_of と同じく **待たない** — 種別は型スタンプだけで決まるので、
+	 *   実値を待っても "cache" は "cache" のまま。 */
+	if ( ! arg_type_set(v).empty() ) {
+		result = thNEW(pigDataString,("cache"));
+		return;
+	}
+	const char *k;
+	if      ( v->is_cache() || v->type_name() != 0 ) k = "cache";
+	else if ( v->is_int() )                      k = "int";
+	else if ( v->is_flt() )                      k = "float";
+	else if ( v->obt_array().is_notNull() )      k = "array";
+	else if ( v->obt_hash().is_notNull() )       k = "hash";
+	/* ⚠ ここから下は pigData に述語が無いので d_cast。**libpig の中**なので 1 イメージに閉じ、
+	 *   しかも **compact 済み**の値に対して訊いているので、遅延ノードで嘘をつく穴も無い
+	 *   (モジュールから訊く口ではないため、述語を増やして ABI を上げるには当たらないと判断した)。 */
+	else if ( sPtr<pigDataString>::d_cast(v).is_notNull() ) k = "string";
+	else if ( sPtr<pigDataLambda>::d_cast(v).is_notNull() ) k = "function";
+	else if ( sPtr<pigDataNull>::d_cast(v).is_notNull() )   k = "null";
+	else                                         k = "unknown";   /* ⚠ 黙って "value" に寄せない */
+	result = thNEW(pigDataString,(k));
 }
 
 void
@@ -1436,10 +2517,21 @@ pigDataOperatorWhich::_start()
 			if ( ! sig_accepts_input(reg, m, op.c_str(), want[j]) ) ok = 0;
 		if ( ! ok ) continue;
 		const char *nm = reg->name_of_id(m);
-		const char *sg = reg->op_sig(m, op.c_str());
+		/* ★ #3554 最後の段 4/5: **行を全部つなぐ**。op_sig() は最初の候補行しか返さないので、
+		 *   変種行に分かれた op (cast / import) では which が申告の一部しか見せない。
+		 *   ⚠ 表示の形 (module:priority:sig) は変えない — 検定と利用者の目が当てている。
+		 *     複数行は `;` でつなぐ = sig 自身の区切りと同じなので読み方が増えない。 */
+		std::string sg;
+		for ( int ci = 0 ; ; ++ci ) {
+			const pigOpEntry *row = reg->op_row(m, op.c_str(), ci);
+			if ( row == 0 ) break;
+			if ( row->sig == 0 || row->sig[0] == '\0' ) continue;
+			if ( ! sg.empty() ) sg += ";";
+			sg += row->sig;
+		}
 		char buf[512];
 		::snprintf(buf, sizeof buf, "%s%s:%d:%s", s.empty() ? "" : " ",
-		    nm ? nm : "?", reg->priority(m), sg ? sg : "(none)");
+		    nm ? nm : "?", reg->priority(m), sg.empty() ? "(none)" : sg.c_str());
 		s += buf;
 	}
 	result = thNEW(pigDataString,(s.c_str()));

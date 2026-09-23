@@ -51,7 +51,8 @@ PIG_WIRE_DEF(mfGeom, mf_mk_reader, mf_mk_writer);
  *     `srava --module-info` が列挙するための候補にすぎない (実行時の判断に使わない)。 */
 extern const pigModuleType manifold_provides[];
 const pigModuleType manifold_provides[] = {
-	{ &mfGeom::WIRE, "mf-mesh3d,mf-cross2d",
+	/* ★ #3533: 2D は **2 型が 1 つの 4CC (MFC2) を共有する** (cgal の PLY2 と同じ形)。 */
+	{ &mfGeom::WIRE, "mf-mesh3d,mf-cross2d,mf-face3d",
 	  "MFM3,MFC2,MESH,PLY2,NEFB" },   /* ★ #3499: NEF3 (nef_snc = 常に SNC) は読まない → 橋 nef_mf.so */
 	{ 0, 0, 0 },
 };

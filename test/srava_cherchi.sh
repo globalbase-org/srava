@@ -38,9 +38,11 @@
 #   geogram / nef が持つ。詳細は modules/cherchi/h/ch/c++/chMesh.h 冒頭。
 SRAVA="$1"
 MODE="${2:-bool}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
-CH='module("cherchi.so",{priority:99});'
-MF='module("manifold.so",{priority:50});'
+CH='module("cherchi.so",{priority:99});module("geomutils.so",{});'   # ★ #3527 段 3: 素性 op は gu へ移った
+MF='module("manifold.so",{priority:50});module("geomutils.so",{});'
 
 # 期待値との突き合わせ (相対誤差)。$1=実測 $2=期待 $3=許容相対誤差
 near() {
@@ -103,7 +105,7 @@ arity)
 	OK=1
 	for K in 2 3 4 8; do
 		rm -rf "$D-k$K"
-		OUT=$(SRAVA_CACHE_DIR="$D-k$K" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,arity:$K}); var v=[]; $SRC print(volume(union(v)));" "$SRAVA" 2>&1)
+		OUT=$(SRAVA_CACHE_DIR="$D-k$K" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,arity:$K});module(\"geomutils.so\",{}); var v=[]; $SRC print(volume(union(v)));" "$SRAVA" 2>&1)
 		V=$(echo "$OUT" | sed -n 's/.*result value=\([0-9.]*\).*/\1/p')
 		M=$(echo "$OUT" | sed -n 's/.*cache: [0-9]* hit(s), \([0-9]*\) miss.*/\1/p')
 		echo "  arity=$K value=$V miss=$M"
@@ -152,7 +154,7 @@ guard)
 		i=$((i+1))
 	done
 	rm -rf "$D-q"
-	OUT=$(SRAVA_CACHE_DIR="$D-q" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,arity:8});
+	OUT=$(SRAVA_CACHE_DIR="$D-q" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,arity:8});module(\"geomutils.so\",{});
 	      var v=[]; $SRC print(\"V\", volume(union(v)));" "$SRAVA" 2>&1)
 	V=$(echo "$OUT" | sed -n 's/^V //p')
 	if [ -n "$V" ]; then
@@ -174,12 +176,12 @@ mfcross)
 
 	# ★ 箱は **一般の位置**へずらす: tube の端の蓋 (x=0 の平面) と box の面が同一平面で接すると
 	#   上流の退化条件を踏み、混成と純 mf で値が割れる。
-	TUBE='"manifold"::tube([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
+	TUBE='"manifold"::tube_ruled([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
 	BOX='translate(box(1,1,1),[0.5,0.25,0.25])'
 	rm -rf "$D-c" "$D-d"
 	MIX=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="$MF $CH
 	      print(\"V\", volume($TUBE ||| $BOX));" "$SRAVA" 2>&1 | sed -n 's/^V //p')
-	REF=$(SRAVA_CACHE_DIR="$D-d" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});
+	REF=$(SRAVA_CACHE_DIR="$D-d" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});module(\"geomutils.so\",{});
 	      print(\"V\", volume($TUBE ||| $BOX));" "$SRAVA" 2>&1 | sed -n 's/^V //p')
 	if [ -z "$MIX" ] || [ -z "$REF" ]; then echo "FAIL: 値が出ない mixed=$MIX ref=$REF"; exit 1; fi
 	[ "$(near "$MIX" "$REF" 1e-9)" = 1 ] || { echo "FAIL: 混成が純 mf と違う ref=$REF mixed=$MIX"; exit 1; }
@@ -191,12 +193,12 @@ cgcross)
 	#   持つ。cgal がそれを厳密有理数として書き、cherchi が読み戻す → 往復が無損失なら
 	#   体積・頂点数・面数が **純 cherchi と完全一致**する (許容誤差ではなく一致を要求する)。
 	#   ⚠ ここはブールを通さない (leaf + cast だけ) ので、上流の退化条件とは無関係。
-	CG='module("cgal.so",{priority:99});'
+	CG='module("cgal.so",{priority:99});module("geomutils.so",{});'
 	rm -rf "$D-g" "$D-h"
 	VIA=$(SRAVA_CACHE_DIR="$D-g" SRAVA_SOURCE="$CG $CH
 	      var g = cast(\"ch-mesh3d\", sphere(1,32));
 	      print(\"R\", volume(g), nverts(g), nfaces(g));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
-	PURE=$(SRAVA_CACHE_DIR="$D-h" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99});
+	PURE=$(SRAVA_CACHE_DIR="$D-h" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99});module(\"geomutils.so\",{});
 	      var g = sphere(1,32);
 	      print(\"R\", volume(g), nverts(g), nfaces(g));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
 	if [ -z "$VIA" ] || [ -z "$PURE" ]; then echo "FAIL: 値が出ない via=$VIA pure=$PURE"; exit 1; fi
@@ -213,7 +215,7 @@ threads)
 	EXPR='var a = box(2,2,2); var b = translate(box(2,2,2),[1,1,1]);
 	      print("U", volume(a ||| b)); print("I", volume(a &&& b)); print("D", volume(a --- b));'
 	for T in 1 2 0 ; do
-		OUT=$(SRAVA_CACHE_DIR="$D-t$T" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,threads:$T});
+		OUT=$(SRAVA_CACHE_DIR="$D-t$T" SRAVA_SOURCE="module(\"cherchi.so\",{priority:99,threads:$T});module(\"geomutils.so\",{});
 		      $EXPR" "$SRAVA" 2>&1)
 		U=$(echo "$OUT" | sed -n 's/^U //p')
 		I=$(echo "$OUT" | sed -n 's/^I //p')

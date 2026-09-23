@@ -22,8 +22,8 @@ var horn = pipe_sample(path, [0.22, 0.05], PIT);
 print("horn samples =", length(horn),
       "  r: base", horn[0][1], "→ tip", horn[length(horn)-1][1]);
 
-export("/tmp/srava-pipe-variable.3mf", color(tube(horn, 28), "orange"));
+export("/tmp/srava-pipe-variable.3mf", color(tube_ruled(horn, 28), "orange"));
 
 // --- 別形状の例(コメント): 中央が膨らむ紡錘形。s は弧長なので末尾 s≈管長に置く ---
 //   var spindle = pipe_sample(path, [[0, 0.25], [13, 1.1], [26, 0.25]], PIT);
-//   export("/tmp/srava-pipe-spindle.3mf", color(tube(spindle, 28), "cyan"));
+//   export("/tmp/srava-pipe-spindle.3mf", color(tube_ruled(spindle, 28), "cyan"));

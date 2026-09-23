@@ -9,8 +9,12 @@
 #   ③ 解決できないときは **明示エラー**。原因 3 種を分けて言う (直す場所が違うため)
 #   ④ 変数形が **1 プロセスの中で** 反復ごとに解決される
 #      = priority による切替 (プロセス全体で 1 カーネル) では書けなかったものが書ける
+#   ⑤ ★★ #3568: 指名を書いても cast / import / export の **専用診断**に届く
+#      指名の汎用文言 (「入力型を受け付けない」) が専用診断を覆っていた
 SRAVA="${1:?srava binary not given}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 MOD='module("cgal.so",{}); module("manifold.so",{}); module("occt.so",{});'
 NG=0
 say() { echo "$1"; }
@@ -27,10 +31,10 @@ hitmiss() {   # hitmiss <cache dir(消さない)> <source> → "H M"
 }
 
 # ---- ① 指名が効く: occt の球は **厳密**なので、メッシュ系と値が構造的に違う ----
-CG=$(val "$D-a1" "$MOD print(\"VAL\", volume(\"cgal\"::sphere(1.5,32)));")
-OC=$(val "$D-a2" "$MOD print(\"VAL\", volume(\"occt\"::sphere(1.5,32)));")
-DF=$(val "$D-a3" "$MOD print(\"VAL\", volume(sphere(1.5,32)));")
-EM=$(val "$D-a4" "$MOD print(\"VAL\", volume(\"\"::sphere(1.5,32)));")
+CG=$(val "$D-a1" "$MOD print(\"VAL\", volume(\"cgal\"::sphere(1.5)));")
+OC=$(val "$D-a2" "$MOD print(\"VAL\", volume(\"occt\"::sphere(1.5)));")
+DF=$(val "$D-a3" "$MOD print(\"VAL\", volume(sphere(1.5)));")
+EM=$(val "$D-a4" "$MOD print(\"VAL\", volume(\"\"::sphere(1.5)));")
 [ -n "$CG" ] && [ -n "$OC" ] || bad "指名した呼び出しが値を出さない cgal='$CG' occt='$OC'"
 [ "$CG" != "$OC" ] || bad "occt 指名が効いていない (cgal と同値 $CG)"
 [ "$DF" = "$CG" ]  || bad "既定 (cgal) と \"cgal\":: が別値 '$DF' vs '$CG'"
@@ -82,6 +86,45 @@ N=$(echo "$OUT" | sed -n 's/^VAL //p' | wc -l)
 U=$(echo "$OUT" | sed -n 's/^VAL [a-z]* //p' | sort -u | wc -l)
 [ "$U" -eq 1 ] || { bad "box が 3 カーネルで一致しない"; echo "$OUT" | sed -n 's/^VAL //p'; }
 say "  4) 変数形で 1 プロセス内 3 カーネル一致: $(echo "$OUT" | sed -n 's/^VAL [a-z]* //p' | sort -u)"
+
+# ---- ⑤ 指名は **専用診断を覆わない** (#3568) ----
+#   ★ 何が壊れていたか: decide_out_module の中で、指名の汎用診断
+#     (「op がその入力型を受け付けない」) が cast / import / export の専用診断より
+#     **前**に在り、指名が与えられているだけで早期に return していた。⇒ 指名を書くと
+#     *直す場所を指さない* 文言に化けた。要求は **出力型 / 拡張子** の話なのに、
+#     返る文言は **入力型** の話になる (import は入力 0 個なのに入力型の話をする)。
+#   ★ 検定の形: 同じ誤りを **指名なし / 指名あり** の 2 通りで書き、*同じ文言が出る*
+#     ことを見る ⇒ 期待文言を書き写さないので、将来文言を直しても検定は生きる。
+sigline() {   # sigline <cache dir> <source> → 最初の ERROR 行だけ
+	run "$1" "$2" | sed -n 's/^\*\*\* ERROR\[[^]]*\] //p' | sed 's/ \*\*\*$//' | head -1
+}
+samediag() {   # samediag <id> <指名なしの式> <指名ありの式> <専用診断に出る語>
+	a=$(sigline "$D-s$1-a" "$MOD $2")
+	b=$(sigline "$D-s$1-b" "$MOD $3")
+	[ -n "$a" ] || { bad "指名なしでエラーが出ない: $2"; return; }
+	case "$a" in *"$4"*) ;; *) bad "陰性対照が専用診断でない ($4): $a" ; return ;; esac
+	[ "$a" = "$b" ] || bad "指名ありで文言が変わる ($4)
+    指名なし: $a
+    指名あり: $b"
+}
+# cast: 存在しない型 ⇒ 「その型を産出できるモジュールが無い」(出力型の話)
+samediag 1 'print("V", volume(cast("zz-mesh3d", box(2,2,2))));' \
+           'print("V", volume("cgal"::cast("zz-mesh3d", box(2,2,2))));' \
+           '産出できるモジュールが無い'
+# import: 未対応拡張子 ⇒ 「読めるモジュールが無い」(拡張子の話・入力型は 0 個)
+samediag 2 'print("V", volume(import("foo.zzz")));' \
+           'print("V", volume("cgal"::import("foo.zzz")));' \
+           '読めるモジュールが無い'
+# export: `::` は付けられない (planner builtin) ので候補列で指名する
+samediag 3 'export("'"$D"'-s3.zzz", box(2,2,2));' \
+           'USE_MODULES = ["cgal","manifold","occt"]; export("'"$D"'-s3.zzz", box(2,2,2));' \
+           '書けるモジュールが無い'
+# ★ 陽性対照: 指名の汎用診断は **普通の op では生きている** (並べ替えで殺していない)
+errtest 5 'var a = "manifold"::box(2,2,2); print(volume("occt"::union(a, "occt"::box(1,1,1))));' \
+                                                                       'does not accept input type'
+errtest 6 'USE_MODULES = ["occt"]; print(volume("cgal"::sphere(1.5)));' \
+                                                                       'in any candidate'
+say "  5) 指名を書いても cast / import / export の専用診断に届く (#3568)"
 
 [ "$NG" -eq 0 ] && echo "MODULE-QUALIFIED-OK"
 exit "$NG"

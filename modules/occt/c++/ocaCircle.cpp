@@ -12,20 +12,7 @@
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ocaCircle_.h"
 
-#include	<BRepBuilderAPI_MakeEdge.hxx>
-#include	<BRepBuilderAPI_MakeWire.hxx>
-#include	<BRepBuilderAPI_MakeFace.hxx>
-#include	<Geom_Circle.hxx>
-#include	<TopoDS_Shape.hxx>
-#include	<TopoDS_Face.hxx>
-#include	<TopoDS_Wire.hxx>
-#include	<TopoDS_Edge.hxx>
-#include	<gp_Pnt.hxx>
-#include	<gp_Dir.hxx>
-#include	<gp_Ax2.hxx>
-#include	<Standard_Failure.hxx>
 #include	<cmath>
-#include	<string>
 
 CLASS_TINYSTATE(oc/c++/ocaCircle,pig/c++/ptsCalcBody)
 
@@ -84,25 +71,20 @@ ocaCircle_::compute()
 	ocShape::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
+	/* ★ #3570 段3: segs の引数そのものを撤去した (記述子の nin を減らした) ので、
+	 *   ここに在った #3530 の「受けるが無視し、検査はする」は **届かなくなった**。
+	 *   原則が「そのモジュールで必要のない引数は撤去する」に変わったため。 */
 	if ( !(r > 0) ) { result = oca_err(thNEW(stdString,("circle: radius must be > 0"))); return; }
-	try {
-		/* XY 平面・原点中心。 */
-		gp_Ax2 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
-		Handle(Geom_Circle) c = new Geom_Circle(ax, r);
-		BRepBuilderAPI_MakeEdge me(c);
-		if ( ! me.IsDone() ) { result = oca_err(thNEW(stdString,("circle: could not build the edge"))); return; }
-		BRepBuilderAPI_MakeWire mw(me.Edge());
-		if ( ! mw.IsDone() ) { result = oca_err(thNEW(stdString,("circle: could not build the wire"))); return; }
-		BRepBuilderAPI_MakeFace mf(mw.Wire());
-		if ( ! mf.IsDone() ) { result = oca_err(thNEW(stdString,("circle: could not build the face"))); return; }
-		out = thNEW(ocFace2D,());
-		out->set_shape(mf.Face());
-	} catch ( const Standard_Failure& e ) {
-		std::string m = std::string("circle: OCCT failed [") + e.DynamicType()->Name() + "] (" +
-		    ( ( e.GetMessageString() && e.GetMessageString()[0] ) ? e.GetMessageString() : "no message" ) + ")";
-		result = oca_err(thNEW(stdString,(m.c_str())));
+	/* ★ #3545 段 5: 幾何の組み立ては **幾何 lib 側** (ocFace2D::make_circle)。
+	 *   ⇒ この TU は OCCT を触らない — 触ると投げうる inline を通っただけで
+	 *     RTTI の型インスタンスが .o に出る (ocShape.h の注記)。 */
+	char why[320]; why[0] = '\0';
+	out = ocFace2D::make_circle(r, why, (int)sizeof why);
+	if ( ! out.is_notNull() ) {
+		result = oca_err(thNEW(stdString,( why[0] ? why : "circle: failed" )));
 		return;
 	}
+
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して本体未設定で return するので

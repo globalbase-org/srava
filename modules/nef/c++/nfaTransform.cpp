@@ -2,7 +2,7 @@
  * nfaTransform — transform(m, matrix) — 行優先 12 (3x4) / 16 (4x4) の一般アフィン変換。上の 3 本の一般形。
  *
  * ★ 引数の解釈と行列の組み立ては **common/affine.h** (カーネル非依存)。この .cpp が持つのは
- *   「引数を渡して double[12] を貰い、nfMesh::apply_affine へ流す」だけ。7 カーネルで
+ *   「引数を渡して double[12] を貰い、nfNefMesh::apply_affine へ流す」だけ。7 カーネルで
  *   受理する書き方と拒否の理由を揃えるための構造 (#3486)。
  * ★ 4 op はどれも **3D→3D で 2D 型を要さない**ので、2D 型を持たないこのカーネルでも置ける
  *   (extrude / section のような 2D 依存の op とは事情が違う → #3474 の判断)。
@@ -34,7 +34,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -48,7 +48,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -70,7 +70,7 @@ void
 nfaTransform_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
-	sPtr<nfMesh> in = ( na > 0 ) ? sPtr<nfMesh>::d_cast((*args)[0]) : sPtr<nfMesh>();
+	sPtr<nfNefMesh> in = ( na > 0 ) ? sPtr<nfNefMesh>::d_cast((*args)[0]) : sPtr<nfNefMesh>();
 	if ( ! in.is_notNull() ) {
 		result = nfa_err(thNEW(stdString,("transform: needs a Nef mesh")));
 		return;

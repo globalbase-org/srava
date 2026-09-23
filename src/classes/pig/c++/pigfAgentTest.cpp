@@ -120,6 +120,10 @@ TS_STATE(INI_ptsApplication_START)   /* 基底 INI_ptsObject_START (ptsApp=自�
 	/* ノードは INI で一度だけ構築する。compact は yield で状態関数を先頭から再走させるため、
 	 * 状態内でノードを作ると毎回作り直して agent を無限起動してしまう(重要)。 */
 	env   = thNEW(pigEnvironment,(thNULL));
+	/* ★★ #3482: **根の見えない try を刺す**。env を作る場所は全部 try をリレーする
+	 * という不変条件を例外なく成り立たせる (ここを忘れると、配下で起きた計算がどの try にも
+	 * 属さず台帳に穴が空く。pigfAgent / ptsFireAndForget はそれを黙って直さず明示エラーにする)。 */
+	if ( ptsApp.is_notNull() ) env->set_try( ptsApp->root_try() );
 	/* srava 起動相当: CACHE_DIR の既定を getenv(SRAVA_CACHE_DIR) からセット(無ければ既定パス)。
 	 * pigfAgent はこの env 変数を参照する(実行中に set_var で変更も可能)。 */
 	{

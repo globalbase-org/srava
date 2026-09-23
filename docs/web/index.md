@@ -25,13 +25,24 @@ title: srava ドキュメント
   記述子 ABI と、**モジュールが効かないときの診断**:
   [`srava --modules`](srava_install_guide.html#modules)（**どの `.so` が効いているか** = 配置）と
   [`srava --module-info`](srava_install_guide.html#module-info)（**何を申告しているか** = 中身）。
-  同梱モジュールの依存・対応型・op 一覧もここ。幾何カーネルは **cgal.so**（CGAL・厳密）/
+  同梱モジュールの依存・対応型・op 一覧もここ。
+  **[型 × モジュール一覧](srava_module_reference.html#type-matrix)**（どの型をどの `.so` が
+  作り・受けるか・4CC・priority）もある。幾何カーネルは **cgal.so**（CGAL・厳密）/
   **manifold.so**（高速）/ **nef_hybrid.so**（Nef 多面体）/ **geogram.so**（厳密 mesh arrangement）/
   **cherchi.so**（indirect predicates）/ **occt.so**（B-rep・解析曲面）/ **openvdb.so**（ボリューム）、
-  表現をまたぐ**橋渡し** **occt_mf.so** / **openvdb_mf・cg・gg.so**、
+  表現をまたぐ**橋渡し** **occt_mf.so** / **openvdb_mf・cg・gg.so** / **nef_cg・nef_mf.so**、
+  外部ライブラリを持たない**カーネル中立**の **points.so**（点群型）/
+  **geomutils.so**（メッシュ系に共通の計測・位相・片の取り出し）、
   解析モジュールは **pipe_proximity**（可変太さ配管の自己接近検出・距離調整）。
-  ★ これらは**すべて既定でビルドされる**（`nef_snc.so` だけ既定 OFF・Cygwin は建てられない
-  ものが自動 OFF）。
+  ★ これらは**すべて既定でビルドされる**（Cygwin は建てられないものが自動 OFF）。
+  ⚠ `nef_snc.so` は `nef_hybrid.so` と同じ op を同じ型名で出す**変種**なので、
+  `include "module/all.sra";` には入れず**明示ロード**する（ビルドの既定は ON）。
+- [**擬似モジュールリファレンス**](srava_pseudo_module_reference.html) — `.so` を持たない
+  **値だけのモジュール**。候補列にハッシュを書くと、その op が **srava の式**として走る。
+  同梱の `module/pseudo.sra`（`pm_cgal` / `pm_openvdb` / `pm_points` ほか）の仕様と、
+  各擬似モジュールが**定義している op の一覧**。狙いは 2 つ —
+  **粒度の既定値**（`seg` / `dx`）を呼び出しの手前で埋めること（`cast` にはできない）と、
+  **引数の少ない呼び方を足す**こと（`pm_points` の 2 引数 `intersection`）。
 - [**モジュール設計**](srava_module_design.html) — 自作モジュール（`.so`）を書くための設計ガイド。
   記述子 ABI・op 申告・型/4CC 登録・実行方式・cross-module 型変換・ビルド/配置。
 - [**言語リファレンス**](srava_language_reference.html) — 文法・lambda/クロージャ・評価モデル・
@@ -58,10 +69,10 @@ export("plate.stl", extrude(difference(plate, holes), 3));
 ```
 
 ```
-// stdlib の曲線 + tube
+// stdlib の曲線 + tube_ruled
 include "std/curve.sra";
 var path = map(bezier([[0,0,0],[20,20,0],[40,0,10]], 24), \(p){ [p, 2]; });
-export("horn.stl", tube(path, 24));
+export("horn.stl", tube_ruled(path, 24));
 ```
 
 ## 実行

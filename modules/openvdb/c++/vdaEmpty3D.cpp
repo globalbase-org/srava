@@ -10,7 +10,6 @@
 #include	"pig/c++/pigData.h"
 #include	"vd/c++/vdGrid.h"
 #include	"vd/c++/vdArena.h"
-#include	<openvdb/tools/LevelSetUtil.h>
 #include	"ts2/c++/stdString.h"
 #include	<string>
 #include	"_ts2/c++/vdaEmpty3D_.h"
@@ -85,13 +84,13 @@ vdaEmpty3D_::compute()
 	/* ★ 活性ボクセルが 1 つも無い level set = 空集合。★ dx を取るのは、ボリューム同士の
 	 *   合成が transform 一致を要求するため — 空でも「どの格子の上の空か」が要る
 	 *   (bool_from_args が transform 全体を突き合わせて明示エラーにする)。 */
-	openvdb::FloatGrid::Ptr g = openvdb::createLevelSet<openvdb::FloatGrid>(dx);
-	if ( ! g ) {
+	/* ★ #3545 段 5: 実体の生成は **幾何 lib 側** (vdGrid::make_empty)。
+	 *   ⇒ この TU は OpenVDB のヘッダを引かない (引くと上流の可変大域が .o に出る)。 */
+	out = vdGrid::make_empty(dx);
+	if ( ! out.is_notNull() ) {
 		result = vda_err(thNEW(stdString,("empty3d: openvdb could not create a level set")));
 		return;
 	}
-	out = thNEW(vdGrid,());
-	out->set_grid(g);
 	}, vdwhy) )
 		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

@@ -57,6 +57,7 @@
 #include <openvdb/tools/MeshToVolume.h>
 #include <openvdb/tools/VolumeToMesh.h>
 #include <openvdb/util/NullInterrupter.h>
+#include "vd/c++/vdBreak.h"   /* #3498: 中断 */
 
 #include <algorithm>
 #include <cmath>
@@ -182,7 +183,8 @@ vd_mesh_to_levelset(const std::vector<openvdb::Vec3s>& points,
                     const std::vector<openvdb::Vec3I>& tris,
                     const openvdb::math::Transform& xform,
                     float halfWidth,
-                    long *fell_back = 0)
+                    long *fell_back = 0,
+                    const pigBreak *brk = 0)
 {
 	if ( fell_back ) *fell_back = 0;
 	if ( points.empty() || tris.empty() ) return openvdb::FloatGrid::Ptr();
@@ -199,14 +201,19 @@ vd_mesh_to_levelset(const std::vector<openvdb::Vec3s>& points,
 	if ( ! oracle.consistent() ) {
 		/* 閉じていない / 向きが揃っていない ⇒ 巻き数は意味を持たない。従来どおりに作る。 */
 		if ( fell_back ) *fell_back = oracle.bad_columns();
-		return openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(xform, points, tris, halfWidth);
+		/* ★ #3498: 退避経路も中断できるようにする (器を取る多重定義がある)。 */
+		vdBreakScope fbr(brk);
+		return openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+		    fbr.ref(), xform, points, tris, halfWidth);
 	}
 	openvdb::tools::QuadAndTriangleDataAdapter<openvdb::Vec3s, openvdb::Vec3I>
 	    mesh(&ip[0], ip.size(), &tris[0], tris.size());
-	/* ⚠ 変数名に nil を使わないこと — macOS のヘッダがマクロで定義している。 */
-	openvdb::util::NullInterrupter nointr;
+	/* ⚠ 変数名に nil を使わないこと — macOS のヘッダがマクロで定義している。
+	 * ★ #3498: 中断の器。brk==0 なら素の NullInterrupter と同じ挙動 (vdBreak.h)。
+	 *   MeshToVolume.h には中断点が 11 箇所ある = **voxelize は実際に止まる**。 */
+	vdBreakScope br(brk);
 	return openvdb::tools::meshToVolume<openvdb::FloatGrid>(
-	    nointr, mesh, xform, halfWidth, halfWidth, /*flags=*/0, /*polygonIndexGrid=*/nullptr,
+	    br.ref(), mesh, xform, halfWidth, halfWidth, /*flags=*/0, /*polygonIndexGrid=*/nullptr,
 	    oracle, openvdb::tools::EVAL_EVERY_TILE);
 }
 

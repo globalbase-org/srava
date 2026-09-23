@@ -31,8 +31,10 @@
 SRAVA="$1"
 MODE="${2:-solidify}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
-GG='module("geogram.so",{priority:99});'
-MF='module("manifold.so",{priority:50});'
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
+GG='module("geogram.so",{priority:99});module("geomutils.so",{});'   # ★ #3527 段 3: 素性 op は gu へ移った
+MF='module("manifold.so",{priority:50});module("geomutils.so",{});'
 
 case "$MODE" in
 solidify)
@@ -43,7 +45,7 @@ solidify)
 	# ⚠ 2026-09-05: tube を **geogram 自身も持つ**ようになったので、priority が高いと
 	#   tube が geogram で走り、この検査が見たい「別カーネルが作った値を読む」状況で
 	#   なくなる (値は一致するので **落ちずに意味だけ失われる**)。生成元を名指しして固定する。
-	SELFX='"manifold"::tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
+	SELFX='"manifold"::tube_ruled([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
 	rm -rf "$D-a"
 	OUT=$(SRAVA_CACHE_DIR="$D-a" SRAVA_SOURCE="$MF $GG
 	      var g = cast(\"gg-mesh3d\", $SELFX);
@@ -70,14 +72,14 @@ mfcross)
 	# ⚠ 2026-09-05: tube を **geogram 自身も持つ**ようになったので、priority が高いと
 	#   tube が geogram で走り、この検査が見たい「別カーネルが作った値を読む」状況で
 	#   なくなる (値は一致するので **落ちずに意味だけ失われる**)。生成元を名指しして固定する。
-	TUBE='"manifold"::tube([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
+	TUBE='"manifold"::tube_ruled([[[0,0,0],0.6],[[4,0,0],0.6]], 12)'
 	rm -rf "$D-c" "$D-d"
 	# 混成: tube=mf-mesh3d / box=gg-mesh3d (形式はどちらも "MFM3") → gg の sig の
 	# (mf-mesh3d, gg-mesh3d) 行で gg が計算する。★型が違っても形式は同じ、という状態の回帰でもある
 	MIX=$(SRAVA_CACHE_DIR="$D-c" SRAVA_SOURCE="$MF $GG
 	      print(\"V\", volume($TUBE ||| box(1,1,1)));" "$SRAVA" 2>&1 | sed -n 's/^V //p')
 	# 参照: 同じ形を **純 manifold** で作る
-	REF=$(SRAVA_CACHE_DIR="$D-d" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});
+	REF=$(SRAVA_CACHE_DIR="$D-d" SRAVA_SOURCE="module(\"manifold.so\",{priority:99});module(\"geomutils.so\",{});
 	      print(\"V\", volume($TUBE ||| box(1,1,1)));" "$SRAVA" 2>&1 | sed -n 's/^V //p')
 	if [ -z "$MIX" ] || [ -z "$REF" ]; then echo "FAIL: 値が出ない mixed=$MIX ref=$REF"; exit 1; fi
 	ok=$(awk -v a="$REF" -v b="$MIX" 'BEGIN{ d=a-b; if(d<0)d=-d; s=(a<0?-a:a); if(s<1)s=1;
@@ -90,7 +92,7 @@ cgcross)
 	#   geogram.so は CGAL をリンクしない。
 	#   壊れていたときの症状: cast("gg-mesh3d", cgMesh) が
 	#     "cannot convert format 'MESH' ... to any of [gg-mesh3d]" で落ちる。
-	CG='module("cgal.so",{priority:99});'
+	CG='module("cgal.so",{priority:99});module("geomutils.so",{});'
 	rm -rf "$D-g" "$D-h" "$D-i"
 	# ① ★忠実性: 球は共通生成器 (common/geodesic.h) なので cgal も geogram も **同じ double 座標**を
 	#   持つ。cgal はそれを厳密有理数として書き、geogram が読み戻す → 往復が無損失なら
@@ -98,7 +100,7 @@ cgcross)
 	VIA=$(SRAVA_CACHE_DIR="$D-g" SRAVA_SOURCE="$CG $GG
 	      var g = cast(\"gg-mesh3d\", sphere(1,32));
 	      print(\"R\", volume(g), nverts(g), nfaces(g));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
-	PURE=$(SRAVA_CACHE_DIR="$D-h" SRAVA_SOURCE="module(\"geogram.so\",{priority:99});
+	PURE=$(SRAVA_CACHE_DIR="$D-h" SRAVA_SOURCE="module(\"geogram.so\",{priority:99});module(\"geomutils.so\",{});
 	      var g = sphere(1,32);
 	      print(\"R\", volume(g), nverts(g), nfaces(g));" "$SRAVA" 2>&1 | sed -n 's/^R //p')
 	if [ -z "$VIA" ] || [ -z "$PURE" ]; then echo "FAIL: 値が出ない via=$VIA pure=$PURE"; exit 1; fi
@@ -112,8 +114,8 @@ cgcross)
 	#   nef に変わっただけで、狙い「cg 入力の solidify が二重計上を正しく解消する」は同じ)。
 	# ⚠ 2026-09-05: tube は geogram / nef も持つようになったので、**cgal に作らせる**ことを
 	#   名指しで固定する (ここは「cg 入力の solidify」を見るテスト)。
-	SELFX2='"cgal"::tube([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
-	OUT3=$(SRAVA_CACHE_DIR="$D-i" SRAVA_SOURCE="$CG $GG module(\"nef_hybrid.so\",{});
+	SELFX2='"cgal"::tube_ruled([[[0,0,0],0.8],[[10,0,0],0.8],[[10,0,2],0.8],[[0,0,2],0.8],[[0,0,4],0.8],[[5,0,4],0.8],[[5,0,-2],0.8]], 12)'
+	OUT3=$(SRAVA_CACHE_DIR="$D-i" SRAVA_SOURCE="$CG $GG module(\"nef_hybrid.so\",{});module(\"geomutils.so\",{});
 	      var t = $SELFX2;
 	      print(\"BEFORE\", volume(t));
 	      print(\"AFTER\",  volume(solidify(t)));" "$SRAVA" 2>&1)
@@ -164,7 +166,7 @@ arity)
 	OK=1
 	for K in 2 3 4 8; do
 		rm -rf "$D-k$K"
-		OUT=$(SRAVA_CACHE_DIR="$D-k$K" SRAVA_SOURCE="module(\"geogram.so\",{priority:99,arity:$K}); var v=[]; $SRC print(volume(union(v)));" "$SRAVA" 2>&1)
+		OUT=$(SRAVA_CACHE_DIR="$D-k$K" SRAVA_SOURCE="module(\"geogram.so\",{priority:99,arity:$K});module(\"geomutils.so\",{}); var v=[]; $SRC print(volume(union(v)));" "$SRAVA" 2>&1)
 		V=$(echo "$OUT" | sed -n 's/.*result value=\([0-9.]*\).*/\1/p')
 		M=$(echo "$OUT" | sed -n 's/.*cache: [0-9]* hit(s), \([0-9]*\) miss.*/\1/p')
 		echo "  arity=$K value=$V miss=$M"
@@ -187,7 +189,7 @@ fatal)
 	# ---- ① threads:1 = 呼び出しスレッドで投げるので **モジュールが捕まえられる** ----
 	#   ここが固定したい本体: geogram の理由が srava のエラー文にそのまま載ること。
 	rm -rf "$D-f1"
-	OUT1=$(SRAVA_CACHE_DIR="$D-f1" SRAVA_SOURCE="module(\"geogram.so\",{priority:99,threads:1});
+	OUT1=$(SRAVA_CACHE_DIR="$D-f1" SRAVA_SOURCE="module(\"geogram.so\",{priority:99,threads:1});module(\"geomutils.so\",{});
 	       print(volume($BAD));" "$SRAVA" 2>&1)
 	if echo "$OUT1" | grep -q 'closed unexpectedly'; then
 		echo "FAIL: threads:1 で agent ごと死んだ (モジュールの catch が効いていない)"
@@ -210,7 +212,7 @@ fatal)
 	#   (2026-08-26。従来は ts2System の efd が nullptr = ts2IOdevNull へ捨てられていた)。
 	#   ★ 固定するのは geogram の文言ではなく「**srava が agent の stderr を出す**」こと。
 	rm -rf "$D-fd"
-	OUT2=$(SRAVA_CACHE_DIR="$D-fd" SRAVA_SOURCE="module(\"geogram.so\",{priority:99});
+	OUT2=$(SRAVA_CACHE_DIR="$D-fd" SRAVA_SOURCE="module(\"geogram.so\",{priority:99});module(\"geomutils.so\",{});
 	       print(volume($BAD));" "$SRAVA" 2>&1)
 	if echo "$OUT2" | grep -q 'closed unexpectedly'; then
 		echo "FAIL: 既定で原因不明のまま落ちた (agent closed unexpectedly)"; echo "$OUT2"; OK=0

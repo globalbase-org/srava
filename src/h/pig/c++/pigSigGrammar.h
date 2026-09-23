@@ -49,6 +49,7 @@ split_csv(const std::string& s, std::vector<std::string>& v)
  *
  *   固定形     "(a,b)->c"           SK_FIXED   位置と個数が確定
  *   繰り返し形 "(f…,{a,b}...)->r"   SK_REPEAT  末尾スロットが 1 個以上。**分解も昇格もしない**
+ *   ★ 可変部の末尾に "[]" を足すと **cache の配列 1 個でも渡せる** ("{a,b}...[]->r")。#3511
  *   fold 形    "(f…,[a,b](N))->a"   SK_FOLD    2〜N 項。set[0] = **主型**。木に分解してよい
  *
  * ★ 旧記法 "T..." は "{T}..." の糖衣 (§7) → 既存の sig は 1 文字も書き換えずに通る。
@@ -62,6 +63,24 @@ struct pigSigLine {
 	std::vector<std::string> fixed;   /* 前置の固定部 (位置で照合) */
 	std::vector<std::string> set;     /* bracket/brace の型集合。★ SK_FOLD は set[0] が主型 */
 	int                      arity;   /* SK_FOLD の N。-1 = '*' (上限なし) */
+	/* ★★ #3511 (2026-09-13): 可変部の末尾に @[]@ を書くと **cache の配列 1 個でも渡せる**。
+	 *   ⇒ 断面を式で生成する loft のような op で "loft(a,b,c,…)" と手で並べずに済む。
+	 *   展開は **評価時** (pigfModuleAgent::try_shortcircuit の頭) が行う。パーサは op 名を
+	 *   知らないままでよい (従来 union/intersection/combine はパーサに **直書き**されていた)。
+	 *   ⚠ 展開後は普通の n 項呼び出しと **同じ** なので、キャッシュキーも routing も変わらない。 */
+	bool                     array_ok;
+	/* ★★ 2026-09-13 (#3528・ひさ設計): fold 形の "(N!)" = **木に分解してはいけない**。
+	 *   「主型で振り分ける」(fold 形) と「木に分解してよい」は **別の性質**で、いままで前者が
+	 *   後者を含意していた。hull がその含意の成り立たない最初の例:
+	 *     ・入力から **頂点しか使わない** ので、分解すると「点 → メッシュを作って cache へ書き、
+	 *       読み戻して面を捨てて頂点に戻す」を段ごとに繰り返す = 作ったものを次の段で捨てる
+	 *     ・⚠⚠ それ以前に **落ちる** — 退化検査 (立体にならない入力を断る) は部分集合について
+	 *       閉じていない。立方体の 8 頂点を 2 点ずつ 4 群に割ると、群の hull は同一平面になり
+	 *       「the convex hull is not a solid」で明示エラーになる (全体は立体なのに)。
+	 *   ⇒ 繰り返し形 {…}... にすれば分解は止まるが、それは **主型を失う** (= (mf,mf) を
+	 *     manifold へ渡す振り分けが priority 決着に落ちる)。両方要るので印を分けた。
+	 *   ★ sig は文字列なので **ABI は変わらない**。印を知らない古い .so は「印なし = 従来どおり」。 */
+	bool                     nosplit; /* SK_FOLD の "!"。true = 分解禁止 */
 	std::string              out;     /* 出力型 ("value" / "ref" もここに来る) */
 	bool                     bad;     /* 記法エラー = 照合対象外 (ロード時検査が名指しする) */
 };
@@ -71,6 +90,8 @@ inline void
 parse_sigline(const std::string& s, pigSigLine& L)
 {
 	L.kind = SK_FIXED; L.fixed.clear(); L.set.clear(); L.arity = -1; L.out.clear(); L.bad = false;
+	L.array_ok = false;
+	L.nosplit = false;
 	size_t arrow = s.find("->");
 	std::string lhs = ( arrow == std::string::npos ) ? s : s.substr(0, arrow);
 	L.out = ( arrow == std::string::npos ) ? std::string() : s.substr(arrow + 2);
@@ -115,13 +136,24 @@ parse_sigline(const std::string& s, pigSigLine& L)
 			if ( cp == std::string::npos || cp < 2 ) { L.bad = true; return; }
 			split_csv(tk.substr(1, cp - 1), L.set);
 			std::string tail = tk.substr(cp + 1);
+			/* ★ #3511: 末尾の "[]" = **cache の配列 1 個でも渡せる** の宣言。剥がしてから続ける。 */
+			if ( tail.size() >= 2 && tail.compare(tail.size() - 2, 2, "[]") == 0 ) {
+				L.array_ok = true;
+				tail = tail.substr(0, tail.size() - 2);
+			}
 			if ( tk[0] == '{' ) {
 				if ( tail != "..." ) { L.bad = true; return; }
 				L.kind = SK_REPEAT;
 			} else {
-				/* fold 形の "(N)": N = 2 以上の整数、または '*' = 上限なし。 */
+				/* fold 形の "(N)": N = 2 以上の整数、または '*' = 上限なし。
+				 * ★ 末尾の '!' = **分解禁止** ("(*!)" / "(32!)")。上の nosplit の注記を参照。 */
 				if ( tail.size() < 3 || tail[0] != '(' || tail[tail.size() - 1] != ')' ) { L.bad = true; return; }
 				std::string n = tail.substr(1, tail.size() - 2);
+				if ( ! n.empty() && n[n.size() - 1] == '!' ) {
+					L.nosplit = true;
+					n.erase(n.size() - 1);
+					if ( n.empty() ) { L.bad = true; return; }
+				}
 				if ( n == "*" )
 					L.arity = -1;
 				else {
@@ -132,9 +164,14 @@ parse_sigline(const std::string& s, pigSigLine& L)
 			}
 			for ( size_t i = 0 ; i < L.set.size() ; ++i )
 				if ( L.set[i].empty() ) { L.bad = true; return; }
-		} else if ( tk.size() > 3 && tk.compare(tk.size() - 3, 3, "...") == 0 ) {
+		} else if ( ( tk.size() > 3 && tk.compare(tk.size() - 3, 3, "...") == 0 )
+		         || ( tk.size() > 5 && tk.compare(tk.size() - 5, 5, "...[]") == 0 ) ) {
 			if ( ! last ) { L.bad = true; return; }
-			L.set.push_back(tk.substr(0, tk.size() - 3));   /* ★ "T..." = "{T}..." の糖衣 */
+			size_t cut = tk.size() - 3;
+			if ( tk.compare(tk.size() - 5 < tk.size() ? tk.size() - 5 : 0, 5, "...[]") == 0 ) {
+				L.array_ok = true; cut = tk.size() - 5;
+			}
+			L.set.push_back(tk.substr(0, cut));             /* ★ "T..." = "{T}..." の糖衣 */
 			L.kind = SK_REPEAT;
 		} else {
 			L.fixed.push_back(tk);
@@ -191,6 +228,27 @@ sigline_arity_ok(const pigSigLine& L, int nin)
 		if ( L.arity >= 0 && r > L.arity ) return false;
 	}
 	return true;
+}
+
+
+/* ★★ #3554 最後の段 (2026-09-19): sig が **その出力型を産むか**。
+ *   旧 pigfModuleAgent::sig_str_produces。cast / import のマッチ関数が「目標型 (または
+ *   拡張子が言う型) が *この行の* sig の出力型か」を見るのでここへ出した。 */
+inline int
+pig_sig_produces(const char *sig, const char *type)
+{
+	if ( sig == 0 || type == 0 || type[0] == '\0' ) return 0;
+	std::string all = sig;
+	size_t sp = 0;
+	while ( sp <= all.size() ) {
+		size_t sc = all.find(';', sp);
+		std::string one = all.substr(sp, ( sc == std::string::npos ? all.size() : sc ) - sp);
+		pigSigLine L; parse_sigline(one, L);
+		if ( L.out == type ) return 1;
+		if ( sc == std::string::npos ) break;
+		sp = sc + 1;
+	}
+	return 0;
 }
 
 #endif

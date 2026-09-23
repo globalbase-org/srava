@@ -56,7 +56,7 @@ var centerline = \(ctrl, steps) {
     }
     cl;
 };
-var make_pipe = \(ctrl) { tube(map(centerline(ctrl, 16), \(p){ [p, R0]; }), 24); };
+var make_pipe = \(ctrl) { tube_ruled(map(centerline(ctrl, 16), \(p){ [p, R0]; }), 24); };
 
 // ---- 1) 調整前: 自己接近を検出 ----------------------------------------------
 var before = pipe_proximity(ctrl0, [R0, 0.0], 8.0);

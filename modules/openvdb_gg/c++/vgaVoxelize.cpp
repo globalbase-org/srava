@@ -6,6 +6,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"vd/c++/vdGrid.h"
+#include	"vd/c++/vdGridVdb.h"   /* ★ #3545 段 5: 橋は OpenVDB 型を扱うので読んでよい */
 #include	"vd/c++/vdMeshVoxelize.h"   /* ★ #3491: 空洞を保つ共通の入口 */
 #include	<stdio.h>   /* ★ #3491: 退避したときの WARN (PIG_SEP_LOG で採取可) */
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
@@ -130,17 +131,23 @@ vgaVoxelize_::compute()
 	 *   interiorTest を渡して直す。理由と実測は vd/c++/vdMeshVoxelize.h の冒頭。 */
 	long fellBack = 0;
 	openvdb::FloatGrid::Ptr g =
-	    vd_mesh_to_levelset(points, tris, *xform, (float)openvdb::LEVEL_SET_HALF_WIDTH, &fellBack);
+	    vd_mesh_to_levelset(points, tris, *xform, (float)openvdb::LEVEL_SET_HALF_WIDTH,
+	                        &fellBack, &brk_);   /* ★ #3498 */
 	if ( ! g ) {
+		if ( (result = vd_abort_err(brk_, "voxelize")) != thNULL ) return;   /* ★ #3498 */
 		result = vga_err(thNEW(stdString,("voxelize: meshToLevelSet failed")));
 		return;
 	}
+	/* ★ #3498: meshToVolume は中断されると **途中までの格子**を返すことがある (null とは
+	 *   限らない)。半分だけボクセル化された形をキャッシュへ焼き付けないよう、null でなくても
+	 *   旗を見る。 */
+	if ( (result = vd_abort_err(brk_, "voxelize")) != thNULL ) return;
 	if ( fellBack > 0 )   /* 閉じた向きの揃った曲面ではない = 従来経路で作った (空洞は埋まる) */
 		::fprintf(stderr, "[voxelize] WARN: %ld column(s) with non-zero winding sum "
 		                  "(input is not a closed, consistently oriented surface); "
 		                  "internal cavities will be filled\n", fellBack);
 	out = thNEW(vdGrid,());
-	out->set_grid(g);
+	out->box().g = g;
 	out->set_normalized(true);   /* meshToVolume は真の符号付き距離場を作る */
 	}, vdwhy) )
 		result = vga_err(thNEW(stdString,(vdwhy.c_str())));

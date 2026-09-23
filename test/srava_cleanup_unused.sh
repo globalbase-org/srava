@@ -7,6 +7,8 @@
 set -e
 SRAVA="$1"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 rm -rf "$D"
 
 "$SRAVA" >/dev/null 2>&1                       # warm: used キャッシュ生成

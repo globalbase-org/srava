@@ -55,7 +55,7 @@ srava_register_cgal_test_fixture(sPtr<pigModuleRegistry> reg)
 	 *     見分けられなくなる (cgatsagent の T1/T3 が落ちて気づいた)。 */
 	static const pigWireClass cgal_test_wire = { "cgMesh(test fixture)", 0, 0, 0, 0 };
 	static const pigModuleType cgal_test_provides[] = {
-		{ &cgal_test_wire, "cg-mesh3d,cg-cross2d", 0 /* tags: create が無いので列挙しない */ },
+		{ &cgal_test_wire, "cg-mesh3d,cg-cross2d,cg-face3d", 0 /* tags: create が無いので列挙しない */ },
 		{ 0, 0, 0 },
 	};
 	/* ★ #3466: 位置指定初期化子をやめた (フィールドが増減すると静かにずれるため)。
@@ -70,7 +70,7 @@ srava_register_cgal_test_fixture(sPtr<pigModuleRegistry> reg)
 		.exec_default  = EXEC_PROCESS,
 		.ops           = cgal_test_ops,
 		.n_ops         = (int)(sizeof cgal_test_ops / sizeof cgal_test_ops[0]),
-		.import_exts   = "off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-cross2d",
+		.import_exts   = "off:cg-mesh3d,stl:cg-mesh3d,obj:cg-mesh3d,ply:cg-mesh3d,svg:cg-cross2d,dxf:cg-face3d",
 		.export_exts   = "off,stl,obj,ply,3mf,amf,svg,dxf",
 		.provides      = cgal_test_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
 		.cache_version = 1,   /* ★ v18 (#3466): 結果の版 (手で上げる) */

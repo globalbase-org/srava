@@ -91,11 +91,77 @@ static sPtr<pigData> mk_async(sPtr<pigData> arr, sPtr<pigData> syncStmt) {
 	return n;
 }
 
+/* ★★ #3482: error() が **catch 本体の中だけ**であることを静的に見るための木歩き。
+ * mark=1 … catch 本体を辿って error() ノードに印を付ける(mk_trycatch から)
+ * mark=0 … 印の無い error() を 1 つ返す(プログラム全体を見る。見つかれば パースエラー)
+ * ⇒ 呼べる場所が構文で決まるので、綴り間違いや置き場所の誤りが **実行前に**分かる。
+ * ⚠ 辿るのは演算子の args / module 指名 / lambda リテラルの body の 3 経路。パース木は
+ *   環を持たない(desugar もノードを使い回すだけ)ので深さは入れ子の深さで止まる。 */
+static sPtr<pigData> walk_error(sPtr<pigData> n, int mark) {
+	if ( ! n.is_notNull() ) return thNULL;
+	sPtr<pigDataOperatorError> e = sPtr<pigDataOperatorError>::d_cast(n);
+	if ( e.is_notNull() ) {
+		if ( mark ) e->set_in_catch(1);
+		else if ( ! e->get_in_catch() ) return n;
+	}
+	sPtr<pigDataOperator> op = sPtr<pigDataOperator>::d_cast(n);
+	if ( op.is_notNull() ) {
+		for ( int i = 0 ; i < op->argc() ; ++i ) {
+			sPtr<pigData> r = walk_error(op->arg(i), mark);
+			if ( r.is_notNull() ) return r;
+		}
+		sPtr<pigData> r = walk_error(op->get_module_expr(), mark);
+		if ( r.is_notNull() ) return r;
+	}
+	sPtr<pigDataLambdaExpr> lx = sPtr<pigDataLambdaExpr>::d_cast(n);
+	if ( lx.is_notNull() ) return walk_error(lx->get_body(), mark);
+	return thNULL;
+}
+
+/* try 文 `try { s1 } [catch { s2 }]` → pigDataTryCatch(#3482)。
+ * ★ 本体は両方とも {} 必須(async と同じ)。try が持つのは制御の分岐ではなく
+ *   「{} で囲った範囲 = 待ちリストのスコープ」そのものだから。
+ * ★ 副作用として catch 本体の error() に印を付ける(上の walk_error)。 */
+static sPtr<pigData> mk_trycatch(sPtr<pigData> s1, sPtr<pigData> s2) {
+	sPtr<pigDataTryCatch> n = thNEW(pigDataTryCatch,());
+	n->pushArg(s1);
+	if ( s2.is_notNull() ) {
+		n->pushArg(s2);
+		n->set_has_catch(1);
+		(void) walk_error(s2, 1);
+	}
+	if ( s1.is_notNull() && s1->get_info().is_notNull() ) n->set_info(s1->get_info());
+	return n;
+}
+
+/* throw 式; — 値からエラーを復元して発生させる文 (#3482)。`exit` と同じく「文だが中身は演算子」。 */
+static sPtr<pigData> mk_throw(sPtr<pigData> e) {
+	sPtr<pigDataOperatorThrow> n = thNEW(pigDataOperatorThrow,());
+	if ( e.is_notNull() ) n->pushArg(e);
+	if ( e.is_notNull() && e->get_info().is_notNull() ) n->set_info(e->get_info());
+	return n;
+}
+
+/* プログラム全体(MODE_PROGRAM の入口)。文の並びを seq にしたうえで、**catch の外の error()**
+ * を静的に弾く。⚠ ここが唯一の検査地点 — 個々の規則では「いま catch の中か」が分からない
+ * (ボトムアップなので catch 本体の還元は中身より後)。 */
+static sPtr<pigData> mk_program(sPtr<pigData> arr) {
+	sPtr<pigData> seq = mk_seq(arr);
+	sPtr<pigData> stray = walk_error(seq, 0);
+	if ( stray.is_notNull() )
+		return thNEW(pigDataError,("error() is only valid inside a catch block",
+		                           stray->get_info()));
+	return seq;
+}
+
 #else  /* SRAVA_VALUE_ONLY: PROGRAM ルールは到達不能だがアクション本体は生成されるためスタブが要る。 */
 static sPtr<pigData> mk_seq(sPtr<pigData>) { return thNULL; }
 static sPtr<pigData> mk_assign(int, sPtr<pigData>, sPtr<pigData>) { return thNULL; }
 static sPtr<pigData> mk_assign_list(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
 static sPtr<pigData> mk_async(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
+static sPtr<pigData> mk_trycatch(sPtr<pigData>, sPtr<pigData>) { return thNULL; }
+static sPtr<pigData> mk_throw(sPtr<pigData>) { return thNULL; }
+static sPtr<pigData> mk_program(sPtr<pigData>) { return thNULL; }
 #endif
 
 /* 添字/メンバ参照 a[ix] / a.key → pigDataOperatorIndex(base, key)。 */
@@ -463,6 +529,25 @@ pig_push_rest_with_defaults(sPtr<pigDataFunction<pigfModuleAgent> > f,
 		f->pushArg(defs[i - from]);
 }
 
+/* ★★ #3570 (繰り込み・2026-09-21): **planner 側 op の余分な引数を黙って捨てない**。
+ *   @length@ / @float@ / @int@ / @module@ / @module_loaded@ / @modules@ / @type_of@ は
+ *   routing に乗らない (記述子を持たない planner 側の op) ので、arity を見るのは
+ *   *ここしかない*。以前は @if ( na >= 1 ) pushArg(引数0)@ と **添字直書き**で積んでおり、
+ *   index 1 以降が誰にも気づかれずに消えていた (@length([1,2],9)@ が通っていた)。
+ *   ⚠ module op 側 (volume/area/…) は layer 3 → routing の arity が見るのでここでは扱わない。 */
+static sPtr<pigData>
+planner_too_many(const char *nm, int takes, int got, sPtr<pigInfo> ci)
+{
+	char buf[160];
+	/* ★ 多い / 少ない で文言を分ける (module op 側の arg_kind_violation と同じ言い方)。
+	 *   ⚠ 「多すぎ」で 0 個を報告すると直す向きが逆に読める。 */
+	if ( got > takes )
+		::snprintf(buf, sizeof buf, "%s: too many arguments (takes %d, got %d)", nm, takes, got);
+	else
+		::snprintf(buf, sizeof buf, "%s: expected %d argument(s), got %d", nm, takes, got);
+	return thNEW(pigDataError,(buf, ci));
+}
+
 static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	const char* nm = name->get_str()->get_str();
 	sPtr<pigDataArray> a = sPtr<pigDataArray>::d_cast(arglist);
@@ -471,18 +556,21 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	sPtr<pigInfo> ci = name->get_info();
 	/* length(x): array/hash の要素数(値)を返す planner 側 op(agent 不要)。 */
 	if ( ::strcmp(nm, "length") == 0 ) {
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorLength> f = thNEW(pigDataOperatorLength,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
 	/* float(x): 文字列/整数/浮動小数を浮動小数へ変換(planner 側 op・agent 不要)。 */
 	if ( ::strcmp(nm, "float") == 0 ) {
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorToFloat> f = thNEW(pigDataOperatorToFloat,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
 	/* int(x): 文字列/浮動小数/整数を整数へ変換(planner 側 op・agent 不要・浮動小数は 0 方向へ切り捨て)。 */
 	if ( ::strcmp(nm, "int") == 0 ) {
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorToInt> f = thNEW(pigDataOperatorToInt,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
@@ -491,6 +579,7 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	 * ★ 旧 load(so) は廃止 (2026-08-18)。module(so) が「未ロードなら読み込む + on にする」を
 	 *   兼ねるので、ロード専用 op を別に持つ意味が無くなった (使用実績も docs の例だけだった)。 */
 	if ( ::strcmp(nm, "module") == 0 ) {
+		if ( na > 2 ) return planner_too_many(nm, 2, na, ci);
 		sPtr<pigDataOperatorModule> f = thNEW(pigDataOperatorModule,(ci));
 		for ( int i = 0 ; i < na && i < 2 ; ++i )
 			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
@@ -499,20 +588,38 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 	/* module_loaded(so): その .so がいまロードされているか (1/0)。★ロードはしない。
 	 * module(so,"off") が実アンロードになり、未ロードへの off は明示エラーなので、その前段に使う。 */
 	if ( ::strcmp(nm, "module_loaded") == 0 ) {
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorModuleLoaded> f = thNEW(pigDataOperatorModuleLoaded,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
-	/* ★ #3477: 実行時の内省 3 本 (planner 側 op・agent 不要)。
-	 *   modules()             … いま載っているモジュールと priority ("name:priority" 空白区切り)
+	/* ★ #3477: 実行時の内省 4 本 (planner 側 op・agent 不要)。
+	 *   modules()             … いま載っているモジュール名の **配列** (dispatch 順・#3555 段5)
+	 *   modules("priority")   … 同じ並びを "name:priority" 空白区切りの文字列で (従来の形)
 	 *   type_of(x)            … x の幾何型名 ("cg-mesh3d" 等・値は "value")
+	 *   kind_of(x)            … x の値の種別 ("int"/"float"/"array"/"cache" 等・2026-09-21 追加)
 	 *   which(op[, intype..]) … その op を宣言するモジュールを priority 順に全部 ("name:prio:sig")
 	 * カーネルが混ざる式のデバッグで、毎回ソースを読まずに済ませるための手段。 */
 	if ( ::strcmp(nm, "modules") == 0 ) {
-		return thNEW(pigDataOperatorModules,(ci));
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
+		sPtr<pigDataOperatorModules> f = thNEW(pigDataOperatorModules,(ci));
+		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		return f;
 	}
 	if ( ::strcmp(nm, "type_of") == 0 ) {
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorTypeOf> f = thNEW(pigDataOperatorTypeOf,(ci));
+		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		return f;
+	}
+	/* ★ kind_of(x): 値の **種別** ("int"/"float"/"string"/"array"/"hash"/"function"/"null"/"cache")。
+	 *   type_of が答える *幾何型* の軸とは直交する (pigData.h の宣言に対応表)。 */
+	if ( ::strcmp(nm, "kind_of") == 0 ) {
+		/* ★ #3570 (繰り込み): planner 側 op は **routing に乗らない**ので arity を見るのは
+		 *   ここしかない。bench から来た時点では `if ( na >= 1 )` だけで、余分な引数を
+		 *   黙って捨てる形だった (#3570 で他の 10 本から無くしたもの)。 */
+		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
+		sPtr<pigDataOperatorKindOf> f = thNEW(pigDataOperatorKindOf,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
@@ -559,6 +666,17 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		as->set_mode(1);           /* hasSync */
 		as->set_info(ci);
 		return as;
+	}
+	/* error(): catch 本体でエラー文言を 1 件ずつ取り出す(#3482)。引数は取らない。
+	 * ★ 「catch の中でだけ」は **構文で**言い切る(mk_program の静的検査)。実行時は env から
+	 *   囲む try を **動的に**引く(定義地点ではなく呼び出し元)。 */
+	if ( ::strcmp(nm, "error") == 0 ) {
+		return thNEW(pigDataOperatorError,(ci));
+	}
+	/* destroy(): 囲む try の待ちリストへ撤収を送る (#3482 §2-B)。**終了は待たない**
+	 * (待つのは error())。戻り値は送った数。⚠ try の外は実行時エラー。 */
+	if ( ::strcmp(nm, "destroy") == 0 ) {
+		return thNEW(pigDataOperatorDestroyAgents,(ci));
 	}
 	/* gate(inp1, inp2): inp1 をそのまま返しつつ、inp1 の計算完了時に inp2 を起動(完了フック)。
 	 * tinyState helper pigfGate(mid-life 継続で起動と完了のギャップを跨ぐ)。 */
@@ -653,17 +771,32 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		return f;
 	}
 	/* transpose / cumsum / sum(planner 側 op・1引数・数値/配列)。curve の vectorized 計算の土台。 */
-	if ( ::strcmp(nm, "transpose") == 0 && na == 1 ) {
+	if ( ::strcmp(nm, "transpose") == 0 ) {
+		/* ★ #3570 (繰り込み): 以前は @&& na == 1@ で *条件そのものから外れて* layer 3 へ
+		 *   落ちていた。引数は捨てないが、文言が「その op を持つモジュールが居ない」に
+		 *   なって **直す場所を指さない** (これは planner 側の op なので記述子は無い)。
+		 *   ⇒ ここで個数を言う。 */
+		if ( na != 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorTranspose> f = thNEW(pigDataOperatorTranspose,(ci));
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
-	if ( ::strcmp(nm, "cumsum") == 0 && na == 1 ) {
+	if ( ::strcmp(nm, "cumsum") == 0 ) {
+		/* ★ #3570 (繰り込み): 以前は @&& na == 1@ で *条件そのものから外れて* layer 3 へ
+		 *   落ちていた。引数は捨てないが、文言が「その op を持つモジュールが居ない」に
+		 *   なって **直す場所を指さない** (これは planner 側の op なので記述子は無い)。
+		 *   ⇒ ここで個数を言う。 */
+		if ( na != 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorCumsum> f = thNEW(pigDataOperatorCumsum,(ci));
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
 	}
-	if ( ::strcmp(nm, "sum") == 0 && na == 1 ) {
+	if ( ::strcmp(nm, "sum") == 0 ) {
+		/* ★ #3570 (繰り込み): 以前は @&& na == 1@ で *条件そのものから外れて* layer 3 へ
+		 *   落ちていた。引数は捨てないが、文言が「その op を持つモジュールが居ない」に
+		 *   なって **直す場所を指さない** (これは planner 側の op なので記述子は無い)。
+		 *   ⇒ ここで個数を言う。 */
+		if ( na != 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorSum> f = thNEW(pigDataOperatorSum,(ci));
 		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
 		return f;
@@ -837,16 +970,23 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		f->set_info(ci);
 		return f;
 	}
-	if ( ::strcmp(nm, "area") == 0 || ::strcmp(nm, "valid") == 0
-	  || ::strcmp(nm, "volume") == 0 || ::strcmp(nm, "perimeter") == 0
-	  || ::strcmp(nm, "centroid") == 0 || ::strcmp(nm, "bbox") == 0 ) {
-		sPtr<pigDataFunction<pigfModuleAgent> > f = thNEW(pigDataFunction<pigfModuleAgent>,());
-		f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));   /* mesh */
-		f->set_op_name(thNEW(stdString,(nm)));
-		f->set_out_cache(0);   /* 値返し */
-		f->set_info(ci);
-		return f;
-	}
+	/* ★★ #3570 (繰り込み・2026-09-21): **measure 系 6 本 (area / valid / volume /
+	 *   perimeter / centroid / bbox) のハードコードを撤去した**。
+	 *
+	 *   ここに在ったのは「第 0 引数だけを積んで固定 arity のノードを組み直す」形で、
+	 *   **index 1 以降を黙って捨てて**いた (@volume(box(2,2,2), 9)@ が通っていた)。
+	 *   arity 検査が見るのは *組み上がったノードの args* なので、検査より上流で消えた
+	 *   引数は誰にも気づかれない — #3474 が同じ型を指摘して一部だけ潰していた残り。
+	 *
+	 *   ★ いま撤去できる理由 (2026-09-21 に確かめた):
+	 *     ① 糖衣は **一切していない** (既定値の穴埋めも引数の組み替えも無い) = 効果は捨てることだけ
+	 *     ② @set_out_cache(0)@ で「値返し」を教える必要があったが、6 本とも記述子に
+	 *        @->value@ が在るので layer 3 が eval 時に確定できる (記述子が @->value@ を
+	 *        言えなかった頃の残骸だった。fd97c92 2026-06-08 に入り、layer 3 は 4393b7f
+	 *        2026-08-08 と **2 か月後**)
+	 *     ③ 宣言者が居ない構成での診断 (@points.so@ だけ読んで @area@) は #3570 段3.5 で
+	 *        layer 3 側に入った ⇒ 「undefined variable」に落ちない
+	 *   ⇒ 下の layer 3 (generic) が受け、**引数は 1 つも捨てずに** routing の arity へ届く。 */
 	/* polygon / line: 点列を取る 2D op。2 形式を許す(点の配列 1 個 / 点を別々の引数で)。
 	 * polygon=塗り多角形、line=ガイド(開ポリライン)。内部は常に「点の配列 1 個」を agent へ。 */
 	if ( ::strcmp(nm, "polygon") == 0 ) {
@@ -1137,7 +1277,7 @@ static sPtr<pigData> mk_rot_op(sPtr<pigData>, sPtr<pigData>)    { return thNULL;
 /* 2 入口: 先頭センチネルトークン(レキサが mode に応じて注入)で切替。
  * MODE_PROGRAM → 文の並び(ソース)。MODE_VALUE → 単一値(ワイヤ/キャッシュの値リテラル)。 */
 input ::= MODE_PROGRAM stmt_list(L).
-		{ periArg->parseAccept(mk_seq(L)); }
+		{ periArg->parseAccept(mk_program(L)); }   /* ★ #3482: catch 外の error() を静的に弾く */
 input ::= MODE_VALUE value(V).
 		{ periArg->parseAccept(V); }
 
@@ -1164,6 +1304,16 @@ stmt(A) ::= VAR LBRACK namelist(NL) RBRACK ASSIGN arhs(E) SEMI.
 		{ A = mk_assign_list(NL, E); }
 stmt(A) ::= IDENT(N) ASSIGN arhs(E) SEMI.
 		{ A = mk_assign(PIG_ASSIGN_SET, N, E); }
+/* ★★ #3555 段5 (ひさ 2026-09-21): `use 式;` = `var USE_MODULES = 式;` の糖衣。
+ *   候補列を敷くのは「この先どのカーネルで解くか」の宣言なので、予約変数の名前を毎回書かせず
+ *   1 語で言えるようにする。`use modules();` / `use ["occt","cgal"];` / `use "";`(指名なしへ戻す)。
+ *   ⚠ **DEF (var 相当) であって SET ではない** — ブロック / lambda の中だけ差し替えて、
+ *     抜ければ外の値へ戻る、という USE_MODULES の肝がこれで付く (env の親チェーン)。
+ *     ★ CACHE_DIR / EXIT_CODE が「var を付けるな」なのと **逆**なのはここ: あちらは planner が
+ *       *自分の* env を最後に読むので子スコープの定義が届かないが、USE_MODULES は
+ *       *使用地点の* env から親へ辿って読まれる。 */
+stmt(A) ::= USE arhs(E) SEMI.
+		{ A = mk_assign(PIG_ASSIGN_DEF, thNEW(pigDataString,("USE_MODULES")), E); }
 
 /* 連鎖代入 a = b = c = expr(右結合)。内側 IDENT=... は SET 代入で、評価すると代入先 varref を
  * 返す(pigfAssign の set_result)ので、外側はその値を受け取る → a,b,c すべてに expr の値が入る。
@@ -1178,6 +1328,7 @@ stmt(A) ::= RETURN expr(E) SEMI.    { A = mk_return(E); }       /* return 式 */
 stmt(A) ::= RETURN SEMI.            { A = mk_return(thNULL); }   /* return(値なし=null) */
 stmt(A) ::= BREAK SEMI.             { A = mk_control(CTRL_BREAK); }
 stmt(A) ::= CONTINUE SEMI.          { A = mk_control(CTRL_CONTINUE); }
+stmt(A) ::= THROW expr(E) SEMI.     { A = mk_throw(E); }         /* ★ #3482: 値からエラーを復元して発生 */
 stmt(A) ::= EXIT expr(E) SEMI.      { A = mk_exit(E); }          /* exit 式(メッセージ)→ プログラム終了 */
 stmt(A) ::= EXIT SEMI.              { A = mk_exit(thNULL); }     /* exit(メッセージなし) */
 stmt(A) ::= expr_ns(E) SEMI.                      /* 式文。先頭 { 不可(= ブロックに回す) */
@@ -1188,6 +1339,15 @@ stmt(A) ::= ASYNC LBRACE stmt_list(L) RBRACE.      /* async 文(sync 無し): bo
 		{ A = mk_async(L, thNULL); }
 stmt(A) ::= ASYNC LBRACE stmt_list(L) SYNC COLON stmt(S) RBRACE.   /* async 文 + sync:(末尾 1 文・発行順整列) */
 		{ A = mk_async(L, S); }
+/* ★★ #3482: try 文。本体は両方とも {} 必須(async 側に揃える)。
+ *   ・dangling-catch が文法から消える(catch 本体がブロックに固定されるので `catch try {…}` が
+ *     書けず、%nonassoc による shift 固定 = IFX/ELSE と同型 が要らない)
+ *   ・error() の「catch の中でだけ」を構文で言い切れる(mk_program の静的検査の対象が明確)
+ *   ・catch 本体が mk_seq = pigfSequence になるので **env が必ず作られる**(tryPtr の引き継ぎ点) */
+stmt(A) ::= TRY LBRACE stmt_list(T) RBRACE.
+		{ A = mk_trycatch(mk_seq(T), thNULL); }
+stmt(A) ::= TRY LBRACE stmt_list(T) RBRACE CATCH LBRACE stmt_list(C) RBRACE.
+		{ A = mk_trycatch(mk_seq(T), mk_seq(C)); }
 stmt(A) ::= IF LPAREN expr(C) RPAREN stmt(T). [IFX]
 		{ A = mk_if(C, T, thNULL); }
 stmt(A) ::= IF LPAREN expr(C) RPAREN stmt(T) ELSE stmt(E).
@@ -1245,6 +1405,10 @@ expr(A) ::= IDENT(N).               { A = mk_varref(N); }
 expr(A) ::= INT(V).                 { A = V; }
 expr(A) ::= FLOAT(V).               { A = V; }
 expr(A) ::= STRING(V).              { A = V; }
+/* ★★ #3567 (ひさ 2026-09-21): `null` リテラル。値としての null は前から在ったが **書けなかった**。
+ *   pigDataNull に cmp が付いたので `x == null` が判定になる ⇒ 真偽 (`if (x)`) だけでは
+ *   null / 0 / "" / [] / {} が全部ひとまとめになる問題が解ける。 */
+expr(A) ::= NULLV.                  { A = thNEW(pigDataNull,()); }
 expr(A) ::= LBRACK arglist(L) RBRACK.  { A = mk_arrayop(L); }   /* array 構築(要素を評価地点 env で解決) */
 expr(A) ::= LBRACE RBRACE.             { A = thNEW(pigDataOperatorHash,()); }   /* 空 hash {} */
 expr(A) ::= LBRACE hashbody(B) RBRACE. { A = hash_scoped(B); }   /* hash 構築 {k:式,..}。兄弟キー参照可(逐次スコープ) */
@@ -1303,6 +1467,7 @@ expr_ns(A) ::= IDENT(N).               { A = mk_varref(N); }
 expr_ns(A) ::= INT(V).                 { A = V; }
 expr_ns(A) ::= FLOAT(V).               { A = V; }
 expr_ns(A) ::= STRING(V).              { A = V; }
+expr_ns(A) ::= NULLV.                  { A = thNEW(pigDataNull,()); }   /* ★ #3567 */
 expr_ns(A) ::= LBRACK arglist(L) RBRACK.  { A = mk_arrayop(L); }   /* array 構築(先頭 [ は曖昧でない) */
 expr_ns(A) ::= LAMBDA LPAREN paramlist(P) RPAREN LBRACE stmt_list(L) RBRACE.   /* 先頭 \ は曖昧でない */
 		{ A = mk_lambda(P, mk_seq(L)); }
@@ -1314,7 +1479,11 @@ value(A) ::= FLOAT(V).   { A = V; }
 value(A) ::= MINUS INT(V).   { A = mk_neg(V); }     /* 負数リテラル(serialize の "-1" を round-trip) */
 value(A) ::= MINUS FLOAT(V). { A = mk_neg(V); }
 value(A) ::= STRING(V).  { A = V; }
-value(A) ::= IDENT(N).   { A = mk_varref(N); }      /* null/true 等の素トークンも一応(将来) */
+/* ★ #3567: serialize() が吐く "null" の綴りを VALUE モードでも読めるようにした。
+ *   従来はここが IDENT へ落ちて mk_varref("null") = 未定義変数になる形だった。
+ *   ⚠ この経路を実際に踏む式は見つけられていない — 机上の穴を塞いだだけで、実測はしていない。 */
+value(A) ::= NULLV.      { A = thNEW(pigDataNull,()); }
+value(A) ::= IDENT(N).   { A = mk_varref(N); }      /* true 等の素トークンも一応(将来) */
 value(A) ::= LBRACK vlist(L) RBRACK.       { A = L; }
 value(A) ::= LBRACE RBRACE.                { A = thNEW(pigDataHash,()); }
 value(A) ::= LBRACE vhash(B) RBRACE.       { A = B; }

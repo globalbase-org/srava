@@ -8,6 +8,8 @@
 #     代わりに **閉形式との一致**で検証する (カーネル一致より強い)。
 SRAVA="${1:?srava binary not given}"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 NG=0
 MOD='include "module/all.sra";'
 
@@ -32,8 +34,8 @@ ck "円錐台の閉形式" \
    18.325957145940461 1e-6
 
 # ③ ★ メッシュ側は segs を上げると occt の値へ収束する (= 別の形であることの示し方)。
-C8=$(val "print(\"VAL\", volume(\"cgal\"::tube($STRAIGHT, 8)));")
-C512=$(val "print(\"VAL\", volume(\"cgal\"::tube($STRAIGHT, 512)));")
+C8=$(val "print(\"VAL\", volume(\"cgal\"::tube_ruled($STRAIGHT, 8)));")
+C512=$(val "print(\"VAL\", volume(\"cgal\"::tube_ruled($STRAIGHT, 512)));")
 if [ -n "$C8" ] && [ -n "$C512" ]; then
 	R=$(awk -v a="$C8" -v b="$C512" -v x=7.853981633974483 \
 	    'BEGIN{ da=(x-a); db=(x-b); if(da<0)da=-da; if(db<0)db=-db; print (db<da/10)?0:1 }')

@@ -72,7 +72,7 @@ for (si = 0; si < length(segs); si = si + 1) {
 }
 
 var path = map(cl, \(p){ [p, R0]; });                    // [x,y,z] → [[x,y,z], R0]
-var pipe = tube(path, 24);
+var pipe = tube_ruled(path, 24);
 
 // ---- 3) プラグインが報告した接近点に球マーカ ---------------------------------
 //   各 hit の pA / pB(接近している両壁面の点)に赤い小球を置く。

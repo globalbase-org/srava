@@ -46,7 +46,7 @@ var centerline = \(ctrl, steps) {
     }
     cl;
 };
-var make_pipe = \(ctrl) { tube(map(centerline(ctrl, 16), \(p){ [p, R0]; }), 24); };
+var make_pipe = \(ctrl) { tube_ruled(map(centerline(ctrl, 16), \(p){ [p, R0]; }), 24); };
 
 // ---- 1) N 体近接検出 --------------------------------------------------------
 var hits = pipe_scene_proximity(bodies, 8.0);

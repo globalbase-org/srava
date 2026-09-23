@@ -21,7 +21,6 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"vd/c++/vdGrid.h"
-#include	"vd/c++/vdMeshVoxelize.h"   /* ★ #3491: 空洞を保つ共通の入口 */
 #include	<stdio.h>
 #include	"vd/c++/vdArena.h"   /* ★ #3441: op あたりの TBB 予算 */
 #include	"ts2/c++/stdString.h"
@@ -94,43 +93,25 @@ vdaRenormalize_::compute()
 	vdGrid::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
-	if ( ! in.is_notNull() || ! in->grid() ) {
+	if ( ! in.is_notNull() || ! in->has_grid() ) {
 		result = vda_err(thNEW(stdString,("renormalize: needs an openvdb grid")));
 		return;
 	}
 	/* 第 2 引数 = 帯の半幅 (voxel 単位・省略時は OpenVDB の既定 3)。offset を大きく取るときに
 	 * 広げる。0 以下は既定扱い。 */
 	double hw = ( na > 1 ) ? (*args)[1]->get_flt() : 0.0;
-	float  halfWidth = ( hw > 0 ) ? (float)hw : (float)openvdb::LEVEL_SET_HALF_WIDTH;
-
-	/* ★★ #3491 (2026-09-06): tools::levelSetRebuild を直接呼ばない。
-	 *   中身は volumeToMesh → meshToVolume の往復で、**メッシュ → 距離場の側が内部空洞を
-	 *   埋める** (これが #3489 の真犯人でもあった)。同じ往復を自前で回し、
-	 *   メッシュ → 距離場だけを空洞を保つ共通の入口 (vd_mesh_to_levelset) に差し替える。
-	 *   ⚠ volumeToMesh は四角形も出すので、三角形へ割ってから渡す。 */
-	std::vector<openvdb::Vec3s> pts;
-	std::vector<openvdb::Vec3I> tris;
-	std::vector<openvdb::Vec4I> quads;
-	openvdb::tools::volumeToMesh(*in->grid(), pts, tris, quads, /*isovalue=*/0.0);
-	tris.reserve(tris.size() + 2*quads.size());
-	for ( size_t i = 0 ; i < quads.size() ; ++i ) {
-		const openvdb::Vec4I &q = quads[i];
-		tris.push_back(openvdb::Vec3I(q[0], q[1], q[2]));
-		tris.push_back(openvdb::Vec3I(q[0], q[2], q[3]));
-	}
-	long fellBack = 0;
-	openvdb::FloatGrid::Ptr g =
-	    vd_mesh_to_levelset(pts, tris, in->grid()->transform(), halfWidth, &fellBack);
-	if ( ! g ) {
-		result = vda_err(thNEW(stdString,("renormalize: levelSetRebuild failed")));
+	/* ★ #3545 段 5: 実体 (volumeToMesh → vd_mesh_to_levelset の往復) は **幾何 lib 側** へ移した。
+	 *   ⇒ この TU は OpenVDB のヘッダを引かない。
+	 *   ⚠ 中断の判定は従来どおりここ — meshToVolume は中断されると **途中までの格子**を返す
+	 *     ことがある (null とは限らない) ので、null でなくても旗を見る (#3498)。
+	 *   ⚠ 空洞を保つ理由と volumeToMesh に中断点が無い件は vdGrid::op_renormalize の注記。 */
+	const char *vwhy = 0;
+	out = in->op_renormalize(hw, &brk_, &vwhy);
+	if ( (result = vd_abort_err(brk_, "renormalize")) != thNULL ) return;
+	if ( ! out.is_notNull() ) {
+		result = vda_err(thNEW(stdString,( vwhy ? vwhy : "renormalize: failed" )));
 		return;
 	}
-	if ( fellBack > 0 )
-		::fprintf(stderr, "[renormalize] WARN: %ld column(s) with non-zero winding sum "
-		                  "(isosurface is not a closed, consistently oriented surface); "
-		                  "internal cavities will be filled\n", fellBack);
-	out = thNEW(vdGrid,());
-	out->set_grid(g);
 	out->set_normalized(true);   /* 作り直した = |grad| = 1 が回復した */
 	}, vdwhy) )
 		result = vda_err(thNEW(stdString,(vdwhy.c_str())));

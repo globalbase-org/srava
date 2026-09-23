@@ -34,7 +34,7 @@
  *   - pigDataCache の global dedup list は未実装。
  */
 #include	"pig/c++/pigfFunction.h"
-#include	"pig/c++/ptsApplication.h"   /* ptsApp->agent_enter/leave/set_agentError(全 agent 集約) */
+#include	"pig/c++/ptsApplication.h"   /* ptsApp->set_agentError(全 agent 集約) ・ ゲート */
 #include	"pig/c++/pigCacheManager.h"  /* 起動時キャッシュ sweep(pig 層・cgptsPlanner から移設) */
 #include	"pig/c++/pigData.h"
 #include	"pig/c++/pigwire.h"
@@ -65,6 +65,7 @@ CLASS_TINYSTATE(pig/c++/pigfAgent,pig/c++/pigfFunction)
 /* 基底: 演算子固有の短絡なし(派生 = 言語層が override)。0=非該当。 */
 int pigfAgent_::try_shortcircuit() { return 0; }
 int pigfAgent_::try_decompose()    { return 0; }
+int pigfAgent_::try_pseudo_module(){ return 0; }
 
 /* 基底: 値パーサ無し(言語パーサは srava 固有)。thNULL = 生テキストを pigDataString として返す。 */
 
@@ -84,6 +85,28 @@ pigfAgent_::agent_module_name()
 	return thNULL;
 }
 
+
+/* 基底: カーネルを知らない (#3482)。派生 (pigfModuleAgent) が表示用の名前を供給する。 */
+sPtr<stdString>
+pigfAgent_::agent_kernel_name()
+{
+	return thNULL;
+}
+
+
+/* ★★ #3482: agent が **途中で死んだ** ときの文言を #3475 の規約 (module/op: message) に揃える。
+ * ⚠ 位置 (ERROR[file,line]) は従来どおり _front の情報が付くので「どの行か」は前から分かって
+ *   いたが、**どのカーネルのどの op か**は汎用文言に落ちていた (§4.1 の「どの op が壊れたか
+ *   分からない」はこの経路のこと)。幾何の失敗は agent 側が既に module/op を付けている。
+ * 返すのは "op: what" (op 不明なら "what")。カーネル名は ctor の module 引数で前置きする。 */
+sPtr<stdString>
+pigfAgent_::agent_fail_msg(const char *what)
+{
+	sPtr<stdString> op = agent_op_name();
+	if ( ! op.is_notNull() || op->get_str()[0] == '\0' )
+		return thNEW(stdString,(what));
+	return thNEW(stdString,(op->get_str()))->add(": ")->add(what);
+}
 
 /* 基底: カーネル非依存(単一 agent)。MODULE_NONE = 継続にスタンプせず・ハッシュにも混ぜない
  * (= 従来の振る舞いと完全に同一)。カーネルを持つ言語層(pigfModuleAgent)が override する。 */
@@ -120,6 +143,17 @@ pigfAgent_::stamp_out_cache()
 sPtr<stdString>
 pigfAgent_::agent_op_name()
 {
+	/* ★★ #3554 段1 (2026-09-19): routing が **行** (`op` / `op#変種`) を決めたら、以後は
+	 *   *その行名*が op 名になる。⇒ 結果ハッシュ (compute_arg_hash)・C_OP 送信 (SENDOP)・
+	 *   ps 表示 (agent_cmd) が **この 1 か所だけで**追従する。
+	 *   ★ agent 側の lookup_op は完全一致のままで当たる (行名が別名だから)。
+	 *   ★ op 名はハッシュの先頭に混ざるので、**変種ごとにキャッシュキーが自動で分かれる**。
+	 *   ⚠⚠ @_front->set_op_name()@ で **書き換えない**のは、ACT_START が yield で頭から再走する
+	 *     ため。書き換えると 2 回目の routing が変種名を基底名として引き、候補集合が 1 回目と
+	 *     変わってしまう。memo なら _front は基底名のままなので、何回再走しても同じ結論になる
+	 *     (2026-09-18 に try_shortcircuit の再入で同型の罠を踏んだ)。 */
+	if ( routedOpName != thNULL )
+		return routedOpName;
 	return _front->get_op_name();
 }
 
@@ -153,9 +187,29 @@ protected:
 	 * pigAgentRegistry のキー ("manifold" 等) を返す。thNULL = External (agent process)。
 	 * 基底は thNULL。pigfModuleAgent が override (MODULE_MANIFOLD + env SRAVA_INPROC)。 */
 	virtual sPtr<stdString>	agent_module_name();
+	/* ★★ #3482: **表示用のカーネル名** (「cgal」「manifold」等)。⚠ agent_module_name とは別物 —
+	 * あちらは「in-proc で回せるか」の鍵なので **process 実行のカーネルでは thNULL** を返す。
+	 * エラー文の前置き (#3475 の module/op: message) には実行方式に関係ない名前が要る。
+	 * 基底は thNULL (カーネルを知らない)。pigfModuleAgent が override。 */
+	virtual sPtr<stdString>	agent_kernel_name();
+	/* 「op: what」を組む (カーネル名は pigDataError の ctor が前置きする)。#3482 */
+	sPtr<stdString>		agent_fail_msg(const char *what);
 	/* 演算子名(C_OP で送る + 結果ハッシュに混ぜる)。これも agent 依存なので派生が供給。
 	 * 基底は thNULL(空扱い)。 */
 	virtual sPtr<stdString>	agent_op_name();
+	/* ★ #3554 段1: routing が決めた **行名** (`op` または `op#変種`)。未 routing は thNULL で
+	 *   基底名 (_front->get_op_name()) が返る。⚠ _front は書き換えない (再走で意味が変わるため)。 */
+	sPtr<stdString>		routedOpName;
+	/* ★★ #3580: routing が決めた **行そのもの**。名前では足りない —
+	 *   @op_entry(id, 基底名)@ は *OPS の最初の行* を返す規則なので、同じモジュールに
+	 *   @op@ と @op#変種@ が並び、かつ **基底行が勝った** とき (routedOpName が空のとき)
+	 *   名前で引き直すと *変種の申告* (nin / in[]) で引数検査をしてしまう。
+	 *   ⚠ #3570 のコメントが「いまそういう組は 0 件だが、書いた瞬間に静かに誤判定になる」と
+	 *     予告していた組を openvdb の @intersection@ / @intersection#pt@ で初めて作り、
+	 *     grid 同士の 2 項 intersection が「expected 3 argument(s), got 2」で落ちた。
+	 *   ⚠ 記述子の寿命に依存する **借りたポインタ**。モジュールがロード済みの間だけ有効で、
+	 *     routing のたびに上書きされる (持ち越さない)。 */
+	const pigOpEntry	*routedRow = 0;
 	/* ★ pig / 言語層(srava)の境界フック。pigfAgent は piggybackTurtle 汎用で特定演算子も特定言語の
 	 * 値構文も知らない。言語固有の知識は派生(pigfModuleAgent)が override して供給する:
 	 *   try_shortcircuit: 演算子固有の代数的短絡(srava の単位元 {} 等で CGAL を呼ばず畳む)。
@@ -168,6 +222,12 @@ protected:
 	 *   try_shortcircuit と同じ (0=非該当 / 1=_front に結果セット済み / 2=err セット済み)。
 	 *   基底は 0 (分解しない)。pigfModuleAgent が override。 */
 	virtual int		try_decompose();
+	/* ★★ #3555 段3: 候補列に **擬似モジュール** (srava のラムダへ配線する値) が居るとき、
+	 *   順番どおりに先勝ちを決め、当たったら body を呼んで _front に結果を入れる。
+	 *   try_shortcircuit / try_decompose と同じ契約 (0=非該当 / 1=_front 解決済み / 2=err 済み)。
+	 *   ⚠ **分解 (1.6) の後・routing (1.7) の前**。分解は群の大きさを決める話で、擬似は
+	 *     「その呼び出しを誰が実行するか」の話なので、順序はこの並びでなければならない。 */
+	virtual int		try_pseudo_module();
 	/* ★ med の TSE_RETURN を握りつぶして mediator_return_flag に畳む (§8.3)。 */
 	virtual sPtr<stdEvent>	filter(sPtr<stdEvent> ev);
 	/* ★ カーネル選択フック(#3404): この agent 起動で使う幾何カーネル(MODULE_CGAL/MANIFOLD)を
@@ -187,6 +247,11 @@ protected:
 	                                        * 親はこれで「子が計算を始めた=admitted」を知り、全子 begin で gate を取る */
 	int			beginResolved;  /* beginPromise->set_result 済みか(撤収時の二重解決防止) */
 	sPtr<pigData>		err;     /* is_error() な値そのもの(pigDataError とは限らない)。d_cast 不要 */
+	/* ★★ #3482 段 2: **自分が属する try** (囲む try が無ければ thNULL)。
+	 * INI で env から引き (try の帰属は動的なので env が唯一の真実)、待ちリストへ登録する。
+	 * FIN (MEDWAIT) で外す。⚠ try → agent も強参照だが、**同じ FIN で両側とも切れる**ので
+	 * 環は残らない。 */
+	sPtr<pigDataTryCatch>	myTry;
 	sPtr<stdString>		cachePath;
 	/* 出力キャッシュのハンドル (#3406 4.3)。SENDEND で作って pl_write_end で agent へ渡し
 	 * (Internal は同一オブジェクトへ set_body される = 共有)、A_SAVE_BEGIN の promise 解決に使う。
@@ -223,6 +288,7 @@ protected:
 	int			gateHadDelay;
 	int			forkFails;       /* fork EAGAIN の連続失敗回数(上限超でようやくエラー) */
 	int			outModule;       /* ★ この agent が起動するカーネル(#3404)。ACT_START で decide_out_module() が設定 */
+	int			extCounted;      /* ★ #3503: 子プロセスを持つ agent として数えたか */
 	/* ★ rev4 Phase B-2b: この agent の **出力型リスト** (CSV)。型ディスパッチ (decide_executor) が絞った
 	 *   単一出力型を継続スタンプに載せる。thNULL = 未設定 (未注釈 op) → 継続は outModule の全型へフォールバック。 */
 	sPtr<stdString>		outTypeList;
@@ -275,6 +341,7 @@ pigfAgent_::pigfAgent_(TS_ARGS0)
     loadPid         = 0;
     forkFails       = 0;
     outModule       = MODULE_NONE;
+    extCounted      = 0;   /* ★ #3503 */
     i               = 0;
 }
 
@@ -410,9 +477,11 @@ pigfAgent_::filter(sPtr<stdEvent> ev)
 		if ( osglue_env_int("PIG_DBG_SIG", 0) ) {
 			sPtr<stdString> _dop = agent_op_name();
 			sPtr<stdString> _dc = agent_cmd();
-			::fprintf(stderr, "[sigdbg] MEDRET op=%s st=%d appErr=%d destroyed=%d cmd=%s\n",
+			/* ★ st は INTEGER64 (Windows の例外コードは 0x10000 以上)。16 進も出す。 */
+			::fprintf(stderr, "[sigdbg] MEDRET op=%s st=%lld (0x%llX) appErr=%d destroyed=%d cmd=%s\n",
 				( _dop != thNULL ) ? _dop->get_str() : "(none)",
-				( med.is_notNull() ) ? med->child_status() : -1,
+				(long long)( ( med.is_notNull() ) ? med->child_status() : -1 ),
+				(unsigned long long)( ( med.is_notNull() ) ? med->child_status() : -1 ),
 				(int)( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ),
 				(int)is_destroyed(),
 				( _dc != thNULL ) ? _dc->get_str() : "(none)");
@@ -434,12 +503,41 @@ pigfAgent_::filter(sPtr<stdEvent> ev)
 	( ( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ) || is_destroyed() \
 	  || mediator_return_flag )
 
+/* ★★ #3482: 「畳まれた跡」のエラークラス。**囲む try が destroy を送った**ために死ぬなら
+ * PE_DERIVED — 新しい失敗ではなく *言われたとおり畳んだ* だけなので、planner の集約・報告・
+ * 終了コードから外れる (`catch { destroy(); }` が rc=1 にならない)。
+ * ⚠ 当てはまるのは **理由が立たなかったときの既定文言だけ**。本物の失敗 (err が既にある /
+ *   ptsApp に集約済みの理由がある) はそのまま通す — 畳んだ側の都合で原因を消さない。 */
+#define PIGFAGENT_ABORT_CLASS() \
+	( ( myTry.is_notNull() && myTry->is_tearing_down() ) ? PE_DERIVED : PE_NORMAL )
+
 TS_STATE(INI_pigfFunction_START)
 {
-	if ( ptsApp.is_notNull() ) {
-		ptsApp->agent_enter(ifThis);   /* 生存数 ++ + 登録(FIN で leave)。全 agent 完了判定 + 撤収用 */
+	if ( ptsApp.is_notNull() )
 		gateSeq = ptsApp->agent_next_seq();   /* ★ #3419: 生成順を確定(priority() の元。以後不変) */
+	/* ★★ #3482 段 2: 自分を囲む try の待ちリストへ登録する。
+	 * ⚠ 生ポインタ (env が持つ形) から強参照を作る — 登録している間は try のノードを
+	 *   生かしておく必要がある (待ちリストの持ち主だから)。FIN で手放す。
+	 * ⚠ 「try が無い」経路は無い (段 3 で根に見えない try が入った)。引けないなら配線のバグ。 */
+	/* ★★ #3482 (ひさ 2026-09-19 / 2026-09-20): 入るのは **自分を囲む最も内側の try 1 つだけ**。
+	 *   ⚠⚠ 一度「myTry + 根の台帳」の **2 つに登録**していたが、それも誤り (ひさ指摘 2026-09-20)。
+	 *     祖先の chain を辿るのをやめただけで、**根へ直接登録しに行くのが残っていた**。
+	 *   ★ 根が全体を知る必要はない。利用者の try は @ACT_pigfTryCatch_WAIT@ で
+	 *     **自分の待ちリストが空になるまで終わらない**ので、その try の評価が終わった時点で
+	 *     中の計算はもう居ない。⇒ 入れ子は「try が try を待つ」で自然に閉じる。
+	 * ★ 外側の try から内側を畳むのは **destroy の木の伝播**が担う (登録は伝播させない)。
+	 *
+	 * ⚠⚠ **env から try が引けないのは配線のバグ** (ひさ 2026-09-19)。env を作る側は全部
+	 *   try をリレーする約束 (pigfFunction の根 env / pigfSequence / pigfAsync / pigfApply) なので、
+	 *   引けないなら **どこかがリレーしていない**。根へ黙って落とすと台帳に穴が空いたまま
+	 *   進んでしまうので、**明示エラーにする** (黙るフォールバックは作らない)。 */
+	if ( ! env.is_notNull() || ! env->get_try().is_notNull() ) {
+		err = thNEW(pigDataError,(agent_fail_msg("internal: no enclosing try (env relay is broken)"),
+		                          _front->get_info(), PE_FATAL, 0));
+		return rDO|ACT_pigfAgent_ERROR;
 	}
+	myTry = env->get_try();
+	myTry->agent_enter(ifThis);
 	return rDO|ACT_START;
 }
 
@@ -476,6 +574,16 @@ TS_STATE(ACT_START)
 		if ( dc == 2 ) return rDO|ACT_pigfAgent_ERROR;
 	}
 
+	/* 1.65) ★★ #3555 段3: 候補列に擬似モジュール (値として書かれた op) が居れば、候補列の
+	 *   順に先勝ちを決める。擬似が勝ったら body (srava のラムダ) の適用ノードを _front に入れて
+	 *   畳む — **キャッシュも継続も作らない**ので、下流が読むのは返ってきた値が自分で持つ型。
+	 *   ⚠ 実モジュールが先に当たるなら 0 が返り、下の 1.7 が同じ勝者に辿り着く。 */
+	{
+		int pm = try_pseudo_module();
+		if ( pm == 1 ) return rDO|FIN_START;              /* _front に結果セット済み */
+		if ( pm == 2 ) return rDO|ACT_pigfAgent_ERROR;    /* err セット済み */
+	}
+
 	/* 1.7) ★ カーネル選択(#3404): 入力引数の型 + DEFAULT_OUTPUT からこの agent のカーネルを決める
 	 *   (pigfModuleAgent が override。基底は MODULE_NONE)。ここで 1 度だけ決めて outModule に memo し、
 	 *   継続 pair へのスタンプ(下流への型前送り)・ハッシュ弁別(3/SEND)・agent_cmd(LAUNCH)で使う。
@@ -486,6 +594,41 @@ TS_STATE(ACT_START)
 	 *   由来のみ。カーネル routing しない agent (基底=MODULE_NONE・err 未設定) は素通し。 */
 	if ( err.is_notNull() )
 		return rDO|ACT_pigfAgent_ERROR;
+
+	/* 1.8) ★★ #3572 (2026-09-22): **出力種別を行が決まってから決め直す**。
+	 *
+	 *   パーサ/eval 時に立てた @_front->set_out_cache@ (pigData.cpp の
+	 *   @pigDataOperatorCallResolve@) は @op_out_is_mesh(基底 op 名)@ — *どの記述子でも
+	 *   最初に当たった行* の @out@ しか見られない。routing より前なので、それしか出来ない。
+	 *   ⇒ **行ごとに出力種別が違う op** があると食い違う:
+	 *       rand(0,10,n,s)       → 行 rand       → 値 (AK_INLINE)
+	 *       rand([0,0],…)        → 行 rand#pt2d  → 点群 (AK_CACHE)
+	 *     基底名で引くと必ず片方に倒れ、もう片方が壊れる (どちらに倒しても壊れる:
+	 *     値側は継続 pair `(value . path)` が素の配列の代わりに返り、点群側は
+	 *     キャッシュハンドルが捨てられて空になる。2026-09-22 に両方を実測した)。
+	 *
+	 *   ★ ここは @decide_out_module()@ の直後 = **行が確定した最初の地点**で、
+	 *     @out_cache@ を読む所 (3) の HIT 判定・(4) の継続・GATE の gateDelta) はすべて後。
+	 *   ★ @agent_op_name()@ は routing が決めた **行名**を返す (#3554 段1) ので、
+	 *     @op_entry@ は変種行そのものを引く。
+	 *   ⚠ ACT_START は yield で頭から再走するが、これは同じ値を書き直すだけ (冪等)。
+	 *   ⚠ 行が引けないとき (OPS dispatch を持たない demo / pipe_proximity 等) は
+	 *     **触らない** — 従来の値をそのまま使う。
+	 *   ⇒ [[routing-vs-body-same-predicate]] と同じ型の不整合を、判定を 1 か所に寄せて消す。 */
+	if ( outModule > 0 && ptsApp.is_notNull() && ptsApp->module_registry != thNULL
+	     && _front.is_notNull() ) {
+		sPtr<stdString> rowName = agent_op_name();
+		if ( rowName != thNULL ) {
+			const pigOpEntry *re = ptsApp->module_registry->op_entry(outModule, rowName->get_str());
+			/* ⚠⚠ **何も申告していない行 (sig だけの行) は触らない**。@out@ の 0 は
+			 *   「AK_INLINE と申告した」ではなく *ゼロ初期化* なので、読むと
+			 *   キャッシュ出力が消える — cgatsagent / pigfagent の fixture
+			 *   (@{ "box", 0, 0, (pigArgKind)0, 0, 0, "->cg-mesh3d" }@) が全滅した。
+			 *   ⇒ [[skip-that-looks-green]] ではなく **緑が赤になって**気づけた。 */
+			if ( re != 0 && ! pig_op_row_declares_nothing(re) )
+				_front->set_out_cache( ( re->out == AK_CACHE ) ? 1 : 0 );
+		}
+	}
 
 	/* 2) 遅延継続検出。継続は ("delayed" . promise) なので car=="delayed" で判別(d_cast 不要)。
 	 *    あれば今はハッシュ不能 → キャッシュ判定を飛ばす。 */
@@ -741,6 +884,10 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 			med = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 			    ? ptsApp->module_registry->backends.make("thread", ifThis, kname)   /* 具体クラス名を隠す (Phase1-3) */
 			    : sPtr<ptsMediator>(thNULL);
+			if ( med.is_notNull() && ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
+				med->set_grace_ms(ptsApp->module_registry->grace_ms(outModule));   /* ★ #3503 */
+				med->set_panic_ms(ptsApp->module_registry->panic_ms(outModule));
+			}
 			if ( med.is_notNull() && med->enable() == 0 ) {
 				if ( ptsApp.is_notNull() ) ptsApp->cache_miss();   /* MISS 計上 (fork 経路と同じ) */
 				return ACT_pigfAgent_HELLO;   /* enable が積んだ TSE_ASSERT 待ち → rDO なし */
@@ -764,7 +911,20 @@ TS_STATE(ACT_pigfAgent_LAUNCH)
 		 * decide_out_module() で既に確定済み。opts が無ければ thNULL のまま (enable の既定と同じ)。 */
 		sPtr<pigData> modOpts = ( ptsApp != thNULL && ptsApp->module_registry != thNULL )
 		    ? ptsApp->module_registry->opts_for(outModule) : sPtr<pigData>(thNULL);
+		/* ★ #3503: 撤収の猶予をここで解決して mediator へ渡す。実効値 (env > module() >
+		 * 記述子) を知っているのは registry で、outModule を知っているのはこの agent。
+		 * mediator はどちらも知らないので、突き合わせはここでやる。 */
+		if ( med.is_notNull() && ptsApp != thNULL && ptsApp->module_registry != thNULL ) {
+			med->set_grace_ms(ptsApp->module_registry->grace_ms(outModule));
+			/* ★ 実行方式で使う口が変わるので **両方渡す** — 同じモジュールでも process なら
+			 *   grace_ms、in-proc なら panic_ms を使う (ひさ指摘 2026-09-07)。 */
+			med->set_panic_ms(ptsApp->module_registry->panic_ms(outModule));
+		}
 		launchFail = ( med == thNULL || med->enable(modOpts) != 0 );
+		/* ★ #3503: 子プロセスを持つ agent として登録 (起動に失敗しても teardown まで
+		 *   子を持ちうるので、enable の成否に関わらず数える)。 */
+		if ( med.is_notNull() && med->is_external() && ptsApp != thNULL && ! extCounted )
+			{ extCounted = 1; ptsApp->ext_agent_add(); }
 		/* ★ med = thNULL にしない (2026-08-11): 起動に失敗した med も destroy → TSE_RETURN を
 		 * 返して畳まれるので、FIN_pigfAgent_MEDWAIT がそれを待って回収する。 */
 		if ( launchFail && med.is_notNull() ) med->destroy();   /* 失敗オブジェクト破棄 */
@@ -861,9 +1021,21 @@ TS_STATE(ACT_pigfAgent_CACHEREAD)
  * それを名指しに変換する。該当しなければ 0。 */
 static int pigf_version_mismatch_msg(sPtr<ptsMediator> med, sPtr<stdString> cmd, char *out, size_t outsz)
 {
-	int st = ( med.is_notNull() ) ? med->child_status() : -1;
-	if ( st < 0 || (st & 0x7f) != 0 ) return 0;        /* 未終了 / シグナル死 */
+	INTEGER64 st = ( med.is_notNull() ) ? med->child_status() : -1;
+	/* ★ #3550: 0x10000 以上は Windows の例外コード = 異常終了であって exit 3 ではない。
+	 * 先に落とさないと 0xC0000?03 のような値が「版不一致」に化ける。 */
+	if ( st < 0 || st >= 0x10000 )     return 0;
+	if ( (st & 0x7f) != 0 )            return 0;        /* シグナル死 */
 	if ( ((st >> 8) & 0xff) != 3 )     return 0;        /* 版不一致の合図 (exit 3) ではない */
+	/* ★★ #3550: **exit 3 だけでは断定しない。** Windows では abort() も exit 3 なので、
+	 * agent 自身の名乗り (srava_agent_main.cpp が stderr に書く) を裏づけに要求する。
+	 * これが無いのに「版が違う」と fatal で断定すると、モジュールが abort した本当の理由
+	 * (stderr) が捨てられる (srava_geogram_fatal が検出した誤りがこれ)。
+	 * ⚠ 名乗りが取れないときは mediator が組み立てた「agent exited 3 + stderr」に任せる。 */
+	{	sPtr<stdString> es = ( med.is_notNull() ) ? med->agent_stderr() : sPtr<stdString>();
+		const char *et = ( es.is_notNull() ) ? es->get_str() : 0;
+		if ( et == 0 || ::strstr(et, "srava_agent: planner") == 0 ) return 0;
+	}
 	::snprintf(out, outsz,
 		"planner and agent are from different builds; use a matching pair "
 		"(when running from a build tree, point SRAVA_AGENT at that tree's srava_agent). "
@@ -901,14 +1073,24 @@ TS_STATE(ACT_pigfAgent_HELLO)
 			return rDO|ACT_pigfAgent_ERROR;
 		}
 		/* ★ mediator が組み立てた理由 (子の status + agent の stderr + wire の状態を
-		 * 総合したもの) があればそれを使う。無ければ従来の汎用文言 (2026-08-26)。 */
+		 * 総合したもの) があればそれを使う。無ければ従来の汎用文言 (2026-08-26)。
+		 * ⚠⚠ 2026-09-19 (mac で発見): ここは **module/op の前置きを落としていた**。
+		 *   #3475 の規約を #3482 (a590bcf) で agent の死に広げたとき、*汎用文言の側だけ*に
+		 *   agent_fail_msg() が入り、**mediator が理由を組み立てた側**は素のまま残っていた。
+		 *   ⇒ agent が非 0 で終了する経路 ("agent exited N") だけ「どのカーネルのどの op が
+		 *     壊れたか」が落ちる。Linux では /bin/true が exit 0 なので握手前に *閉じる* 側に
+		 *     入り、この枝が一度も踏まれていなかった (mac には /bin/true が無く、起動自体が
+		 *     失敗して初めて出た)。 */
 		if ( mediator_error.is_notNull() && sPtr<pigData>::d_cast(mediator_error) != thNULL &&
 		     sPtr<pigData>::d_cast(mediator_error)->is_error() ) {
-			err = thNEW(pigDataError,(sPtr<pigData>::d_cast(mediator_error)->error_message(),
-				_front->get_info()));
+			sPtr<stdString> mm = sPtr<pigData>::d_cast(mediator_error)->error_message();
+			err = thNEW(pigDataError,(agent_fail_msg(mm.is_notNull() ? mm->get_str() : "agent failed"),
+				_front->get_info(), PE_NORMAL,
+				( agent_kernel_name().is_notNull() ? agent_kernel_name()->get_str() : 0 )));
 			return rDO|ACT_pigfAgent_ERROR;
 		}
-		err = thNEW(pigDataError,("agent closed before handshake", _front->get_info()));
+		err = thNEW(pigDataError,(agent_fail_msg("agent closed before handshake"),
+		                          _front->get_info(), PE_NORMAL, ( agent_kernel_name().is_notNull() ? agent_kernel_name()->get_str() : 0 )));
 		return rDO|ACT_pigfAgent_ERROR;
 	}
 	if ( PIGFAGENT_SHOULD_ABORT() ) return rDO|ACT_pigfAgent_ABORT;
@@ -1137,7 +1319,8 @@ TS_STATE(ACT_pigfAgent_FINISH)
 TS_STATE(ACT_pigfAgent_ERROR)
 {
 	if ( err == thNULL )
-		err = thNEW(pigDataError,("agent aborted", _front->get_info()));
+		err = thNEW(pigDataError,(agent_fail_msg("agent aborted"), _front->get_info(),
+		                          PIGFAGENT_ABORT_CLASS(), ( agent_kernel_name().is_notNull() ? agent_kernel_name()->get_str() : 0 )));
 	/* ★ どの経路で返すにせよ **理由は必ず記録**しておく (2026-08-26・ひさ提案)。
 	 * 下の 3 分岐のうち promise 連鎖へ返す 2 つは ptsApp に何も残さないので、
 	 * 「落ちた本人の理由」が傍観者の汎用エラーに負けて消えていた。record は起こさない
@@ -1149,6 +1332,12 @@ TS_STATE(ACT_pigfAgent_ERROR)
 		 * アプリ全体のエラーとして ptsApp に集約(プランナーが countAgent==0 後に拾う)。 */
 		if ( ptsApp.is_notNull() )
 			ptsApp->set_agentError(err);
+		/* ★★ #3482 段 2: **囲む try にも渡す** — これが try/catch で捕まえられる唯一の口。
+		 * ⚠ ここ (§4.2 ①) だけに置く。②/③ は継続 or _front をエラーで解決するので、
+		 *   評価チェーンを直列に上がって statement1 のエラーになる ⇒ ここでも積むと **二重**になる。
+		 * ⚠ ptsApp への集約は残したまま (併存)。撤去は段 3 (根の見えない try が入ってから)。 */
+		if ( myTry.is_notNull() )
+			myTry->agent_error(err);
 	} else if ( promiseLive ) {
 		/* _front=pair は返したが promise 未解決 → 継続を error で解決(呼び元の遅延参照が error に)。
 		 * ★ begin 未通知なら先に解決して親の GATE begin 待ち(cdr()->car())を解く。
@@ -1178,22 +1367,32 @@ TS_STATE(ACT_pigfAgent_ABORT)
 	if ( osglue_env_int("PIG_DBG_SIG", 0) ) {
 		sPtr<stdString> _dop = agent_op_name();
 		sPtr<stdString> _dc2 = agent_cmd();
-		::fprintf(stderr, "[sigdbg] ABORT cmd=%s op=%s medflag=%d err=%d destroyed=%d appErr=%d st=%d\n",
+		::fprintf(stderr, "[sigdbg] ABORT cmd=%s op=%s medflag=%d err=%d destroyed=%d appErr=%d st=%lld (0x%llX)\n",
 			( _dc2 != thNULL ) ? _dc2->get_str() : "(none)", ( _dop != thNULL ) ? _dop->get_str() : "(none)",
 			mediator_return_flag, (int)(err != thNULL), (int)is_destroyed(),
 			(int)( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ),
-			( med.is_notNull() ) ? med->child_status() : -1);
+			(long long)( ( med.is_notNull() ) ? med->child_status() : -1 ),
+			(unsigned long long)( ( med.is_notNull() ) ? med->child_status() : -1 ));
 	}
 	if ( mediator_return_flag && err == thNULL && ! is_destroyed() &&
 	     ! ( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL ) ) {
 		/* ★ mediator_error = ptsMediatorExternal が **子の終了 status・agent の stderr・
 		 * wire の状態を総合して**組み立てた理由 (2026-08-26)。ここは位置情報を付けて
 		 * 再包装するだけ。理由が立たなかったときだけ従来の汎用文言になる。 */
+		/* ⚠ 2026-09-19: 上 (握手前) と同じ理由で、組み立てた理由の側にも **前置きを付ける**。
+		 *   ★ ここで前置きするのは *planner が知っている* 名前 (kernel/op) であって、
+		 *     agent 自身が返したエラー (:1217 の AGENT パケット) ではない — あちらは
+		 *     agent 側で既に #3475 の前置きが付いているので、二重に付けてはいけない。 */
 		err = ( mediator_error.is_notNull() && sPtr<pigData>::d_cast(mediator_error) != thNULL &&
 		        sPtr<pigData>::d_cast(mediator_error)->is_error() )
-		    ? sPtr<pigData>(thNEW(pigDataError,(sPtr<pigData>::d_cast(mediator_error)->error_message(),
-		        _front->get_info())))
-		    : sPtr<pigData>(thNEW(pigDataError,("agent closed unexpectedly", _front->get_info())));
+		    ? sPtr<pigData>(thNEW(pigDataError,(
+		        agent_fail_msg(sPtr<pigData>::d_cast(mediator_error)->error_message().is_notNull()
+		            ? sPtr<pigData>::d_cast(mediator_error)->error_message()->get_str()
+		            : "agent failed"),
+		        _front->get_info(), PE_NORMAL,
+		        ( agent_kernel_name().is_notNull() ? agent_kernel_name()->get_str() : 0 ))))
+		    : sPtr<pigData>(thNEW(pigDataError,(agent_fail_msg("agent closed unexpectedly"),
+		                                        _front->get_info(), PE_NORMAL, ( agent_kernel_name().is_notNull() ? agent_kernel_name()->get_str() : 0 ))));
 		{	/* ★ 版不一致 (agent が exit 3) なら、名指しの説明に差し替える。 */
 			char vmsg[900];   /* ★ 異常終了の説明は agent の stderr を載せるので長い */
 			if ( pigf_version_mismatch_msg(med, agent_cmd(), vmsg, sizeof vmsg) )
@@ -1212,7 +1411,8 @@ TS_STATE(ACT_pigfAgent_ABORT)
 	if ( ! promiseResolved ) {
 		sPtr<pigData> ae = ( ptsApp.is_notNull() && ptsApp->get_agentError() != thNULL )
 		    ? ptsApp->get_agentError()
-		    : sPtr<pigData>(thNEW(pigDataError,("aborted", _front->get_info())));
+		    : sPtr<pigData>(thNEW(pigDataError,(agent_fail_msg("aborted"), _front->get_info(),
+		                                        PIGFAGENT_ABORT_CLASS(), ( agent_kernel_name().is_notNull() ? agent_kernel_name()->get_str() : 0 ))));
 		if ( promiseLive ) {
 			/* begin 未通知なら先に解決して親の GATE begin 待ちを解く (ERROR と同じ作法) */
 			if ( beginPromise.is_notNull() && ! beginResolved ) {
@@ -1268,7 +1468,18 @@ TS_STATE(FIN_pigfAgent_MEDWAIT)
 			ptsApp->gate_release();
 			gateCredited = 0;
 		}
-		ptsApp->agent_leave(ifThis);   /* 生存数 --。0 でプランナーを起こす */
+		/* ★ #3503: **子プロセスを持つ agent** の数から抜ける。planner の in-proc panic は
+		 *   これが 0 になってから撃つ (でないと生きている子が迷子になる)。
+		 *   ⚠ 判別に agent_pid() を使わない — fork 完了前は 0 なので起動窓の External が
+		 *     in-proc に見える。mediator が構築時から持つ is_external() を見る。 */
+		if ( extCounted ) { extCounted = 0; if ( ptsApp != thNULL ) ptsApp->ext_agent_del(); }
+	}
+	/* ★★ #3482 段 2: 囲む try の待ちリストからも抜ける。**全経路がここに収束する** (§4.4) ので
+	 * 登録と解除は 1 対 1 になる。⚠ agent_leave は冪等・ここで参照も手放す (環を残さない)。
+	 * ⚠ ptsApp のブロックの **外**に置く: ptsApp が無い経路でも try からは抜ける必要がある。 */
+	if ( myTry.is_notNull() ) {
+		myTry->agent_leave(ifThis);
+		myTry = thNULL;
 	}
 	/* ★ §9: 終了時点で手放す。pigfAgent は liveAgents (dedup 台帳) に参照され続け program
 	 * 終了まで生存するため、ここで切らないと promise 連鎖や outCache (mesh 本体を抱え得る)

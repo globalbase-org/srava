@@ -65,7 +65,6 @@ cgaRect_::cgaRect_(TS_ARGS0)
 void
 cgaRect_::compute()
 {
-	typedef cgMesh::K K;
 	int na = ( args != 0 ) ? args->length() : 0;
 	double w = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double h = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
@@ -75,18 +74,15 @@ cgaRect_::compute()
 	 * (符号ミスの早期検出。エラーは呼び出し位置の file,line 付きで戻る)。 */
 	if ( w <= 0.0 || h <= 0.0 ) {
 		char buf[96];
-		::snprintf(buf, sizeof buf, "rect: width and height must be positive (got %g, %g)", w, h);
+		::snprintf(buf, sizeof buf, "rect: width and height must be > 0 (got %g, %g)", w, h);
 		result = cga_err(thNEW(stdString,(buf)));
 		return;
 	}
 
 	mesh = thNEW(cgMesh2D,());
-	cgMesh2D::Polygon_2 r;        /* CCW: (0,0)→(w,0)→(w,h)→(0,h) */
-	r.push_back(K::Point_2(K::FT(0.0), K::FT(0.0)));
-	r.push_back(K::Point_2(K::FT(w),   K::FT(0.0)));
-	r.push_back(K::Point_2(K::FT(w),   K::FT(h)));
-	r.push_back(K::Point_2(K::FT(0.0), K::FT(h)));
-	mesh->regions().push_back(cgMesh2D::Pwh_2(r));
+	/* ★ #3545: 座標を並べるだけ。CGAL へ積むのは幾何 lib 側 (add_region_ring)。 */
+	const double xy[8] = { 0.0, 0.0,   w, 0.0,   w, h,   0.0, h };   /* CCW */
+	mesh->add_region_ring(xy, 4);
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

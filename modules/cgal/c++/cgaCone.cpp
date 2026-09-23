@@ -10,6 +10,7 @@
 #include	"cg/c++/cgTriSink.h"
 #include	"common/solids.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"_ts2/c++/cgaCone_.h"
 
 CLASS_TINYSTATE(cg/c++/cgaCone,pig/c++/ptsCalcBody)
@@ -69,13 +70,20 @@ cgaCone_::compute()
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r   = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
 	double h   = ( na > 1 ) ? (*args)[1]->get_flt() : 1.0;
-	int    seg = ( na > 2 ) ? (int)(*args)[2]->get_int() : 0;   /* 円周分割数。0=既定 32 */
+	int    seg_in = ( na > 2 ) ? (int)(*args)[2]->get_int() : 0;   /* 0 = 未指定 */
+	int    seg = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(seg_in, 0, &seg) != srava_geo::SEGS_OK ) {
+		result = cga_err(thNEW(stdString,(srava_geo::segs_error("cone").c_str()))); return;
+	}
 	if ( !(r > 0) ) { result = cga_err(thNEW(stdString,("cone: radius must be > 0"))); return; }
 	if ( !(h > 0) ) { result = cga_err(thNEW(stdString,("cone: height must be > 0"))); return; }
 
 	mesh = thNEW(cgMesh3D,());
-	cgTriSink sink(mesh->mesh());
+	cgTriSink sink;
 	srava_geo::make_cone(r, h, seg, sink);
+	sink.flush_to(mesh);   /* ★ #3545: CGAL へ積むのは幾何 lib 側 */
 }
 
 /* この演算の結果。エラー時は compute() が result にエラー値を残して本体未設定で return するので

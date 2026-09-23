@@ -42,12 +42,6 @@
 #include	"ch/c++/chaIntersection.h"
 #include	"ch/c++/chaDifference.h"
 #include	"ch/c++/chaVolume.h"
-#include	"ch/c++/chaBbox.h"
-#include	"ch/c++/chaCentroid.h"
-#include	"ch/c++/chaArea.h"
-#include	"ch/c++/chaValid.h"
-#include	"ch/c++/chaNverts.h"
-#include	"ch/c++/chaNfaces.h"
 #include	"ch/c++/chaExport.h"
 #include	"ch/c++/chaCast.h"
 #include	"ch/c++/chaTranslate.h"
@@ -56,6 +50,7 @@
 #include	"ch/c++/chaMirror.h"
 #include	"ch/c++/chaTransform.h"
 #include	"ts2/c++/stdString.h"
+#include	"pig/c++/pigOpMatch.h"   /* ★ #3554 最後の段 2/5: cast の共通マッチ述語 */
 #include	"_ts2/c++/chtsAgent_.h"
 
 #include	<string.h>
@@ -80,17 +75,21 @@ static const pigOpEntry OPS[] = {
 	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaSphere),       0, "->" CH_TYPE, 0, 0, 1 },  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
 	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaPyramid), 0, "->" CH_TYPE },  /* pyramid(n,h,r) */
-	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaCylinder), 0, "->" CH_TYPE },  /* cylinder(r,h,seg) */
-	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaCone), 0, "->" CH_TYPE },  /* cone(r,h,seg) */
-	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaTorus), 0, "->" CH_TYPE },  /* torus(R,r,seg) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaCylinder), 0, "->" CH_TYPE, 0, 0, 2 },  /* cylinder(r,h,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaCone), 0, "->" CH_TYPE, 0, 0, 2 },  /* cone(r,h,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaTorus), 0, "->" CH_TYPE, 0, 0, 2 },  /* torus(R,r,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
 	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(chaTetrahedron), 0, "->" CH_TYPE },  /* tetrahedron(r) */
 	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
 	{ "prism",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(chaPrism), 0, "->" CH_TYPE },  /* prism(n,h,r) */
 	{ "icosphere",     SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaIcosphere), 0, "->" CH_TYPE, 0, 0, 1 },  /* icosphere(r,subdiv) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
-	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(chaImport), 0, "->" CH_TYPE },  /* import(path): STL/OFF */
+	/* ★ #3554 最後の段 3/5 (2026-09-19): import の行は共通述語 @pig_match_import_ext@ が選ぶ
+	 *   (拡張子が産む型 = @d->import_exts@ の型付き CSV が、**この行の sig の出力型**か)。
+	 *   ⚠ 出力型が拡張子で決まるので、*sig だけでは行が決まらない* のが import の特徴。
+	 *   ★ このカーネルは import の出力型が 1 つなので **行を分ける必要は無い**。 */
+	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(chaImport), 0, "->" CH_TYPE, 0, 0, 0, &pig_match_import_ext },  /* import(path): STL/OFF */
 	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(chaEmpty3D), 0, "->" CH_TYPE },  /* 空集合(3D)。{} は中立元なので別物 */
 	/* ★ nreq=1: segs は省略可 (既定 32 は op が入れる)。掃引は common/tube.h。 */
-	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaTube), 0, "->" CH_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
+	{ "tube_ruled",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(chaTube), 0, "->" CH_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
 	/* ブール: 自型どうし + 混成 (片側が mf の raw double mesh)。混成は cache reader が
 	 * MFM3 (= 同じ wire 形式) をそのまま読んで成立する。
 	 * ★all-foreign ((mf,mf)) は書かない — manifold 自身が同じ op を持つので曖昧になる (disjoint 原則)。
@@ -105,14 +104,21 @@ static const pigOpEntry OPS[] = {
 	/* ★ #3487: 値の素性を訊く op。どれも →value で 2D 型を要さない。無いと確認のためだけに
 	 * 別カーネルへ cast させることになり、**cast が通らない値では確認手段そのものが消える**
 	 * (#3478 の非有界・非多様体)。中身は common/meshprops.h (valid の共通定義もそこ)。 */
-	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(chaBbox, chGeom),     0, "(" CH_TYPE ")->value" },
-	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(chaCentroid, chGeom), 0, "(" CH_TYPE ")->value" },
-	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(chaArea, chGeom),     0, "(" CH_TYPE ")->value" },
-	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(chaValid, chGeom),    0, "(" CH_TYPE ")->value" },
-	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(chaNverts, chGeom),       0, "(" CH_TYPE ")->value" },
-	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(chaNfaces, chGeom),       0, "(" CH_TYPE ")->value" },
-	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(chaExport, chGeom),       0, "(" CH_TYPE ")->ref" },
-	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(chaCast, chGeom),         0, "(" CH_TYPE ")->" CH_TYPE ";(mf-mesh3d)->" CH_TYPE ";(cg-mesh3d)->" CH_TYPE ";(gg-mesh3d)->" CH_TYPE   /* ★ #3464: 同じ精度クラス (MFM3) */ },
+	/* ★★ #3554 最後の段 4/5 (2026-09-19): export の行は共通述語 @pig_match_export_ext@ が選ぶ
+	 *   (= 第 1 引数の拡張子を **d->export_exts** が書けるか)。出力は常に @ref@ なので
+	 *   **行を分ける必要は無い** (cast / import と違うのはここ)。
+	 *   ⚠⚠ 同時に **規約① (自型優先) を撤去**した — 「入力型の home カーネルが書けるならそこ」
+	 *     という routing の特例で、sig でも記述子でもない *3 つめの規則* だった。
+	 *     ⇒ いまは priority × sig × 拡張子 の普通の決着。 */
+	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(chaExport, chGeom),       0, "(" CH_TYPE ")->ref", 0, 0, 0, &pig_match_export_ext },
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(chaCast, chGeom),         0, "(" CH_TYPE ")->" CH_TYPE ";(mf-mesh3d)->" CH_TYPE ";(cg-mesh3d)->" CH_TYPE ";(gg-mesh3d)->" CH_TYPE
+	                                                          /* ★ #3527: gu-mesh3d も MFM3 ⇒ chGeom::create_for_meta が読める (2D は cherchi に型が無い) */
+	                                                          ";(gu-mesh3d)->" CH_TYPE,  /* ★ #3464: 同じ精度クラス (MFM3) */
+	                                                          /* ★ #3554 最後の段 2/5: cast の行は
+	                                                           *   共通述語 @pig_match_cast_target@ が選ぶ (目標型 = この行の sig の出力型か)。
+	                                                           *   ⚠ このカーネルの cast は出力型が 1 つなので **行を分ける必要は無い**
+	                                                           *     (分ける理由は「1 行 1 出力型」という規約の方であって、名前ではない)。 */
+	                                                          0, 0, 0, &pig_match_cast_target },
 	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(chaTranslate, chGeom),    0, "(" CH_TYPE ")->" CH_TYPE },
 	/* ★ #3486: アフィン変換 4 op。translate だけあって残り 3 本が無いと、式の途中で
 	 * **カーネルが裏返る** (rotate を書いた瞬間に cgal/manifold へ落ちる)。4 本とも

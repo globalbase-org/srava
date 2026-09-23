@@ -1,6 +1,6 @@
 /*
  * ocaText — text(fontPath, str, size) (#3471)。TrueType / OpenType の字形を
- *   **2D の曲線 (Bezier / B-spline) のまま**取り込み、平面上の Face (oc-cross2d) にする。
+ *   **2D の曲線 (Bezier / B-spline) のまま**取り込み、平面上の Face (oc-face3d) にする。
  *
  * ★ TrueType → BRep は OCCT に既製品がある: StdPrs_BRepFont (Font_BRepFont.hxx はその typedef)。
  *   ::Init(fontPath, size, resolution) / ::RenderGlyph(Utf32Char) -> TopoDS_Shape。

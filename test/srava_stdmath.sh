@@ -11,6 +11,8 @@
 #   (体積は剛体変換で不変なので、体積だけでは何も言えない → #3486 と同じ注意)。
 SRAVA="$1"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 LIB="${SRAVA_LIB:?SRAVA_LIB not set}"
 
 rm -rf "$D-sm"

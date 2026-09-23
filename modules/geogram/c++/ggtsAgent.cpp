@@ -32,16 +32,14 @@
 #include	"gg/c++/ggaEmpty3D.h"
 #include	"gg/c++/ggaTube.h"
 #include	"gg/c++/ggaUnion.h"
+#include	"gg/c++/ggaHull.h"
 #include	"gg/c++/ggaIntersection.h"
 #include	"gg/c++/ggaDifference.h"
 #include	"gg/c++/ggaSolidify.h"
 #include	"gg/c++/ggaVolume.h"
-#include	"gg/c++/ggaBbox.h"
-#include	"gg/c++/ggaCentroid.h"
-#include	"gg/c++/ggaArea.h"
-#include	"gg/c++/ggaValid.h"
-#include	"gg/c++/ggaNverts.h"
-#include	"gg/c++/ggaNfaces.h"
+#include	"gg/c++/ggaDistanceAt.h"   /* ★ #3514: 点との距離 */
+#include	"gg/c++/ggaEstimateNormals.h"  /* ★ #3528: 点群の法線推定 (Co3Ne) */
+#include	"pt/c++/ptCloud.h"             /* ★ #3528: 点群の本体クラス (中立の libsrava_pt) */
 #include	"gg/c++/ggaExport.h"
 #include	"gg/c++/ggaCast.h"
 #include	"gg/c++/ggaTranslate.h"
@@ -50,6 +48,7 @@
 #include	"gg/c++/ggaMirror.h"
 #include	"gg/c++/ggaTransform.h"
 #include	"ts2/c++/stdString.h"
+#include	"pig/c++/pigOpMatch.h"   /* ★ #3554 最後の段 2/5: cast の共通マッチ述語 */
 #include	"_ts2/c++/ggtsAgent_.h"
 
 #include	<string.h>
@@ -73,17 +72,21 @@ static const pigOpEntry OPS[] = {
 	{ "boxa",         SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaBox),          0, "->" GG_TYPE },
 	/* ★ #3474: 基本立体はカーネル差が出ないので全カーネルに置く (common/solids.h)。 */
 	{ "pyramid",       SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaPyramid), 0, "->" GG_TYPE },  /* pyramid(n,h,r) */
-	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaCylinder), 0, "->" GG_TYPE },  /* cylinder(r,h,seg) */
-	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaCone), 0, "->" GG_TYPE },  /* cone(r,h,seg) */
-	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaTorus), 0, "->" GG_TYPE },  /* torus(R,r,seg) */
+	{ "cylinder",      SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaCylinder), 0, "->" GG_TYPE, 0, 0, 2 },  /* cylinder(r,h,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
+	{ "cone",          SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaCone), 0, "->" GG_TYPE, 0, 0, 2 },  /* cone(r,h,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
+	{ "torus",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaTorus), 0, "->" GG_TYPE, 0, 0, 2 },  /* torus(R,r,seg) */  /* ★ #3530: nreq=2 → segs は省略可 (occt と揃えた。省略 と 0 は同じ「未指定」) */
 	{ "tetrahedron",   SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaTetrahedron), 0, "->" GG_TYPE },  /* tetrahedron(r) */
 	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
 	{ "prism",         SHAPE3_IN, 3, AK_CACHE, OPWIRE(ggaPrism), 0, "->" GG_TYPE },  /* prism(n,h,r) */
 	{ "icosphere",     SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaIcosphere), 0, "->" GG_TYPE, 0, 0, 1 },  /* icosphere(r,subdiv) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
-	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaImport), 0, "->" GG_TYPE },  /* import(path): STL/OFF */
+	/* ★ #3554 最後の段 3/5 (2026-09-19): import の行は共通述語 @pig_match_import_ext@ が選ぶ
+	 *   (拡張子が産む型 = @d->import_exts@ の型付き CSV が、**この行の sig の出力型**か)。
+	 *   ⚠ 出力型が拡張子で決まるので、*sig だけでは行が決まらない* のが import の特徴。
+	 *   ★ このカーネルは import の出力型が 1 つなので **行を分ける必要は無い**。 */
+	{ "import",        SHAPE1_IN, 1, AK_CACHE, OPWIRE(ggaImport), 0, "->" GG_TYPE, 0, 0, 0, &pig_match_import_ext },  /* import(path): STL/OFF */
 	{ "empty3d",      0,         0, AK_CACHE, OPWIRE(ggaEmpty3D), 0, "->" GG_TYPE },  /* 空集合(3D)。{} は中立元なので別物 */
 	/* ★ nreq=1: segs は省略可 (既定 32 は op が入れる)。掃引は common/tube.h。 */
-	{ "tube",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaTube), 0, "->" GG_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
+	{ "tube_ruled",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaTube), 0, "->" GG_TYPE, 0, 0, 1 },  /* tube(path[,segs]): 3D のみ */
 	{ "sphere",       SHAPE2_IN, 2, AK_CACHE, OPWIRE(ggaSphere),       0, "->" GG_TYPE, 0, 0, 1 },  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ブール: 自型どうし + 混成 (片側が mf の raw double mesh)。混成は cache reader の
 	 * gg-mf-upgrade codec が MFM3 → gg へ昇格読みして成立する。
@@ -97,6 +100,14 @@ static const pigOpEntry OPS[] = {
 	{ "union",        BINMESH_IN,2, AK_CACHE, OPWIRE(ggaUnion, ggGeom, ggGeom),        1, "[" GG_TYPE ",mf-mesh3d,ch-mesh3d](32)->" GG_TYPE, 1 /* ★可換 */ },
 	{ "intersection", BINMESH_IN,2, AK_CACHE, OPWIRE(ggaIntersection, ggGeom, ggGeom), 1, "[" GG_TYPE ",mf-mesh3d,ch-mesh3d](32)->" GG_TYPE, 1 /* ★可換 */ },
 	{ "difference",   BINMESH_IN,2, AK_CACHE, OPWIRE(ggaDifference, ggGeom, ggGeom),   1, "[" GG_TYPE ",mf-mesh3d,ch-mesh3d](32)->" GG_TYPE },
+	/* ★ #3511: 凸包。**1 個でも受ける**ので nin=1 + variadic=1。ブールと違い頂点しか見ないので
+	 *   **32 オペランドの上限 (operand_bit が 32 bit) が掛からない** ⇒ `(*)` と書ける。可換 = 1。 */
+	/* ★★ #3528: **"(*!)" = 分解禁止**。hull は入力から **頂点しか使わない**ので、木に分解すると
+	 *   「点 → メッシュを作って cache へ書き、読み戻して面を捨てて頂点に戻す」を段ごとに繰り返す
+	 *   = 作ったものを次の段で捨てる。⚠⚠ それ以前に **落ちうる** — 退化検査は部分集合について
+	 *   閉じていないので、全体が立体でも群が同一平面になると「立体にならない」で明示エラーになる。
+	 *   ⇒ 主型による振り分け (fold 形) は保ったまま、分解だけを止める。 */
+	{ "hull",         MEASURE_IN,1, AK_CACHE, OPWIRE(ggaHull, ggGeom),           1, "(" GG_TYPE ")->" GG_TYPE ";[" GG_TYPE ",mf-mesh3d,ch-mesh3d](*!)->" GG_TYPE, 1 /* ★可換 */ },
 	/* ★ #3445: 自己交差した境界からのソリッド再構成。geogram は arrangement + radial sort で
 	 * 内外を決め直せる = cgal (素通り) / manifold (同じ誤値) / nef (受け取れない) が持たない能力。
 	 * nef の solidify と同じく **明示 op** (既定の変換経路には置かない)。 */
@@ -111,14 +122,48 @@ static const pigOpEntry OPS[] = {
 	/* ★ #3487: 値の素性を訊く op。どれも →value で 2D 型を要さない。無いと確認のためだけに
 	 * 別カーネルへ cast させることになり、**cast が通らない値では確認手段そのものが消える**
 	 * (#3478 の非有界・非多様体)。中身は common/meshprops.h (valid の共通定義もそこ)。 */
-	{ "bbox",         MEASURE_IN,1, AK_INLINE,OPWIRE(ggaBbox, ggGeom),     0, "(" GG_TYPE ")->value" },
-	{ "centroid",     MEASURE_IN,1, AK_INLINE,OPWIRE(ggaCentroid, ggGeom), 0, "(" GG_TYPE ")->value" },
-	{ "area",         MEASURE_IN,1, AK_INLINE,OPWIRE(ggaArea, ggGeom),     0, "(" GG_TYPE ")->value" },
-	{ "valid",        MEASURE_IN,1, AK_INLINE,OPWIRE(ggaValid, ggGeom),    0, "(" GG_TYPE ")->value" },
-	{ "nverts",       MEASURE_IN,1, AK_INLINE,OPWIRE(ggaNverts, ggGeom),       0, "(" GG_TYPE ")->value" },
-	{ "nfaces",       MEASURE_IN,1, AK_INLINE,OPWIRE(ggaNfaces, ggGeom),       0, "(" GG_TYPE ")->value" },
-	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(ggaExport, ggGeom),       0, "(" GG_TYPE ")->ref" },
-	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(ggaCast, ggGeom),         0, "(" GG_TYPE ")->" GG_TYPE ";(mf-mesh3d)->" GG_TYPE ";(cg-mesh3d)->" GG_TYPE ";(ch-mesh3d)->" GG_TYPE   /* ★ #3464: 同じ精度クラス (MFM3) */ },
+	/* ★ #3514: **位相を直接数える** 3 本。これまで位相の健全性は「シェルを 1 枚失えば体積が
+	 *   100 倍ずれる」という *体積を代理指標に使う* 判定しかできていなかった
+	 *   (wiki Srava_kernel_sweep_20260911-2 §5.4)。代理をやめる。
+	 *     nshells(m)  境界シェル = 面の連結成分の枚数   球 1 ・中空の箱 2 ・xor の N 球 N
+	 *     nparts(m)   塊 = 立体の連結成分の数           球 1 ・中空の箱 1 ・xor の N 球 N/2
+	 *     genus(m)    種数 = 取っ手の総数               球 0 ・トーラス 1 ・中空の箱 0
+	 *   ★ nparts は **nef の nparts と同じ約束** (SNC の marked volume = 塊)。ライブラリが直接
+	 *     くれるのはシェルの方なので、符号つき体積が正のシェルを数えて塊に直している
+	 *     (定義と根拠は src/h/common/meshprops.h)。
+	 *   ⚠ nef 版と違って **変換を挟まない** — これが本題。掃引規模のメッシュを Nef へ通すと
+	 *     100GB 級になる (#3510 の掃引) ので、そこでは nef の nparts は事実上使えなかった。 */
+	/* ★ #3514: **点との距離** — p から境界までの最短距離 (符号なし)。値返し。
+	 *   ⚠ 既存の distance(a,b) は **2 つの立体**の間の距離。問うているものが違うので別名にした
+	 *     (位置で指す _at は face_at と同じ流儀)。閉形式: 球 (半径 r) の中心から距離 d の点 → |d - r|。
+	 */
+	{ "distance_at",  MESH1ARG_IN,2, AK_INLINE,OPWIRE(ggaDistanceAt, ggGeom),  0, "(" GG_TYPE ")->value" },
+	/* ★ #3528: **点群の法線を推定する** — cgal 版と **同じ op 名・同じ sig** で中身が違う
+	 *   (Co3Ne_compute_normals(M,k,reorient=true))。利用者から見れば 1 つの op で、実装が
+	 *   モジュールごとにあるのは srava では普通の形 (nverts は 8 モジュール・minkowski は
+	 *   manifold と nef 系が同じ入力型で重なっている)。両方ロードしていれば priority で
+	 *   cgal (20) が受け、**`"geogram"::estimate_normals(p)` で名指しできる** (#3467)。
+	 *   ⇒ cgal (GPL) を入れない構成でも法線推定ができる。
+	 *   ★ 型 pt-cloud3d は geogram のものではない — **中立の libsrava_pt** が持ち、ここは
+	 *     借りているだけ (ggCacheCodec.cpp が &ptCloud::WIRE を provides に並べている)。
+	 *   ⚠ 印の根拠は cgal 版より弱い — Co3Ne の reorient は「向き付けできなかった点」を
+	 *     報告しない (詳細は ggaEstimateNormals.cpp 冒頭)。 */
+	{ "estimate_normals", MESH1ARG_IN,2, AK_CACHE, OPWIRE(ggaEstimateNormals, ptCloud), 0, "(pt-cloud3d)->pt-cloud3d", 0, 0, 1 },
+	/* ★★ #3554 最後の段 4/5 (2026-09-19): export の行は共通述語 @pig_match_export_ext@ が選ぶ
+	 *   (= 第 1 引数の拡張子を **d->export_exts** が書けるか)。出力は常に @ref@ なので
+	 *   **行を分ける必要は無い** (cast / import と違うのはここ)。
+	 *   ⚠⚠ 同時に **規約① (自型優先) を撤去**した — 「入力型の home カーネルが書けるならそこ」
+	 *     という routing の特例で、sig でも記述子でもない *3 つめの規則* だった。
+	 *     ⇒ いまは priority × sig × 拡張子 の普通の決着。 */
+	{ "export",       EXPORT_IN, 3, AK_CACHE, OPWIRE(ggaExport, ggGeom),       0, "(" GG_TYPE ")->ref", 0, 0, 0, &pig_match_export_ext },
+	{ "cast",         CAST_IN,   2, AK_CACHE, OPWIRE(ggaCast, ggGeom),         0, "(" GG_TYPE ")->" GG_TYPE ";(mf-mesh3d)->" GG_TYPE ";(cg-mesh3d)->" GG_TYPE ";(ch-mesh3d)->" GG_TYPE
+	                                                          /* ★ #3527: gu-mesh3d も MFM3 ⇒ ggGeom::create_for_meta が読める (2D は geogram に型が無い) */
+	                                                          ";(gu-mesh3d)->" GG_TYPE,  /* ★ #3464: 同じ精度クラス (MFM3) */
+	                                                          /* ★ #3554 最後の段 2/5: cast の行は
+	                                                           *   共通述語 @pig_match_cast_target@ が選ぶ (目標型 = この行の sig の出力型か)。
+	                                                           *   ⚠ このカーネルの cast は出力型が 1 つなので **行を分ける必要は無い**
+	                                                           *     (分ける理由は「1 行 1 出力型」という規約の方であって、名前ではない)。 */
+	                                                          0, 0, 0, &pig_match_cast_target },
 	{ "translate",    MESH1ARG_IN,2,AK_CACHE, OPWIRE(ggaTranslate, ggGeom),    0, "(" GG_TYPE ")->" GG_TYPE },
 	/* ★ #3486: アフィン変換 4 op。translate だけあって残り 3 本が無いと、式の途中で
 	 * **カーネルが裏返る** (rotate を書いた瞬間に cgal/manifold へ落ちる)。4 本とも

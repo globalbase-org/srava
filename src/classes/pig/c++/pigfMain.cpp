@@ -68,6 +68,10 @@ pigfMain_::get_env()
 TS_STATE(INI_ptsObject_START)   // root env + DAG ノード構築
 {
 	env = thNEW(pigEnvironment,(thNULL));
+	/* ★★ #3482: **根の見えない try を刺す**。env を作る場所は全部 try をリレーする
+	 * という不変条件を例外なく成り立たせる (ここを忘れると、配下で起きた計算がどの try にも
+	 * 属さず台帳に穴が空く。pigfAgent / ptsFireAndForget はそれを黙って直さず明示エラーにする)。 */
+	if ( ptsApp.is_notNull() ) env->set_try( ptsApp->root_try() );
 
 	// (2+3): pigDataOperatorAdd(遅延)
 	sPtr<pigDataOperatorAdd> add = thNEW(pigDataOperatorAdd,());

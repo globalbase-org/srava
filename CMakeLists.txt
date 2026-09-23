@@ -79,12 +79,20 @@ option(SRAVA_MANIFOLD_PAR "build Manifold with TBB intra-op parallelism (MANIFOL
 option(SRAVA_MODULE_GEOGRAM "build geogram geometry module (FetchContent・BSD-3)" ON)
 # ★ #3433 P1: CGAL Nef (SNC) モジュール。CGAL に同梱なので新規依存はゼロ (SRAVA_MODULE_CGAL に従属)。
 option(SRAVA_MODULE_NEF "build CGAL Nef geometry modules (requires SRAVA_MODULE_CGAL)" ON)
-#   ★ 2 変種は個別に選べる (2026-08-31 ひさ指示で既定を hybrid のみに)。
+#   ★ 2 変種は個別に選べる。
 #     nef_hybrid.so : 有界立体は厳密境界 (型 nfb-mesh3d) — 既定 ON
-#     nef_snc.so    : cache は常に SNC   (型 nf-mesh3d)  — 既定 OFF
+#     nef_snc.so    : cache は常に SNC   (型 nf-mesh3d)  — 既定 ON
 #   ⚠ 上の SRAVA_MODULE_NEF=OFF は両方まとめて落とす傘。
+#   ★★ 2026-09-16 ひさ指示で **既定を ON に戻した** (2026-08-31 に hybrid のみへ絞ったものを
+#     再度開く)。⇒ 素で建てた木と、各自が検証に使う木が **同じものになる**。
+#     理由: ① 3 機とも結局 -DSRAVA_MODULE_NEF_SNC=ON で建てていた (既定が誰の実態でもない)
+#           ② 橋渡しの nef_cg.so / nef_mf.so が **ON でしか建たない** ⇒ 既定 OFF のままだと
+#              #3545 段 4 の成果が「既定構成では 1 度も検証されない」状態が固定化する
+#           ③ ctest の本数が構成で割れ、機体間の突き合わせに毎回 option の但し書きが要った
+#     ⚠ 既定が変わるので **ctest の本数が増える** (この木で 487 → 531)。過去の測定と
+#       並べるときは、その値がどちらの構成のものかを必ず確かめること。
 option(SRAVA_MODULE_NEF_HYBRID "build nef_hybrid.so (Nef・有界立体は厳密境界)" ON)
-option(SRAVA_MODULE_NEF_SNC    "build nef_snc.so (Nef・常に SNC 表現)" OFF)
+option(SRAVA_MODULE_NEF_SNC    "build nef_snc.so (Nef・常に SNC 表現)" ON)
 # ★ #3434 P2: OpenVDB (Apache-2.0) ボリュームモジュール。geogram と同じく FetchContent で
 #   取ってくるので既定 OFF (ビルドが重い)。★TBB を **共有ライブラリ**として連れてくる唯一の
 #   モジュールでもある (理由は下の取り込みブロックのコメント)。
@@ -104,6 +112,7 @@ option(SRAVA_MODULE_OCCT "build Open CASCADE B-rep module (find_package・LGPL-2
 #     落とすときは -DSRAVA_OCCT_TEXT=OFF のように **人が明示的に書く**。
 option(SRAVA_OCCT_TEXT "occt: TrueType text op (OCCT Visualization / TKV3d が要る)" ON)
 option(SRAVA_OCCT_STEP "occt: STEP 入出力 (OCCT DataExchange / TKDESTEP が要る)" ON)
+option(SRAVA_OCCT_IGES "occt: IGES 入出力 (OCCT DataExchange / TKDEIGES が要る)" ON)   # ★ #3513
 # ★ #3438 P6: Cherchi (indirect predicates) ブールモジュール。MIT・**ヘッダだけ**の実装なので
 #   ビルドは軽いが、submodule を芋づるで引く (cinolib / Indirect_Predicates / abseil / oneTBB /
 #   Eigen で ~150MB)。取り込みは **規約 B の変種** — FetchContent で取得するが
@@ -291,6 +300,13 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/h
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/h
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/h
+  # ★ #3528: 点群はカーネル中立 (cgal/geogram/occt/openvdb/manifold がどれも平坦 double 配列で
+  #   受け取る) なので、本体クラス ptCloud と reader/writer は libsrava_pt に置き、消費側の
+  #   モジュールは pt/c++/ptCloud.h を素で include して借りる (occt_mf が mfGeom を借りるのと同じ)。
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h
+  # ★ #3527: 素性を訊く計算 (meshprops.h / ringprops.h) はカーネル非依存なので、本体クラス
+  #   guGeom と reader/writer は libsrava_gu に置き、消費側は gu/c++/guGeom.h を素で include する。
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/h
   ${CMAKE_BINARY_DIR}
   ${TINYSTATE_INC}
 )
@@ -419,6 +435,9 @@ function(srava_add_module TARGET)
       CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
   endif()
   if(SAM_INSTALL)
+    # ★ MODULE は **DLL プラットフォームでも LIBRARY 扱い** (CMake の規則。SHARED だけが
+    #   .dll = RUNTIME / import lib = ARCHIVE に分かれる)。⇒ ここに RUNTIME は要らない。
+    #   ⚠ 2026-09-16 に SHARED 側 10 本へ RUNTIME を足したが、**ここは揃えないこと**。
     install(TARGETS ${TARGET} LIBRARY DESTINATION lib/srava/modules)   # ローダの SYSDIR
   endif()
   set_property(GLOBAL APPEND PROPERTY SRAVA_MODULE_TARGETS ${TARGET})
@@ -517,7 +536,7 @@ endif()
 target_link_libraries(pig PUBLIC Threads::Threads m ${CMAKE_DL_LIBS})
 # 共有ライブラリなので install が要る (host / モジュールが実行時に参照する)。
 srava_export_all(pig)   # ★ Windows: 明示エクスポート (host もモジュールも全部これにリンクする)
-install(TARGETS pig LIBRARY DESTINATION lib)
+install(TARGETS pig LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 
 # 単体テスト
 add_executable(test_pigwire test/pigwire_test.cpp)
@@ -600,6 +619,11 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaEmpty3D.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaIcosphere.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaUnion.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaHull.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaLoftRuled.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRefine.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRemesh.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaSimplify.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCombine.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaIntersection.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaDifference.cpp
@@ -623,9 +647,24 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaOffset.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaArea.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaVert.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaVerts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaShell.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaShellAt.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPartAt.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaFaceVerts.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaNfaces.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaNshells.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaNparts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaGenus.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaDistanceAt.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaEstimateNormals.cpp   # ★ #3528: 点群の法線推定
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaVoronoi.cpp   # ★ #3525: voronoi(p, box)
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaDelaunay.cpp  # ★ #3525: delaunay(p)
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPart.cpp      # ★ #3525: part(v, i) の 2D 版
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaValid.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaRepair.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaProjectFlatten.cpp   # ★ #3534: z=0 への直投影
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaVolume.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaPerimeter.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/c++/cgaCentroid.cpp
@@ -641,6 +680,7 @@ tinystate_codegen(pigts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/cg/c++/cgptsLemonParser.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfSequence.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfIf.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfTryCatch.cpp   # ★ #3482 try/catch 文
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfApply.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfWhile.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/classes/pig/c++/pigfArrayFold.cpp
@@ -855,6 +895,7 @@ set(AGENT_HOST_SRC
   src/classes/pig/c++/pigfOps.cpp
   src/classes/pig/c++/pigfSequence.cpp
   src/classes/pig/c++/pigfIf.cpp
+  src/classes/pig/c++/pigfTryCatch.cpp   # ★ #3482 try/catch 文
   src/classes/pig/c++/pigfApply.cpp
   src/classes/pig/c++/pigfWhile.cpp
   src/classes/pig/c++/pigfArrayFold.cpp
@@ -882,6 +923,12 @@ set(CGAL_KERNEL_SRC
   modules/cgal/c++/cgMesh.cpp
   modules/cgal/c++/cgMesh3D.cpp
   modules/cgal/c++/cgMesh2D.cpp
+  modules/cgal/c++/cgHull.cpp
+  modules/cgal/c++/cgVoronoi.cpp
+  modules/cgal/c++/cgDelaunay.cpp
+  modules/cgal/c++/cgLoft.cpp
+  modules/cgal/c++/cgRemesh.cpp
+  modules/cgal/c++/cgEstimateNormals.cpp
   modules/cgal/c++/cgaBox.cpp
   modules/cgal/c++/cgaPrism.cpp
   modules/cgal/c++/cgaCylinder.cpp
@@ -894,6 +941,11 @@ set(CGAL_KERNEL_SRC
   modules/cgal/c++/cgaEmpty3D.cpp
   modules/cgal/c++/cgaIcosphere.cpp
   modules/cgal/c++/cgaUnion.cpp
+  modules/cgal/c++/cgaHull.cpp
+  modules/cgal/c++/cgaLoftRuled.cpp
+  modules/cgal/c++/cgaRefine.cpp
+  modules/cgal/c++/cgaRemesh.cpp
+  modules/cgal/c++/cgaSimplify.cpp
   modules/cgal/c++/cgaCombine.cpp
   modules/cgal/c++/cgaIntersection.cpp
   modules/cgal/c++/cgaDifference.cpp
@@ -917,9 +969,24 @@ set(CGAL_KERNEL_SRC
   modules/cgal/c++/cgaOffset.cpp
   modules/cgal/c++/cgaArea.cpp
   modules/cgal/c++/cgaNverts.cpp
+  modules/cgal/c++/cgaVert.cpp
+  modules/cgal/c++/cgaVerts.cpp
+  modules/cgal/c++/cgaShell.cpp
+  modules/cgal/c++/cgaShellAt.cpp
+  modules/cgal/c++/cgaPartAt.cpp
+  modules/cgal/c++/cgaFaceVerts.cpp
   modules/cgal/c++/cgaNfaces.cpp
+  modules/cgal/c++/cgaNshells.cpp
+  modules/cgal/c++/cgaNparts.cpp
+  modules/cgal/c++/cgaGenus.cpp
+  modules/cgal/c++/cgaDistanceAt.cpp
+  modules/cgal/c++/cgaEstimateNormals.cpp
+  modules/cgal/c++/cgaVoronoi.cpp
+  modules/cgal/c++/cgaDelaunay.cpp
+  modules/cgal/c++/cgaPart.cpp
   modules/cgal/c++/cgaValid.cpp
   modules/cgal/c++/cgaRepair.cpp
+  modules/cgal/c++/cgaProjectFlatten.cpp
   modules/cgal/c++/cgaVolume.cpp
   modules/cgal/c++/cgaPerimeter.cpp
   modules/cgal/c++/cgaCentroid.cpp
@@ -942,6 +1009,368 @@ target_compile_definitions(srava_agent PRIVATE SRAVA_VALUE_ONLY)
 target_link_libraries(srava_agent PRIVATE pig Threads::Threads m ${CMAKE_DL_LIBS})
 set_target_properties(srava_agent PROPERTIES ENABLE_EXPORTS ON)   # -rdynamic: dlopen した .so から host シンボルを解決
 
+# ------------------------------------------------------------------
+# points.so — 点群モジュール (#3528)。**外部ライブラリを持たない**カーネル中立の型。
+#
+#   点群を受け取る外部ライブラリは 5 つあり (CGAL / geogram / OCCT / OpenVDB / manifold)、
+#   そのどれもが「平坦な double 配列」で受け取る (API の一覧は modules/points/h/pt/c++/ptCloud.h)。
+#   メッシュと違って保存すべきカーネル固有表現が無いので、型をどれか 1 つのカーネルに置くと
+#   残り 4 つがそこへ依存する (cgal に置けば geogram / manifold / openvdb が GPL を引き込む)。
+#   ⇒ 本体クラス + codec + reader/writer を中立の libsrava_pt に置き、points.so が型を名乗る。
+#   ⇒ 消費側 (voronoi / delaunay / Poisson / RANSAC …) は自分の provides に &ptCloud::WIRE を
+#     並べ、LINK に srava_pt を足すだけでよい (新しいクラスも wire 形式も作らない)。
+# ★ CGAL/Manifold/FetchContent 非依存なので **常にビルドする** (SRAVA_MODULE_* の条件を持たない)。
+# ------------------------------------------------------------------
+tinystate_codegen(pt_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptsptWireCacheStreamWriterCloud.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptsptWireCacheStreamReaderCloud.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaPoints2D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaPoints3D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRand.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandPt2D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandPt3D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandGaussian.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandGaussianPt2D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandGaussianPt3D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandGaussianMix2D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRandGaussianMix3D.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaImport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaExport.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaVert.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaBbox.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaCentroid.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaValid.cpp
+  # ★ #3578: transform 一族 と union
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaTranslate.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaRotate.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaScale.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaMirror.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaTransform.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/ptaUnion.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/c++/pttsAgent.cpp)
+
+# 本体クラスと codec/reader/writer = **モジュール共通**。cg/gg/vd と同じ理由で共有ライブラリにする
+# (各 .so がコピーを持つと in-proc で d_cast が失敗する)。
+set(PT_GEOM_SRC
+  modules/points/c++/ptsptWireCacheStreamWriterCloud.cpp
+  modules/points/c++/ptsptWireCacheStreamReaderCloud.cpp
+  modules/points/c++/ptCacheCodec.cpp
+  modules/points/c++/ptCloud.cpp
+  modules/points/c++/ptRandom.cpp)   # ★ 乱数の生成器と区間の写像 (op ではなく型と同じ側)
+add_library(srava_pt SHARED ${PT_GEOM_SRC})
+
+# ★★★ #3576 (2026-09-22): ptRandom.cpp だけ **FMA 融合を禁じる**。
+#   rand 系の約束は「同じ引数なら同じ結果・**OS と機械をまたいでも**」。ところが
+#   @a*b+c@ を 1 命令 (FMA) に融合すると **丸めが 2 回から 1 回に減って値が変わる**。
+#   融合するかは *コンパイラと -march の裁量* なので、同じソースが機で違う値を出す。
+#   ⚠⚠ これは「libm が機に依る」のとは **別の穴**。ソースを自前にしても塞がらない
+#     (自前の pt_log_det が 13 か所・next_gauss が 1 か所・next_flt が 1 か所 融合されていた)。
+#   ⇒ 実測 (2026-09-22・bench): Linux で -mfma -ffp-contract=fast を付けると
+#     **mac (arm64/clang) の黄金値がそのまま再現した** = 機の差ではなく融合の差と確定。
+#   ★ off にすれば FMA 命令のある機でも融合しない ⇒ 両機で一致する。
+#   ⚠ next_flt も融合されるので、**#3572 の rand の浮動小数も同じ病気**だった
+#     (検定にビット単位の黄金値が無く見えていなかった)。この 1 行が両方を塞ぐ。
+#   ⚠⚠ **一覧に無いコンパイラは黙って無防備になる** — それが一番まずい形なので、
+#     知らないコンパイラは *止める*。約束 (OS をまたいでビット一致) が載っている所なので、
+#     「気づかないまま破れている」より「建たない」方がよい (黙るフォールバック禁止)。
+#   ★ Windows はこの木では **Cygwin / MinGW の GCC** (cygbuild.sh ・ if(CYGWIN)) なので
+#     GNU の枝で拾える。MSVC の口は無い ⇒ 足すときに **フラグを調べて**ここへ書くこと。
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang|IntelLLVM")
+  set_source_files_properties(modules/points/c++/ptRandom.cpp
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  message(FATAL_ERROR
+    "rand needs bit-identical floating point across machines, but this build does not know "
+    "how to disable FMA contraction for '${CMAKE_CXX_COMPILER_ID}'. Add the right flag for "
+    "this compiler next to modules/points/c++/ptRandom.cpp in CMakeLists.txt "
+    "(MSVC: /fp:precise with contraction off). Do not just widen the match: without the flag "
+    "rand_gaussian and rand's float path return different values on different machines.")
+endif()
+
+# ⚠ **FMA だけが穴ではない**。32bit x86 を x87 で建てると中間結果が 80bit で持たれ
+#   (FLT_EVAL_METHOD=2)、-ffp-contract=off でも値がずれる。⇒ その構成を作るなら
+#   -mfpmath=sse -msse2 も要る。★ いまの対象は x86-64 / arm64 だけなので該当しない
+#   (どちらも既定が SSE2 / NEON で余分な精度を持たない)。
+#   ⇒ **見張りは検定側** — test/srava_rand_gaussian.sh の黄金値が唯一の番人なので、
+#     新しい OS / 構成を足したら **必ずその 1 本を走らせる**こと。
+set_target_properties(srava_pt PROPERTIES OUTPUT_NAME "srava_pt" INSTALL_RPATH "$ORIGIN")
+srava_export_all(srava_pt)   # ★ Windows: 明示エクスポート
+target_link_libraries(srava_pt PUBLIC pig)
+target_compile_definitions(srava_pt PRIVATE SRAVA_VALUE_ONLY)
+target_include_directories(srava_pt PUBLIC ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h)
+add_dependencies(srava_pt pigts_codegen pt_ts_codegen gen_srava_parser)
+install(TARGETS srava_pt LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+
+srava_add_module(points_module
+  OUTPUT   points
+  SOURCES  modules/points/c++/ptaPoints2D.cpp
+           modules/points/c++/ptaPoints3D.cpp
+           modules/points/c++/ptaRand.cpp
+           modules/points/c++/ptaRandPt2D.cpp
+           modules/points/c++/ptaRandPt3D.cpp
+           modules/points/c++/ptaRandGaussian.cpp
+           modules/points/c++/ptaRandGaussianPt2D.cpp
+           modules/points/c++/ptaRandGaussianPt3D.cpp
+           modules/points/c++/ptaRandGaussianMix2D.cpp
+           modules/points/c++/ptaRandGaussianMix3D.cpp
+           modules/points/c++/ptaImport.cpp
+           modules/points/c++/ptaExport.cpp
+           modules/points/c++/ptaNverts.cpp
+           modules/points/c++/ptaVert.cpp
+           modules/points/c++/ptaBbox.cpp
+           modules/points/c++/ptaCentroid.cpp
+           modules/points/c++/ptaValid.cpp
+           # ★ #3578: transform 一族 と union
+           modules/points/c++/ptaTranslate.cpp
+           modules/points/c++/ptaRotate.cpp
+           modules/points/c++/ptaScale.cpp
+           modules/points/c++/ptaMirror.cpp
+           modules/points/c++/ptaTransform.cpp
+           modules/points/c++/ptaUnion.cpp
+           modules/points/c++/pttsAgent.cpp
+           modules/points/manifest.cpp
+  DEPENDS  pigts_codegen pt_ts_codegen gen_srava_parser
+  LINK     srava_pt
+  DEFINES  SRAVA_VALUE_ONLY
+  INCLUDES ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h
+  INSTALL)
+
+# points.so が dlopen でき記述子が読めること + 型軸に pt-cloud2d / pt-cloud3d が登録されること。
+add_test(NAME srava_module_points_so
+  COMMAND srava_module_probe $<TARGET_FILE:points_module>)
+set_tests_properties(srava_module_points_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=points .*make_agent=yes")
+add_test(NAME srava_type_points
+  COMMAND srava_module_probe $<TARGET_FILE:points_module>)
+set_tests_properties(srava_type_points PROPERTIES
+  PASS_REGULAR_EXPRESSION "TYPES pt-cloud2d,pt-cloud3d")
+
+# ------------------------------------------------------------------
+# geomutils.so — 素性を訊く計算の中立モジュール (#3527)。**外部ライブラリを持たない**。
+#
+#   bbox / area / centroid / valid / 位相 の中身は既に src/h/common/meshprops.h に定義ごと
+#   1 本で書かれており、manifold / geogram / cherchi はどれも内部表現から素の配列へ写して
+#   そこを通っている (mfMesh.cpp:1443 / ggMesh.cpp:246 …)。⇒ 実質「同じ型」を 3 者が名乗らずに
+#   作っていた。型として名乗らせ、1 モジュールが所有する (ひさ設計 2026-09-17)。
+#   ★ 2D も同じ相似形 (3D = 符号つき体積が正のシェル / 2D = 符号つき面積が正のリング) なので
+#     ringprops.h を対で新設し、型は 3 本 (gu-mesh3d / gu-cross2d / gu-face3d)。
+#   ★★ 4CC は manifold / geogram / cherchi と **共有** (MFM3 / MFC2)。こちらが書いた cache を
+#     向こうの create_for_meta が無改造で読めるので、往復に新しい変換が要らない。
+# ★ CGAL/Manifold/FetchContent 非依存なので **常にビルドする** (points.so と同じ)。
+# ------------------------------------------------------------------
+tinystate_codegen(gu_ts_codegen
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/ptsguWireCacheStreamWriterGeom.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/ptsguWireCacheStreamReaderGeom.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaArea.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaBbox.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaCentroid.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaGenus.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaNfaces.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaNparts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaNshells.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaValid.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaCast.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaVolume.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaPart.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaPartAt.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaDistanceAt.cpp   # ★ #3553
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaShell.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaShellAt.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaPtIntersection.cpp   # ★ #3579
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaPtDifference.cpp     # ★ #3579
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaVert.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaVerts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/guaFaceVerts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/c++/gutsAgent.cpp)
+
+# 本体クラスと codec/reader/writer = **モジュール共通**。各 .so がコピーを持つと in-proc で
+# d_cast が失敗するので共有ライブラリにする (cg/gg/vd/pt と同じ理由)。
+set(GU_GEOM_SRC
+  modules/geomutils/c++/ptsguWireCacheStreamWriterGeom.cpp
+  modules/geomutils/c++/ptsguWireCacheStreamReaderGeom.cpp
+  modules/geomutils/c++/guCacheCodec.cpp
+  modules/geomutils/c++/guGeom.cpp)
+# ★ #3527 段 5: guCacheCodec.cpp が &ptCloud::WIRE を並べる (verts が返す **値の器** を借りる)
+#   ので srava_pt に依存する。cgal / geogram と同じ形。
+add_library(srava_gu SHARED ${GU_GEOM_SRC})
+set_target_properties(srava_gu PROPERTIES OUTPUT_NAME "srava_gu" INSTALL_RPATH "$ORIGIN")
+srava_export_all(srava_gu)   # ★ Windows: 明示エクスポート
+target_link_libraries(srava_gu PUBLIC pig srava_pt)
+target_compile_definitions(srava_gu PRIVATE SRAVA_VALUE_ONLY)
+target_include_directories(srava_gu PUBLIC ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/h
+                                          ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h)
+add_dependencies(srava_gu pigts_codegen gu_ts_codegen gen_srava_parser)
+install(TARGETS srava_gu LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+
+srava_add_module(geomutils_module
+  OUTPUT   geomutils
+  SOURCES  modules/geomutils/c++/guaCast.cpp
+           modules/geomutils/c++/guaArea.cpp
+           modules/geomutils/c++/guaBbox.cpp
+           modules/geomutils/c++/guaCentroid.cpp
+           modules/geomutils/c++/guaGenus.cpp
+           modules/geomutils/c++/guaNfaces.cpp
+           modules/geomutils/c++/guaNparts.cpp
+           modules/geomutils/c++/guaNshells.cpp
+           modules/geomutils/c++/guaNverts.cpp
+           modules/geomutils/c++/guaValid.cpp
+           modules/geomutils/c++/guaVolume.cpp
+           modules/geomutils/c++/guaPart.cpp
+           modules/geomutils/c++/guaPartAt.cpp
+           modules/geomutils/c++/guaDistanceAt.cpp   # ★ #3553
+           modules/geomutils/c++/guaShell.cpp
+           modules/geomutils/c++/guaShellAt.cpp
+           modules/geomutils/c++/guaPtIntersection.cpp   # ★ #3579
+           modules/geomutils/c++/guaPtDifference.cpp     # ★ #3579
+           modules/geomutils/c++/guaVert.cpp
+           modules/geomutils/c++/guaVerts.cpp
+           modules/geomutils/c++/guaFaceVerts.cpp
+           modules/geomutils/c++/gutsAgent.cpp
+           modules/geomutils/manifest.cpp
+  DEPENDS  pigts_codegen gu_ts_codegen gen_srava_parser
+  LINK     srava_gu srava_pt
+  DEFINES  SRAVA_VALUE_ONLY
+  INCLUDES ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/geomutils/h
+           ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h
+  INSTALL)
+
+# ★ #3579: 点群と mesh の積と差。⚠ 番犬の予算は素の所要を測ってから (既定 10 秒)。
+# ⚠ points は常に建つ (option が無い) ので manifold だけ見る。★ 存在しない変数で
+#   囲うと **テストが黙って登録されない** — 1 度そう書いた (SRAVA_MODULE_POINTS)。
+if(SRAVA_MODULE_MANIFOLD)
+  add_test(NAME srava_ptsplit
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_ptsplit.sh
+            $<TARGET_FILE:srava> manifold.so)
+  set_tests_properties(srava_ptsplit PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ptsplitcache"
+    PASS_REGULAR_EXPRESSION "PTSPLIT-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|PTSPLIT_FAIL|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endif()
+
+# geomutils.so が dlopen でき記述子が読めること + 型軸に 3 本が登録されること (#3527 段 1)。
+add_test(NAME srava_module_geomutils_so
+  COMMAND srava_module_probe $<TARGET_FILE:geomutils_module>)
+set_tests_properties(srava_module_geomutils_so PROPERTIES
+  PASS_REGULAR_EXPRESSION "MODULE_OK name=geomutils .*make_agent=yes")
+add_test(NAME srava_type_geomutils
+  COMMAND srava_module_probe $<TARGET_FILE:geomutils_module>)
+set_tests_properties(srava_type_geomutils PROPERTIES
+  PASS_REGULAR_EXPRESSION "TYPES gu-mesh3d,gu-cross2d,gu-face3d")
+
+# hull(点群) の回帰 (#3528 続き)。★ "(*!)" = 分解禁止が効いていることの回帰でもある。
+if(SRAVA_MODULE_CGAL)
+  add_test(NAME srava_hull_points
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_hull_points.sh $<TARGET_FILE:srava>)
+  set_tests_properties(srava_hull_points PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/hullptcache"
+    PASS_REGULAR_EXPRESSION "HULLPT_OK"
+    FAIL_REGULAR_EXPRESSION "HULLPT_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+endif()
+
+# 点群の振る舞い回帰 (往復 / 法線 / 閉形式 / 明示エラー)。意図は test/srava_points.sh 冒頭。
+add_test(NAME srava_points
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_points.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_points PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/ptcache"
+  PASS_REGULAR_EXPRESSION "POINTS_OK"
+  FAIL_REGULAR_EXPRESSION "POINTS_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# 擬似乱数 rand (行 rand / rand#pt2d / rand#pt3d) の回帰。意図は test/srava_rand.sh 冒頭。
+#   ★★★ 検定の本体は「同じ引数なら必ず同じ結果」 — **別のキャッシュ dir で 2 回**走らせて
+#     一致することと、**ハードコードした黄金値**に一致すること (後者だけが OS をまたぐ)。
+add_test(NAME srava_rand
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_rand.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_rand PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/randcache"
+  PASS_REGULAR_EXPRESSION "RAND_OK"
+  FAIL_REGULAR_EXPRESSION "RAND_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+# 正規分布の擬似乱数 rand_gaussian (#3576)。意図は test/srava_rand_gaussian.sh 冒頭。
+#   ★ SRAVA_HANG_SECS は **書かない** — 素の所要は 1.61 秒 (mac 実測 2026-09-22 ・ #3577 込み) で
+#     既定 10 秒に対し余裕 x6.2。⇒ 番犬が空振りしない。
+#     ⚠ 一度 50 秒まで膨らんだ: 2000 点を srava の for で vert() して数えていたため (48.6 秒)。
+#       ⇒ centroid で O(1) に置き換えた。**同じ情報が O(1) で取れるときにループを書かない**。
+#     ⚠ 遅い機で 3.3 秒を越えたら予算を書くこと (両機の遅い方 x3 が原則 ・ 0df54df)。
+add_test(NAME srava_rand_gaussian
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_rand_gaussian.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_rand_gaussian PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/gausscache"
+  PASS_REGULAR_EXPRESSION "GAUSS_OK"
+  FAIL_REGULAR_EXPRESSION "GAUSS_FAIL|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 120)
+
+# Voronoi (#3525) の振る舞い回帰。cgal・2D。意図は test/srava_voronoi.sh 冒頭。
+#   ★ cgal (voronoi / part / nparts の 2D) と points.so (サイトの点群) の両方が要る。
+if(SRAVA_MODULE_CGAL)
+  add_test(NAME srava_voronoi
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_voronoi.sh $<TARGET_FILE:srava>)
+  # ⚠⚠ **TIMEOUT を必ず置く** (bench・2026-09-16)。置かずに合流したところ、Linux (CGAL 6.0.1) で
+  #   3D の voronoi が **CGAL の corefinement 内で無限ループ**し、ctest が **80 分止まった**
+  #   (ctest の既定 TIMEOUT は 1500 秒だが、他の並列枠を道連れにするので実質そこで終わる)。
+  #   ★ 番犬が T+10s で撮った bt が真因を名指ししている:
+  #       CGAL::PMP::Corefinement::compute_border_edge_map (face_graph_utils.h:1848)
+  #         → next_marked_halfedge_around_target_vertex    (face_graph_utils.h:851)
+  #     = 印のある稜に当たるまで頂点まわりを回る関数で、**見つからないと戻らない**。
+  #   ⇒ 最小再現は **2 サイトで足りる**:
+  #       voronoi(points3d([[0.5,1.0,1.0],[1.5,1.0,1.0]]), [[0,0,0],[2,2,2]])
+  #     1 サイトは通る / 2D は通る ⇒ 3D の最初の clip で起きる。
+  #   ⚠ 併せて ⑨ の同一平面 10 サイトは **SIGSEGV** (別の壊れ方)。
+  #   ★ mac (macMINI) では 487/487 緑 ⇒ **CGAL の版差**の疑い。#3525 の担当で切り分け中。
+  #   ⚠ SRAVA_HANG_SECS も要る — この本は 10 秒を越えるので、既定のままだと
+  #     *緑のときも* 毎回 /tmp/srava-hang/ に捕獲が残り、本物が埋もれる。
+  set_tests_properties(srava_voronoi PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/vorcache;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_HANG_SECS=120"
+    PASS_REGULAR_EXPRESSION "VORONOI_OK"
+    FAIL_REGULAR_EXPRESSION "VORONOI_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly"
+    TIMEOUT 300)
+endif()
+
+# ★ estimate_normals は **1 つの op に実装が 2 つ** — cgal (pca + mst) と geogram (Co3Ne)。
+#   両方ロードしていれば priority で cgal (20 > 6) が受け、"geogram"::estimate_normals で名指せる。
+#   ⇒ cgal が要る (型と points.so は要るが、推定の実装がここに 1 本も無いと検定できない)。
+#   geogram があれば 2 実装の比較とキャッシュ分離まで見る。意図は test/srava_estimate_normals.sh 冒頭。
+if(SRAVA_MODULE_CGAL)
+  if(SRAVA_MODULE_GEOGRAM)
+    set(_EN_GG geogram)
+  else()
+    set(_EN_GG "")
+  endif()
+  add_test(NAME srava_estimate_normals
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_estimate_normals.sh $<TARGET_FILE:srava> ${_EN_GG})
+  set_tests_properties(srava_estimate_normals PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/encache"
+    PASS_REGULAR_EXPRESSION "EN_OK"
+    FAIL_REGULAR_EXPRESSION "EN_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
+
+  # ★★ #3527: vert(m, i) — 「数える」(nverts) と「取り出す」(vert) が **同じ列を同じ順**で
+  #   見ていることの検査。⚠ 本体は ② の **索引の再現性** (索引は実装依存で、値としては
+  #   常に「正しい頂点のどれか」なので **値の検査では壊れても捕まらない**)。
+  #   ⇒ *別のキャッシュ dir で計算し直しても並びが同じか* を見る (#3518 の face と同じ形)。
+  #   ⚠ 同じ cache dir で 2 回流すのは検定にならない (2 回目は HIT で読み直すだけ)。
+  # ★★ #3527: shell(m, i) — 殻 (面の連結成分) を取り出す。★ 検査の本体は
+  #   **Σ 符号つき体積 == 全体の体積**。向きを保つ (案 A) からこそ成り立つ性質で、
+  #   向きを揃える案 (B) にすると 64+8=72 になって落ちる ⇒ **設計の選択を検査が区別する**。
+  # ★ shell / shell_at を 1 本で見る。⑦ が位置で指す側 (同距離は断る)。
+  add_test(NAME srava_shell
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_shell.sh $<TARGET_FILE:srava> cgal.so)
+  set_tests_properties(srava_shell PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/shellcache"
+    PASS_REGULAR_EXPRESSION "SHELL-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly"
+    TIMEOUT 180)
+
+  add_test(NAME srava_vert
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_vert.sh $<TARGET_FILE:srava> cgal.so)
+  set_tests_properties(srava_vert PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/vertcache"
+    PASS_REGULAR_EXPRESSION "VERT-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly"
+    TIMEOUT 120)
+endif()
+
 # ==================================================================
 # .so 化 Phase 3b/3c: カーネル .so (cgal.so / manifold.so) + dlopen ローダ検証プローブ。
 #   幾何ソース (AGENT_HOST_SRC / CGAL_KERNEL_SRC) は srava_agent の直前で定義済み。
@@ -962,15 +1391,22 @@ set(CG_GEOM_SRC
   modules/cgal/c++/cgCacheCodec.cpp
   modules/cgal/c++/cgMesh.cpp
   modules/cgal/c++/cgMesh3D.cpp
-  modules/cgal/c++/cgMesh2D.cpp)
+  modules/cgal/c++/cgMesh2D.cpp
+  modules/cgal/c++/cgHull.cpp
+  modules/cgal/c++/cgVoronoi.cpp
+  modules/cgal/c++/cgDelaunay.cpp
+  modules/cgal/c++/cgLoft.cpp
+  modules/cgal/c++/cgRemesh.cpp
+  modules/cgal/c++/cgEstimateNormals.cpp)   # ★ #3545 段 2: 点集合処理 (EPICK) を op から引き取った
 add_library(srava_cg SHARED ${CG_GEOM_SRC})
 set_target_properties(srava_cg PROPERTIES OUTPUT_NAME "srava_cg" INSTALL_RPATH "$ORIGIN")
 srava_export_all(srava_cg)   # ★ Windows: 明示エクスポート
-target_link_libraries(srava_cg PUBLIC pig CGAL::CGAL)
+# ★ #3528: cgCacheCodec.cpp が &ptCloud::WIRE を並べる (点群型を借りる) ので srava_pt に依存する。
+target_link_libraries(srava_cg PUBLIC pig srava_pt CGAL::CGAL)
 target_compile_definitions(srava_cg PRIVATE SRAVA_VALUE_ONLY)
 target_include_directories(srava_cg PUBLIC ${SRAVA_GEN})
 add_dependencies(srava_cg pigts_codegen gen_srava_parser)
-install(TARGETS srava_cg LIBRARY DESTINATION lib)
+install(TARGETS srava_cg LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 
 list(REMOVE_ITEM CGAL_KERNEL_SRC ${CG_GEOM_SRC})
 
@@ -978,7 +1414,10 @@ srava_add_module(cgal
   OUTPUT   cgal
   SOURCES  ${CGAL_KERNEL_SRC} modules/cgal/manifest.cpp
   DEPENDS  pigts_codegen gen_srava_parser
-  LINK     srava_cg CGAL::CGAL
+  # ★ #3528: srava_pt = 点群の本体クラス + codec + reader/writer (カーネル中立)。
+  #   estimate_normals が **本物の ptCloud** を受け取るために借りる (コピーを持つと in-proc で
+  #   d_cast が失敗する)。新しいクラスも wire 形式も作らない。
+  LINK     srava_cg srava_pt CGAL::CGAL
   DEFINES  SRAVA_VALUE_ONLY
   INCLUDES ${SRAVA_GEN}
   INSTALL)
@@ -1148,12 +1587,16 @@ target_sources(srava PRIVATE
 #   EXEC_PROCESS 専用 = 2 個目の in-proc thread カーネル境界 (⑤・保留中) を踏まない。
 #   スクリプト側は `module("demo.so",{priority:99})` で demo を既定カーネルにする (opt-in)。
 # ------------------------------------------------------------------
+# ★ #3417 (2026-09-06): demaCompute (ptsCalcBody 派生) を追加。実行体は待ち状態のまま
+#   イベントを受け続け、計算は calc の専用 thread で回す — ppatsAgent + ppaCompute と同じ形。
 tinystate_codegen(demo_ts_codegen
-  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/dematsAgent.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/dematsAgent.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/demo/demaCompute.cpp)
 # ★ INSTALL を付けない = 配布物には入れない (第3モジュールの実証用でテスト専用)。
 srava_add_module(demo_module
   OUTPUT   demo
   SOURCES  modules/demo/dematsAgent.cpp
+           modules/demo/demaCompute.cpp
            modules/demo/demo_compute.cpp
            modules/demo/manifest.cpp
   DEPENDS  pigts_codegen demo_ts_codegen
@@ -1162,6 +1605,131 @@ srava_add_module(demo_module
 # demo.so が dlopen でき記述子 (make_agent 付き) が読めることを検証 (RTLD_NOW 全解決)。
 add_test(NAME srava_module_demo_so
   COMMAND srava_module_probe $<TARGET_FILE:demo_module>)
+
+# ---- ★ #3503: in-proc の居座り panic。d4 (in-proc テストモジュール) の d4_wedge が
+#   中断要求を無視するので、実カーネルでは作れない「in-proc なのに居座る」を再現できる。
+#     off = 既定では panic しない (居座る)
+#     on  = panic するが **子プロセスを迷子にしない** (demo=process 専用と同時に走らせる)
+#   ⚠ RUN_SERIAL — 生きている agent プロセスを数えるので、並行するテストの agent が混ざると誤判定する。
+# ★ #3521 (2026-09-15): 撃ち方は OS で違う。Windows は MSYS の kill が **native プロセスに
+#   届かない** (しかも rc=0 を返す) ので、win_sigbreak 経由で新プロセスグループへ CTRL_BREAK を送る。
+#   ⚠ これを入れるまで **off は「届かないので居座った」を「期待どおり居座った」と空振りで
+#     合格**していた (box で実測)。⚠ win_sigbreak は if(WIN32) の中でしか定義されない。
+set(_ip_env "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/inproc-panic;SRAVA_MODULE_PATH=${CMAKE_BINARY_DIR};SRAVA_HANG_SECS=90")
+if(WIN32)
+  set(_ip_env "${_ip_env};WIN_SIGBREAK=$<TARGET_FILE:win_sigbreak>")
+endif()
+foreach(_pm off on)
+  add_test(NAME srava_inproc_panic_${_pm}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_inproc_panic.sh $<TARGET_FILE:srava> ${_pm})
+  set_tests_properties(srava_inproc_panic_${_pm} PROPERTIES
+    ENVIRONMENT "${_ip_env}"
+    PASS_REGULAR_EXPRESSION "INPROC-PANIC-.*-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|core dumped"
+    RUN_SERIAL TRUE
+    TIMEOUT 120)
+endforeach()
+
+# ★ #3417 (2026-09-06): 撤収 (Ctrl+C 等) の回帰。demo_spin で「計算中の agent」を作り、
+#   SIGINT で短時間に畳まれること・agent が残らないこと・終了コードが 130 になることを見る。
+#   ⚠ demo モジュールが要る (遅い op を持つのは demo だけ。実カーネルには触らない)。
+# ★★ #3541 (2026-09-15): **system() の子まで撤収が届くか** + **終了コードが 128+signum か**。
+#   srava_teardown_sigint (agent 経路) と対になる検定。⚠ agent 経路では評価がエラーに落ちるので
+#   ①(終了コード) が隠れており、**system 経路でしか見えない**。
+#   ★ 形 A (var に受ける) と 形 B (組込の引数位置) の **両方**を回す — 経路が違うので、
+#     形 A だけでは ② の退行が見えない。
+#   ⚠ `x 15` を直接見ない — 15 は POSIX の raw waitpid status の表現で、Windows は raw の
+#     終了コードを返すので 15 にならない。⇒ **対照 (撃たない run) との差**で見る。
+#   ★ 較正: ②を直す前は 形 B が「17 秒 / x が対照と同じ」で **両方の判定が独立に赤**だった
+#     (simu01 が develop-v1 e830fb9 で確認)。①を直す前は rc=1 で (c) が赤。
+add_test(NAME srava_teardown_sysint
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_teardown.sh $<TARGET_FILE:srava> sysint)
+# ⚠⚠ 番犬を 60 秒へ上げる (bench 指摘 2026-09-15)。このテストは **対照 (撃たない run) が
+#   system("sleep 12") を完走させる**設計なので、既定 10 秒の番犬に **必ず**引っかかる。
+#   ⇒ 捕獲は「テスト自身が意図的に待っているところ」(State=S / TracerPid 0 / wchan=do_wait) で、
+#     ★ テストは **緑のまま** /tmp/srava-hang/ に証拠だけが溜まる = **本物が埋もれる**。
+#   ⚠ 番犬はテストを落とさないので、**緑では気づけない**。mac でも実際に 26 枚溜まっていた。
+# ⚠ 60 → 120 (2026-09-22): Linux 実測 30.2s で **余裕が x2.0 しかなかった**。この本は対照が
+#   system("sleep 12") を完走させる設計なので所要が縮まない ⇒ 遅い機で越える。TIMEOUT は 180。
+set(_td_sysint_env "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/tdcache-sysint;SRAVA_HANG_SECS=120")
+# ⚠⚠ 2026-09-19: ここは以前 `if(WIN32 AND TARGET win_sigbreak)` だった。**TARGET は configure 時に
+#   その場で評価される**ので、win_sigbreak の add_executable (この下の方・1899 行あたり) より前に
+#   在るこの行では **常に偽**になり、WIN_SIGBREAK が **黙って落ちていた**。
+#   ⇒ Windows でこのテストは POSIX の `kill -INT` 経路へ落ち、native プロセスに届かないまま
+#     (しかも kill は rc=0 を返す) 子が完走し、「子まで撤収が届いていない (#3541 ②)」と
+#     **製品のせいにして赤くなっていた** (box で毎回赤・実際は撃てていなかった)。
+#   ★ 他の 3 箇所 (inproc_panic / teardown_sigint / teardown_ctrlc) は `if(WIN32)` だけで、
+#     $<TARGET_FILE:> は **生成時**に解決されるので後方定義でも効く。⇒ そちらに揃える。
+if(WIN32)
+  set(_td_sysint_env "${_td_sysint_env};WIN_SIGBREAK=$<TARGET_FILE:win_sigbreak>")
+endif()
+set_tests_properties(srava_teardown_sysint PROPERTIES
+  ENVIRONMENT "${_td_sysint_env}"
+  PASS_REGULAR_EXPRESSION "TEARDOWN-SYSINT-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+  RUN_SERIAL TRUE
+  TIMEOUT 180)
+
+add_test(NAME srava_teardown_sigint
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_teardown.sh $<TARGET_FILE:srava> sigint)
+# ★ #3520 (2026-09-15): 撃ち方は OS で違う。Windows は MSYS の kill が **native プロセスに
+#   届かない** (しかも rc=0 を返す) ので、win_sigbreak 経由で新プロセスグループへ CTRL_BREAK を送る。
+#   ⚠ win_sigbreak は if(WIN32) の中でしか定義されないので、$<TARGET_FILE:> も WIN32 でだけ使う。
+set(_td_sigint_env "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/tdcache-sigint")
+if(WIN32)
+  set(_td_sigint_env "${_td_sigint_env};WIN_SIGBREAK=$<TARGET_FILE:win_sigbreak>")
+endif()
+set_tests_properties(srava_teardown_sigint PROPERTIES
+  ENVIRONMENT "${_td_sigint_env}"
+  PASS_REGULAR_EXPRESSION "TEARDOWN-SIGINT-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+  RUN_SERIAL TRUE
+  TIMEOUT 120)
+
+
+# ★★ #3482 (2026-09-20): **利用者が書いた try の中の async に撤収が届くか**。
+#   ⚠⚠ agent の登録先は「囲む最も内側の try 1 つだけ」で、根の台帳へは登録しない。
+#     外側から内側を畳むのは **destroy が pigData の木を伝わる**方が担う。
+#     ⇒ その経路が切れると **try の中だけ畳まれない**が、srava_teardown_sigint は
+#       try を使わないので気づけない。
+#   ★ 判別できるのは @async@ だけ — @try { print(demo_spin(30)) }@ の形は statement1 への
+#     destroy 転送で畳まれてしまい、**待ちリスト経由の転送を殺しても緑のまま**だった
+#     (2026-09-20 に陰性対照で実測。async 版は 27 秒 = spin 完走になる)。
+#   ★ 撃ち方は srava_teardown_sigint と同じ関数を使う (スクリプト内 shoot)。
+add_test(NAME srava_teardown_tryasync
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_teardown.sh $<TARGET_FILE:srava> tryasync)
+set(_td_tryasync_env "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/tdcache-tryasync")
+if(WIN32)
+  set(_td_tryasync_env "${_td_tryasync_env};WIN_SIGBREAK=$<TARGET_FILE:win_sigbreak>")
+endif()
+set_tests_properties(srava_teardown_tryasync PROPERTIES
+  ENVIRONMENT "${_td_tryasync_env}"
+  PASS_REGULAR_EXPRESSION "TEARDOWN-TRYASYNC-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+  RUN_SERIAL TRUE
+  TIMEOUT 120)
+
+# ★★ #3542 の退行検出 (2026-09-15・ひさ判断で srava 側に置く)。**Windows/MinGW 専用**。
+#   ⚠ srava_teardown_sigint は移植性のため CTRL_BREAK で撃つ (「Ctrl+C を無視」状態の対象外)。
+#     ⇒ **Ctrl+C の入口が 1 度も検定されない** — #3542 が退行しても緑のままになる。
+#   ★ CREATE_NEW_PROCESS_GROUP の子は Ctrl+C が無効で、子が SetConsoleCtrlHandler(NULL,FALSE)
+#     で解除して初めて届く。⇒ **CTRL_C が通ること自体が判定**になる。
+#   ⚠ 対照は srava_teardown_sigint (撃ち方だけ違う同じ仕事)。あちらが緑でこちらだけ赤なら
+#     違いは **イベント種別だけ**なので原因が一意に絞れる。
+#   ⚠⚠ **古い tinyState では必ず赤くなる** — 修正は develop-v2 74722f5 で、公開版では
+#     **v2.0.0-rc17 から**入っている (rc16 以前には無い)。
+#     赤が出たら *リンクしている tinyState が古い* を先に疑う。
+if(WIN32)
+  add_test(NAME srava_teardown_ctrlc
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_teardown.sh $<TARGET_FILE:srava> ctrlc)
+  set_tests_properties(srava_teardown_ctrlc PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/tdcache-ctrlc;WIN_SIGBREAK=$<TARGET_FILE:win_sigbreak>;SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "TEARDOWN-CTRLC-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    RUN_SERIAL TRUE
+    TIMEOUT 120)
+endif()
+
 set_tests_properties(srava_module_demo_so PROPERTIES
   PASS_REGULAR_EXPRESSION "MODULE_OK name=demo .*make_agent=yes")
 
@@ -1173,6 +1741,15 @@ set_tests_properties(srava_module_demo_ops PROPERTIES
   PASS_REGULAR_EXPRESSION "DEMO_OK"
   FAIL_REGULAR_EXPRESSION "DEMO_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly")
 
+
+# ★★ #3554 段1: **`op#変種` の行**が routing に効いていることの回帰 (demo.so の検定用の行を走らせる)。
+#   ⚠ 製品の op はまだ変種行を持たないので、これが無いと段1 は「機能不変」しか確かめられない。
+add_test(NAME srava_op_variant
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_op_variant.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_op_variant PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-opvariant;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR}"
+  PASS_REGULAR_EXPRESSION "OP-VARIANT-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|unknown op|undefined variable")
 
 # ------------------------------------------------------------------
 # d3.so — 第3(mesh 出力)カーネル実証 (rev4 Phase D-3・エージェント非依存の最終形)。
@@ -1260,6 +1837,7 @@ tinystate_codegen(d4_ts_codegen
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aMerge.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aNfaces.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aNverts.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4aWedge.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/modules/d4/d4atsAgent.cpp)
 # ★ INSTALL を付けない = テスト専用モジュール (配布物には入れない)。
 srava_add_module(d4_module
@@ -1273,6 +1851,7 @@ srava_add_module(d4_module
     modules/d4/d4aMerge.cpp
     modules/d4/d4aNfaces.cpp
     modules/d4/d4aNverts.cpp
+    modules/d4/d4aWedge.cpp
     modules/d4/d4atsAgent.cpp
     modules/d4/manifest.cpp
   DEPENDS  pigts_codegen d4_ts_codegen
@@ -1586,6 +2165,210 @@ set_tests_properties(srava_control_flow PROPERTIES
   PASS_REGULAR_EXPRESSION "CF= 122"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
   TIMEOUT 15)
+
+# ★★ #3482 段 1: try/catch 文。⚠ FAIL 正規表現に "ERROR" を入れない —
+#   これらのモードは **エラー文言そのもの** を検査対象にするので、入れると必ず赤になる。
+add_test(NAME srava_trycatch
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch)
+set_tests_properties(srava_trycatch PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch"
+  PASS_REGULAR_EXPRESSION "TRYCATCH_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 15)
+
+# コントロール系 (break/continue/return) は try で捕まえずそのまま抜ける。
+add_test(NAME srava_trycatch_control
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_control)
+set_tests_properties(srava_trycatch_control PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-ctrl"
+  PASS_REGULAR_EXPRESSION "TRYCTRL_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
+  TIMEOUT 15)
+
+# catch 無し = エラーを握り潰さずそのまま戻り値にする (後続の文は走らない)。
+add_test(NAME srava_trycatch_nocatch
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_nocatch)
+set_tests_properties(srava_trycatch_nocatch PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-nc"
+  PASS_REGULAR_EXPRESSION "TRYNOCATCH_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYNOCATCH_FAIL"
+  TIMEOUT 15)
+
+# ★ error() は catch 本体の中だけ — 外は **パース時** に弾く (実行前に分かる)。
+add_test(NAME srava_trycatch_static
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_static)
+set_tests_properties(srava_trycatch_static PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-st"
+  PASS_REGULAR_EXPRESSION "TRYSTATIC_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYSTATIC_FAIL"
+  TIMEOUT 15)
+
+# ★★ try の帰属は動的 (定義地点ではなく呼び出し元)。#3482 §4.6。
+add_test(NAME srava_trycatch_dynamic
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_dynamic)
+set_tests_properties(srava_trycatch_dynamic PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-dyn"
+  PASS_REGULAR_EXPRESSION "TRYDYN_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
+  TIMEOUT 15)
+
+# catch の外へ持ち出した lambda の error() は実行時に弾く (構文では見切れない経路)。
+add_test(NAME srava_trycatch_escape
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_escape)
+set_tests_properties(srava_trycatch_escape PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-esc"
+  PASS_REGULAR_EXPRESSION "TRYESCAPE_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYESCAPE_FAIL"
+  TIMEOUT 15)
+
+# ★ error() が返す **中身のハッシュ** (message / class / file / line) の値を 1 つずつ見る。
+add_test(NAME srava_trycatch_hash
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_hash)
+set_tests_properties(srava_trycatch_hash PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-hash"
+  PASS_REGULAR_EXPRESSION "TRYHASH_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 15)
+
+# ★★ `try { s }` ≡ `try { s } catch { throw error(); }` を **出力の一致**で見る。
+add_test(NAME srava_trycatch_throw
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_throw)
+set_tests_properties(srava_trycatch_throw PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-throw"
+  PASS_REGULAR_EXPRESSION "TRYTHROW_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYTHROW_FAIL"
+  TIMEOUT 20)
+
+# ★★ #3482 段 2: try は自分のスコープで起動した agent を **見送る** (待ちリスト)。
+#   同じ検査を try の中と後で行い、差が出ることを見る。
+add_test(NAME srava_trycatch_barrier
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_barrier)
+set_tests_properties(srava_trycatch_barrier PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-barrier"
+  PASS_REGULAR_EXPRESSION "TRYBARRIER_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYBARRIER_SKIPPED|parse error"
+  TIMEOUT 60)
+
+# destroy(): try の外では実行時エラー (送る先が無い)。
+add_test(NAME srava_trycatch_destroyop
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_destroyop)
+set_tests_properties(srava_trycatch_destroyop PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-dop"
+  PASS_REGULAR_EXPRESSION "TRYDESTROYOP_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYDESTROYOP_FAIL"
+  TIMEOUT 15)
+
+# ★★ #3482: try が畳んだ agent の失敗は「畳まれた跡」(PE_DERIVED) で報告・終了コードから外れる。
+#   ⚠ 本物の失敗が今も rc!=0 で報告されることを同じテストで併せて見る (握り潰しとの区別)。
+add_test(NAME srava_trycatch_derived
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_derived)
+set_tests_properties(srava_trycatch_derived PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-der"
+  PASS_REGULAR_EXPRESSION "TRYDERIVED_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYDERIVED_FAIL"
+  TIMEOUT 60)
+
+# ★★ #3482 段 4: async 本体の失敗が try/catch で捕まる。
+#   ⚠ catch 無し / トップレベルが **今も報告される**ことを同じテストで併せて見る (握り潰しとの区別)。
+add_test(NAME srava_trycatch_async
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_async)
+set_tests_properties(srava_trycatch_async PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-async"
+  PASS_REGULAR_EXPRESSION "TRYASYNC_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYASYNC_FAIL"
+  TIMEOUT 60)
+
+# ★★ #3482: flush() は「その try の待ちが空になるまで」のバリア (本体 / catch / 根 の 3 か所)。
+add_test(NAME srava_trycatch_flush
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_flush)
+#   ⚠ SRAVA_HANG_SECS も要る — flush() は「待ちが空になるまで」を 3 か所で見る本なので
+#     素の所要が **10 秒を越える**。既定 10 秒のままだと番犬が毎回撮るが *テストは緑* なので
+#     気づけず、捕獲だけが溜まる (09-19〜09-22 で 37 件)。
+#   ★ 予算は **両機の実測を並べて遅い方の x3** (2026-09-22 に 2 機で測り直した):
+#       mac (arm64/OCCT 7.9.3)  **21.26s**  ← 遅い方。⚠ 負荷で 16〜21s と揺れるので最大を採る
+#       Linux (x86_64/7.8.1)     15.80s     (3 走で 15.79 / 15.80 / 15.80)
+#     ⇒ 21.26 x 3 = 63.8 ⇒ **75s** (⚠ TIMEOUT 90 より小さく。60 では mac で x2.8 しか無かった)
+set_tests_properties(srava_trycatch_flush PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-flush;SRAVA_HANG_SECS=75"
+  PASS_REGULAR_EXPRESSION "TRYFLUSH_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYFLUSH_FAIL"
+  TIMEOUT 90)
+
+# ★★ #3482: agent が途中で死んだときの文言にも module/op が前置きされる (#3475 の規約)。
+add_test(NAME srava_agent_fail_name
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> agent_fail_name)
+set_tests_properties(srava_agent_fail_name PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-agentfailname"
+  PASS_REGULAR_EXPRESSION "AGENTFAILNAME_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|AGENTFAILNAME_FAIL"
+  TIMEOUT 30)
+
+# ★★ #3482: 撤収は pigData の木を通る (system() は待ちリストに載らないので木でしか届かない)。
+#   陽性対照つき: destroy しない側では マーカーが出来ることも見る。
+add_test(NAME srava_trycatch_tree_destroy
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_tree_destroy)
+# ⚠⚠ 番犬の予算 — **この本には「実測 x3」を当ててはいけない** (2026-09-23 に誤りと判明)。
+#   旧: 「最も遅い機の実測 x3」で 15s (mac 3.80s / Linux 3.37s)。
+#   ★ 誤りの中身: 測っていたのは **速い経路の所要**だけ。この本は下の待ちループで
+#     **設計上 20 秒まで待つ** (b の done を取りこぼさないための上限つきループ)。
+#     ⇒ 予算 15 < 内部の上限 20 という逆転になっていて、**b が遅い回 = まさにループを
+#       足した理由の回**に、緑のまま番犬の捕獲だけが溜まる。
+#   ⇒ **内部に明示の上限を持つ本は「上限 + 前段の所要」から決める**:
+#       20 (ループ上限) + 約 5 (srava 2 回) = 正当な最悪 ~25s ⇒ 余裕をみて **45s**。
+#     TIMEOUT 60 は据え置き (45 + 捕獲の採取 ~4s = ~49s で、60 に収まる)。
+#   実測 (2026-09-23 simu01 ・ ctest -j8 の負荷下 ・ 2 回): **4.40s / 4.40s** = 速い経路は健全。
+set_tests_properties(srava_trycatch_tree_destroy PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-tree;SRAVA_HANG_SECS=45"
+  PASS_REGULAR_EXPRESSION "TRYTREEDESTROY_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYTREEDESTROY_FAIL"
+  TIMEOUT 60)
+
+# ★★ #3482: 「env を作る場所は全部 try をリレーする」の不変条件。制御 op を一通り回して
+#   どこでも agent が登録できる (= no enclosing try が出ない) ことを見る。
+add_test(NAME srava_try_relay
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> try_relay)
+set_tests_properties(srava_try_relay PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-try-relay"
+  PASS_REGULAR_EXPRESSION "TRYRELAY_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYRELAY_FAIL"
+  TIMEOUT 90)
+
+# ★★ #3482 の上位互換: try を書かないプログラムでの「主エラー + other agents reported: の列挙」。
+add_test(NAME srava_agent_error_list
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> agent_error_list)
+set_tests_properties(srava_agent_error_list PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-agent-errlist"
+  PASS_REGULAR_EXPRESSION "AGENTERRLIST_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|AGENTERRLIST_FAIL"
+  TIMEOUT 30)
+
+# ★★ #3482 §2-A: catch の中で error() を何度でも呼べる (1 件ずつ・尽きたら 0)。
+#   2 件目は error() が待って取れる = 「待ちを担うのは error()」も同時に見る。
+add_test(NAME srava_trycatch_multi
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_multi)
+set_tests_properties(srava_trycatch_multi PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-multi"
+  PASS_REGULAR_EXPRESSION "TRYMULTI_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYMULTI_FAIL"
+  TIMEOUT 30)
+
+# ★★ #3482: catch の destroy() は **その try で生成された分だけ**を壊す (外の async は完走する)。
+add_test(NAME srava_trycatch_scope
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_scope)
+set_tests_properties(srava_trycatch_scope PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-scope"
+  PASS_REGULAR_EXPRESSION "TRYSCOPE_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|TRYSCOPE_FAIL"
+  TIMEOUT 60)
+
+# 幾何エラー (モジュール名前置きつき) も直列に伝播するものは捕まる。
+add_test(NAME srava_trycatch_geom
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> trycatch_geom)
+set_tests_properties(srava_trycatch_geom PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-trycatch-geom"
+  PASS_REGULAR_EXPRESSION "TRYGEOM_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 30)
 
 # concat: 配列連結(planner 側 op)。concat([1,2,3],[4,5],6) の長さ = 6。
 add_test(NAME srava_concat
@@ -1933,9 +2716,8 @@ add_test(NAME srava_idx_errloc
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> idxerrloc)
 set_tests_properties(srava_idx_errloc PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-idxerrloc"
-  # ★ #3452: srava_parse.sh がハーネス全体へ SRAVA_MODULE_ALL=1 を及ぼすようになり、
-  #   include "module/all.sra"; がソース先頭に 1 行合成されるぶん行番号が +1 ずれる。
-  PASS_REGULAR_EXPRESSION "ERROR\\[.*,5\\] array index out of range"
+  # ★ #3569: 前置をやめたので **報告される行 = ファイルの行** (4 行目)。
+  PASS_REGULAR_EXPRESSION "ERROR\\[.*,4\\] array index out of range"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped"
   TIMEOUT 20)
 
@@ -1945,7 +2727,7 @@ add_test(NAME srava_rect_neg
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> rect_neg)
 set_tests_properties(srava_rect_neg PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-rectneg"
-  PASS_REGULAR_EXPRESSION "rect: width and height must be positive"
+  PASS_REGULAR_EXPRESSION "rect: width and height must be > 0"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|agent closed"
   TIMEOUT 20)
 
@@ -1973,8 +2755,8 @@ add_test(NAME srava_add_lineno
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> add_lineno)
 set_tests_properties(srava_add_lineno PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-addlineno"
-  # ★ #3452: SRAVA_MODULE_ALL=1 の include 合成で行番号が +1 ずれる(idx_errloc と同じ理由)。
-  PASS_REGULAR_EXPRESSION ",4] unsupported operation"
+  # ★ #3569: 前置をやめたので **報告される行 = ファイルの行** (3 行目)。
+  PASS_REGULAR_EXPRESSION ",3] unsupported operation"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|agent closed"
   TIMEOUT 30)
 
@@ -1993,8 +2775,8 @@ add_test(NAME srava_errloc
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> errloc)
 set_tests_properties(srava_errloc PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-errloc"
-  # ★ #3452: SRAVA_MODULE_ALL=1 の include 合成で行番号が +1 ずれる(idx_errloc と同じ理由)。
-  PASS_REGULAR_EXPRESSION "ERROR\\[.*,4\\].*volume"
+  # ★ #3569: 前置をやめたので **報告される行 = ファイルの行** (3 行目)。
+  PASS_REGULAR_EXPRESSION "ERROR\\[.*,3\\].*volume"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped"
   TIMEOUT 20)
 
@@ -2003,8 +2785,8 @@ add_test(NAME srava_assign_err
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> assignerr)
 set_tests_properties(srava_assign_err PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-assignerr"
-  # ★ #3452: SRAVA_MODULE_ALL=1 の include 合成で行番号が +1 ずれる(errloc と同じ理由)。
-  PASS_REGULAR_EXPRESSION "ERROR\\[.*,3\\].*volume"
+  # ★ #3569: 前置をやめたので **報告される行 = ファイルの行** (2 行目)。
+  PASS_REGULAR_EXPRESSION "ERROR\\[.*,2\\].*volume"
   # 修正前は右辺エラーが黙って束縛され、未使用のまま最後まで走り抜けた。
   FAIL_REGULAR_EXPRESSION "REACHED_END|Segmentation|Aborted|core dumped"
   TIMEOUT 20)
@@ -2040,13 +2822,19 @@ set_tests_properties(srava_introspect PROPERTIES
   TIMEOUT 40)
 
 # ★ #3474: occt の基本立体の置き場所を閉形式で固定 (解析曲面は kernel_agree に入れられない)。
-add_test(NAME srava_occt_place
-  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt.sh $<TARGET_FILE:srava> place)
-set_tests_properties(srava_occt_place PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/occache-place"
-  PASS_REGULAR_EXPRESSION "OCCT-PLACE-OK"
-  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|ERROR"
-  TIMEOUT 60)
+# ⚠ **occt が建つ構成でだけ登録する。** これが if の外にあったため、Cygwin (occt 自動 OFF) で
+#   値が返らず 7 項目すべて FAIL していた (2026-09-13)。他の occt テストは
+#   if(SRAVA_MODULE_OCCT) の中の foreach(_oc_modes) で登録されており、これだけ漏れていた。
+if(SRAVA_MODULE_OCCT)
+  add_test(NAME srava_occt_place
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt.sh $<TARGET_FILE:srava> place)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 6.75s ・ Linux(x86_64/7.8.1) 3.45s ⇒ 30s。
+  set_tests_properties(srava_occt_place PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/occache-place;SRAVA_HANG_SECS=30"
+    PASS_REGULAR_EXPRESSION "OCCT-PLACE-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|ERROR"
+    TIMEOUT 60)
+endif()
 
 # ★ #3474 続き: 省略可能な引数 (nreq)。省略形は通り、余分は黙って捨てず弾く。
 add_test(NAME srava_arg_arity
@@ -2061,19 +2849,127 @@ set_tests_properties(srava_arg_arity PROPERTIES
 add_test(NAME srava_empty3d_set
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> empty3dset)
 set_tests_properties(srava_empty3d_set PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-empty3d;SRAVA_TEST_MODULES=${SRAVA_TEST_MODULES}"
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-empty3d;SRAVA_TEST_MODULES=${SRAVA_TEST_MODULES};SRAVA_HANG_SECS=60"
   PASS_REGULAR_EXPRESSION "EMPTY3D-OK"
   FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|uncaught exception"
   TIMEOUT 90)
 
-# ★ #3474 続き: openvdb 系の例外境界 (投げても agent が死なず、名前つきエラーになる)。
-add_test(NAME srava_openvdb_guard
-  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> vdguard)
-set_tests_properties(srava_openvdb_guard PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-vdguard"
-  PASS_REGULAR_EXPRESSION "VDGUARD-OK"
-  FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|uncaught exception"
+# ★★ #3535: **上流の可変大域状態を「設定する」呼び出しが持ち込まれたら赤** (srava_upstream_globals.sh)。
+#   ⚠ cgal.so と libsrava_cg は CGAL の可変大域 (default_random / _error_handler /
+#     _error_behaviour / IO::Static::get_mode) を **2 コピー持っている**。CGAL 6.x はヘッダ
+#     オンリーで上流の実体が無いので、geogram (#3535①) のように借りる形へ寄せられない。
+#   ★ いま害が出ていないのは **誰も設定していないから**。⇒ 設定を持ち込んだ瞬間に赤くする。
+#   ⚠ とくに CGAL::IO::set_mode は ASCII/binary なので **書き出しの形式が黙って変わる**。
+#   ⇒ これは *柵* であって直しではない。直ったら (cgal.so が可変大域を定義しなくなったら) 不要。
+add_test(NAME srava_upstream_globals
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_upstream_globals.sh
+          ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_BINARY_DIR})
+set_tests_properties(srava_upstream_globals PROPERTIES
+  PASS_REGULAR_EXPRESSION "UPSTREAM-GLOBALS-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:"
   TIMEOUT 60)
+
+# ★★ #3535: **上流ライブラリのコピーが 2 つになっていないか数える** (test/srava_upstream_copies.sh)。
+#   モジュール .so が上流シンボルを *自分で定義* していたら赤。geogram は #3535① で
+#   「借りる」形へ寄せたので 0 が約束・manifold / cherchi は元から理想形なので固定するだけ。
+#   ⚠ この形が崩れると、大域状態を持つ上流 (geogram) では初期化したコピーと使うコピーが
+#     食い違って SIGSEGV する (2026-09-14・Linux 実測)。⇒ **目視では見えないので数える**。
+#   ★ モジュール構成に依らないので if() の外に置く (建っていない .so は skip する)。
+#   ⚠ nm / c++filt が無い環境では UPSTREAM-SKIP を出す。⇒ **Skipped と表示させる**
+#     (2026-09-16: 緑のまま抜けると「検定した」と見分けが付かない。srava_op_cgal_free と同型)。
+add_test(NAME srava_upstream_copies
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_upstream_copies.sh ${CMAKE_BINARY_DIR})
+# ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 9.90s ・ Linux(x86_64/7.8.1) 1.04s ⇒ 30s。
+set_tests_properties(srava_upstream_copies PROPERTIES
+  ENVIRONMENT "SRAVA_HANG_SECS=30"
+  PASS_REGULAR_EXPRESSION "UPSTREAM-OK"
+  SKIP_REGULAR_EXPRESSION "UPSTREAM-SKIP"
+  FAIL_REGULAR_EXPRESSION "FAIL:"
+  TIMEOUT 120)
+
+# ★★ #3545 段 3: **op の TU が上流 (CGAL) を引いていないことを数える** (test/srava_op_cgal_free.sh)。
+#   srava_upstream_copies.sh が見るのは *.so 1 本ごとの合計* なので、「どの op が引いているか」
+#   も「境界が守られているか」も分からない。⇒ **リンクされた .o を 1 本ずつ**数える。
+#   ⚠ 対象は @link.txt@ から取る。@CMakeFiles/<t>.dir/**/*.o@ を glob すると **リンクされて
+#     いない古い .o** まで数える (2026-09-16 実測: nef_snc は 44 本中 4 本に見えたが、
+#     正しくは 40 本中 0 本。cgal も 63/64 に見えたが正しくは 62/63)。
+#   ★ 陽性対照つき — 幾何 lib の TU が 0 に見えたら *検出器の方が壊れている* として赤にする。
+#   ★ 生成器は **Makefile (link.txt) と Ninja (build.ninja) の両方**を読む (2026-09-16)。
+# ⚠⚠ **SKIP を Passed にしない**。2026-09-16 に box (Windows・Ninja 生成器) でこの検査が
+#   @OPFREE-SKIP link.txt が無い@ → **Passed** となり、#3545 段 2/4 の成果が Windows で
+#   1 度も検定されないまま「緑」に見えていた (simu01 報告)。⇒ ctest に Skipped と言わせる。
+#   ★ SKIP_RETURN_CODE / SKIP_REGULAR_EXPRESSION は どちらも PASS_REGULAR_EXPRESSION に
+#     **優先する** (実測 2026-09-16)。両方付けてあるのは、スクリプトの終了コードと出力の
+#     どちらが先に壊れても Skipped に倒れるようにするため。
+# ⚠ **構成によって検べる本数が変わる** (macMINI 指摘 2026-09-16)。既定 (NEF_SNC=OFF) では
+#   nef_snc / nef_cg / nef_mf が建たないので 6 本中 3 本が対象外になる。⇒ スクリプトは
+#   **検べた本数を必ず出し、0 本なら OPFREE-SKIP** にする (0 本で緑にしない)。
+add_test(NAME srava_op_cgal_free
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_op_cgal_free.sh ${CMAKE_BINARY_DIR})
+# ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 6.73s ・ Linux(x86_64/7.8.1) 0.78s ⇒ 30s。
+set_tests_properties(srava_op_cgal_free PROPERTIES
+  ENVIRONMENT "SRAVA_HANG_SECS=30"
+  PASS_REGULAR_EXPRESSION "OPFREE-OK"
+  SKIP_REGULAR_EXPRESSION "OPFREE-SKIP"
+  SKIP_RETURN_CODE 77
+  FAIL_REGULAR_EXPRESSION "FAIL:"
+  TIMEOUT 300)
+
+# ★★ #3564: **sPtr::__get() を木に置かない** (ひさ 2026-09-20: 利用禁止)。
+#   ⚠ 生ポインタを剥がすと参照カウントに載らないので、保持すれば「借りたポインタ越しの操作」
+#     (#3560)、null 検査は「入ったが畳まれた」を素通り (#3562 の panic が本物にならない)。
+#   ★ ソースだけを見る検査なので構成にもビルドにも依らない ⇒ if() の外。
+#   ★ 陽性対照つき (同じ探し方で @sPtr<@ を持つファイルが 0 なら探し方が壊れている)。
+add_test(NAME srava_no_sptr_rawget
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_no_sptr_rawget.sh ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(srava_no_sptr_rawget PROPERTIES
+  PASS_REGULAR_EXPRESSION "RAWGET-OK"
+  SKIP_REGULAR_EXPRESSION "RAWGET-SKIP"
+  SKIP_RETURN_CODE 77
+  FAIL_REGULAR_EXPRESSION "FAIL:"
+  TIMEOUT 60)
+
+# ★★ #3559: **変種で建てる TU が具体クラス名を直に書いていないことを数える**
+#   (test/srava_nef_variant_guard.sh)。
+#   ⚠⚠ nef の幾何クラスを 2 型 (nfMesh / nfMeshSnc) に割ったので、op の TU が具体クラス名を
+#     直に書くと **もう一方の変種の値を作ってもコンパイルが通る**。落ちるのは実行時、それも
+#     その op ではなく下流の materialize (2026-09-19 に nfTriSink.h で実際に踏んだ)。
+#   ★ ソースだけを見る検査なので、モジュール構成にもビルドにも依らない ⇒ if() の外。
+#   ★ 陽性対照つき (nfWire.cpp は 2 型とも名指ししていて正しい) — 0 に見えたら数え方が壊れている。
+add_test(NAME srava_nef_variant_guard
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_nef_variant_guard.sh ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(srava_nef_variant_guard PROPERTIES
+  PASS_REGULAR_EXPRESSION "NEFVAR-OK"
+  SKIP_REGULAR_EXPRESSION "NEFVAR-SKIP"
+  SKIP_RETURN_CODE 77
+  FAIL_REGULAR_EXPRESSION "FAIL:"
+  TIMEOUT 60)
+
+# ★★ #3522: **番犬の歯抜けを機械で数える** (test/srava_hangwatch_coverage.sh)。
+#   番犬は 1 行 source しないとカバーされず、入れ忘れは目視では見えない。
+#   ⚠ 2026-09-14 に 47 本中 7 本が漏れていた (番犬は bench 側・7 本は dev-macmini-1 側で
+#     独立に書かれ、合流時に約束が落ちた)。⇒ 数える検査を常時走らせる。
+#   ★ モジュール構成に依らないので if() の外に置く (この検査自身は srava を起動しない)。
+add_test(NAME srava_hangwatch_coverage
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_hangwatch_coverage.sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/test)
+set_tests_properties(srava_hangwatch_coverage PROPERTIES
+  PASS_REGULAR_EXPRESSION "HWCOV-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:"
+  TIMEOUT 60)
+
+# ★ #3474 続き: openvdb 系の例外境界 (投げても agent が死なず、名前つきエラーになる)。
+# ⚠ **openvdb が建つ構成でだけ登録する。** スクリプト側にも have openvdb のガードを入れたが、
+#   そもそも登録しないのが筋 (2026-09-13 に Cygwin で赤くなった 4 本のうちの 1 本)。
+if(SRAVA_MODULE_OPENVDB)
+  add_test(NAME srava_openvdb_guard
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> vdguard)
+  set_tests_properties(srava_openvdb_guard PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-vdguard"
+    PASS_REGULAR_EXPRESSION "VDGUARD-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|uncaught exception"
+    TIMEOUT 60)
+endif()
 
 # ★ #3485: routing への **暗黙依存** の見張り。
 #   テストが priority で X を上げているのに式の中に X が持たない op があると、その op は
@@ -2770,8 +3666,9 @@ set_tests_properties(srava_module_info PROPERTIES
 if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_CGAL AND SRAVA_MODULE_MANIFOLD AND SRAVA_OCCT_TEXT)
   add_test(NAME srava_occt_text
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_text.sh $<TARGET_FILE:srava>)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 8.25s ・ Linux(x86_64/7.8.1) 4.03s ⇒ 30s。
   set_tests_properties(srava_occt_text PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/occt-text-cache"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/occt-text-cache;SRAVA_HANG_SECS=30"
     PASS_REGULAR_EXPRESSION "OCCT-TEXT-OK"
     FAIL_REGULAR_EXPRESSION "TEXT_FAIL|Segmentation|Aborted|core dumped|parse error"
     TIMEOUT 180)
@@ -2782,19 +3679,78 @@ endif()
 if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_CGAL)
   add_test(NAME srava_occt_tube
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_tube.sh $<TARGET_FILE:srava>)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 4.46s ・ Linux(x86_64/7.8.1) 2.05s ⇒ 15s。
   set_tests_properties(srava_occt_tube PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/occt-tube-cache"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/occt-tube-cache;SRAVA_HANG_SECS=15"
     PASS_REGULAR_EXPRESSION "OCCT-TUBE-OK"
     FAIL_REGULAR_EXPRESSION "TUBE_FAIL|Segmentation|Aborted|core dumped|parse error"
     TIMEOUT 180)
 endif()
 
+# ★★ #3567 (2026-09-21): `null` リテラルと比較。**モジュールを 1 本も要らない**言語の検定なので
+#   ガードの外に置く (幾何カーネルの構成に関係なく必ず回る)。
+#   守っているのは「null / 0 / "" / [] / {} を == で **分けられる**」— 以前の手段は真偽だけで、
+#   5 つを全部ひとまとめにしていた。陰性対照 ("1"==1 は false のまま・型違いの < は
+#   incomparable のまま) を同じ本の中に入れてある。
+add_test(NAME srava_null
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_null.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_null PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/null-cache"
+  PASS_REGULAR_EXPRESSION "NULL-LITERAL-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 60)
+
 if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_CGAL)
   add_test(NAME srava_module_qualified
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_module_qualified.sh $<TARGET_FILE:srava>)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 6.90s ・ Linux(x86_64/7.8.1) 3.42s ⇒ 30s。
   set_tests_properties(srava_module_qualified PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/qualified-cache"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/qualified-cache;SRAVA_HANG_SECS=30"
     PASS_REGULAR_EXPRESSION "MODULE-QUALIFIED-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+    TIMEOUT 180)
+endif()
+
+# ★ #3555 段3: 擬似モジュール (srava のラムダへ配線する候補)。occt_mf は occt+manifold で建つ。
+if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_CGAL)
+  add_test(NAME srava_module_pseudo
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_module_pseudo.sh $<TARGET_FILE:srava>)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 12.60s ・ Linux(x86_64/7.8.1) 4.58s ⇒ 45s。
+  set_tests_properties(srava_module_pseudo PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/pseudo-cache;SRAVA_HANG_SECS=45"
+    PASS_REGULAR_EXPRESSION "MODULE-PSEUDO-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+    TIMEOUT 180)
+endif()
+
+# ★ #3574: 擬似モジュール集 lib/module/pseudo.sra (粒度 seg / dx の既定値を練り込む)。
+#   ⚠ include を使うので SRAVA_PATH が要る。⚠ geogram / openvdb / occt を名指しで見るので
+#     4 カーネル + openvdb が揃った構成でだけ回す (all.sra は optional:1 で黙って飛ぶため、
+#     無い構成で回すと「降りた先が違う」を掴めない)。
+if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_CGAL
+   AND SRAVA_MODULE_GEOGRAM AND SRAVA_MODULE_OPENVDB)
+  add_test(NAME srava_module_pseudo_lib
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_module_pseudo_lib.sh $<TARGET_FILE:srava>)
+  # ⚠ SRAVA_HANG_SECS — Linux 5.8s / **mac 17.1s** (2026-09-22 実測)。既定 10 秒では mac で撮られる。
+  #   ★ pm_points (⑩) を足した後の mac 実測: 単独 **4.98s** / -j6 のフル走行で **14.14s**
+  #     ⇒ 予算 60 に対し余裕 x4.2。据え置きでよい。
+  set_tests_properties(srava_module_pseudo_lib PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/pseudolib-cache;SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "MODULE-PSEUDO-LIB-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+    TIMEOUT 300)
+endif()
+
+# ★ #3555 段1: 指名を **候補列** として読む (配列 = 優先順位の上書き・列に無いものは呼ばれない)。
+if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_CGAL)
+  add_test(NAME srava_module_candlist
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_module_candlist.sh $<TARGET_FILE:srava>)
+  #   ⚠ SRAVA_HANG_SECS — #3555 段5 / #3570 段2 で本が伸び、素の所要が 10 秒を越えた
+  #     (2026-09-22 実測 10.9 秒)。既定のままだと緑のまま捕獲だけが溜まる。
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 26.84s ・ Linux(x86_64/7.8.1) 10.95s ⇒ 90s。
+  set_tests_properties(srava_module_candlist PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/candlist-cache;SRAVA_HANG_SECS=90"
+    PASS_REGULAR_EXPRESSION "MODULE-CANDLIST-OK"
     FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
     TIMEOUT 180)
 endif()
@@ -2807,6 +3763,35 @@ set_tests_properties(srava_module_unload_reload PROPERTIES
   PASS_REGULAR_EXPRESSION "MODULE-UNLOAD-RELOAD-OK"
   FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
   TIMEOUT 60)
+# ★★ #3558: module(so,{optional:1}) は「入っていない」だけを飲み込む。**在るのに使えない**
+#   (ABI 不一致 / 記述子違反 / モジュールでない .so / 壊れたファイル) は optional でも落とす。
+#   ⚠ 検定材料の 2 本は **わざと拒否される .so**。探索路に置くと `srava --modules` の診断に
+#     常時ゴミが並ぶので、専用サブディレクトリ testmod-bad/ へ出す (名指ししたときだけ読まれる)。
+#   ★ INSTALL を付けない = 配布物には入れない。
+srava_add_module(testmod_badabi
+  OUTPUT   badabi
+  SOURCES  test/modules/srava_testmod_bad.cpp
+  DEFINES  TESTMOD_BAD_ABI=1)
+srava_add_module(testmod_badsig
+  OUTPUT   badsig
+  SOURCES  test/modules/srava_testmod_bad.cpp
+  DEFINES  TESTMOD_BAD_SIG=1)
+# ⚠⚠ 「モジュールでない .so」も **建てる**。libpig で代用すると OS ごとに別々に壊れる:
+#   mac では libpig.dylib が拡張子正規化で libpig.so へ化けて検定が空振りし、
+#   Linux では libpig のコピーを dlopen すると **大域状態が二重化して返ってこない**。
+srava_add_module(testmod_notamodule
+  OUTPUT   notamodule
+  SOURCES  test/modules/srava_testmod_bad.cpp
+  DEFINES  TESTMOD_NOT_A_MODULE=1)
+set_target_properties(testmod_badabi testmod_badsig testmod_notamodule PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/testmod-bad")
+add_test(NAME srava_module_optional_refused
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_optional_refused)
+set_tests_properties(srava_module_optional_refused PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-optref;BADABI=$<TARGET_FILE:testmod_badabi>;BADSIG=$<TARGET_FILE:testmod_badsig>;NOTAMOD=$<TARGET_FILE:testmod_notamodule>"
+  PASS_REGULAR_EXPRESSION "MODULE-OPTIONAL-REFUSED-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 30)
 add_test(NAME srava_module_dup_name
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_dup_name)
 set_tests_properties(srava_module_dup_name PROPERTIES
@@ -2832,6 +3817,35 @@ set_tests_properties(srava_cast_no_producer PROPERTIES
   PASS_REGULAR_EXPRESSION "CAST-NO-PRODUCER-OK"
   FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
   TIMEOUT 30)
+# ★★ #3554 最後の段 2/5 (2026-09-19): cast の振り分けが行のマッチ関数に移った
+#   (専用ブロック / wantOut は撤去)。守っているのは **1 行 1 出力型** —
+#   1 行に 2 つ書くと「行が成立するか」と「実際に名乗る型」が別の述語になり、
+#   area(cast("cg-cross2d", box(2,2,2))) が 24 (3D の表面積) を返す = 入力がそのまま返る。
+add_test(NAME srava_cast_target_row
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> cast_target_row)
+set_tests_properties(srava_cast_target_row PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-cast-targetrow"
+  PASS_REGULAR_EXPRESSION "CAST-TARGET-ROW-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 30)
+# ★★ #3554 最後の段 3/5: import の行が **拡張子が産む型**で選ばれること。
+#   値は常に正しい (本体はファイルを読むだけ) ので、*名乗る型* を volume の routing エラーで読む。
+add_test(NAME srava_import_ext_row
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> import_ext_row)
+set_tests_properties(srava_import_ext_row PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-import-extrow"
+  PASS_REGULAR_EXPRESSION "IMPORT-EXT-ROW-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 30)
+# ★★ #3554 最後の段 4/5: export の行が拡張子 × sig で選ばれ、**規約① (自型優先) は無い**こと。
+#   どのモジュールが書いたかは STL のヘッダ 80 バイトに出る (cgal="FileType: Binary" / manifold=0 埋め)。
+add_test(NAME srava_export_ext_row
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> export_ext_row)
+set_tests_properties(srava_export_ext_row PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-export-extrow"
+  PASS_REGULAR_EXPRESSION "EXPORT-EXT-ROW-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 30)
 add_test(NAME srava_disable_bad_option
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> disable_bad_option)
 set_tests_properties(srava_disable_bad_option PROPERTIES
@@ -2847,7 +3861,8 @@ add_test(NAME srava_load_op_removed
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> load_op_removed)
 set_tests_properties(srava_load_op_removed PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-load-removed"
-  PASS_REGULAR_EXPRESSION "undefined variable: load"
+  # ★ #3570 段3.5: 呼びの形の名前が変数でないときは op 層の診断を出すようになった。
+  PASS_REGULAR_EXPRESSION "no module can execute op 'load'"
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped"
   TIMEOUT 20)
 endif()
@@ -2897,8 +3912,12 @@ add_test(NAME srava_cache_hit
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> cachehit)
 set_tests_properties(srava_cache_hit PROPERTIES
   ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-hit-test"
-  PASS_REGULAR_EXPRESSION "0 miss"
-  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|parse error"
+  # ★★ #3569 で発見: 旧 "0 miss" は **エラーで何も走らなかったとき**の
+  #   「cache: 0 hit(s), 0 miss(es)」にも当たるので、**緑のままエラー**になり得た
+  #   (実際、module() を足し忘れた移行途中でそうなっていた)。
+  #   ⇒ 「1 つ以上 hit していて miss が 0」を要求し、ERROR も失敗語に入れる。
+  PASS_REGULAR_EXPRESSION "[1-9][0-9]* hit\\(s\\), 0 miss"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|parse error|ERROR"
   TIMEOUT 20)
 
 # system(cmd): ts2System で非同期実行(完了まで待つ=評価順保証)。mkdir → export が成功。
@@ -3116,7 +4135,8 @@ foreach(_cp sweep recycled)
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_cache_corpse.sh $<TARGET_FILE:srava> ${_cp})
   set_tests_properties(srava_cache_corpse_${_cp} PROPERTIES
     ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/corpsecache-${_cp};SRAVA_MODULE_ALL=1;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib"
-    PASS_REGULAR_EXPRESSION "CORPSE-[A-Z]+-(OK|SKIP)"
+    PASS_REGULAR_EXPRESSION "CORPSE-[A-Z]+-OK"
+    SKIP_REGULAR_EXPRESSION "CORPSE-[A-Z]+-SKIP"
     FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
     TIMEOUT 120)
 endforeach()
@@ -3128,7 +4148,7 @@ foreach(_mt inproc process)
   add_test(NAME srava_module_throw_${_mt}
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> module_throw_${_mt})
   set_tests_properties(srava_module_throw_${_mt} PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/throwcache-${_mt}"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/throwcache-${_mt};SRAVA_HANG_SECS=60"
     PASS_REGULAR_EXPRESSION "MODULE-THROW-OK"
     FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|core dumped"
     TIMEOUT 120)
@@ -3139,7 +4159,7 @@ endforeach()
 add_test(NAME srava_gate_side_error
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> gate_side_error)
 set_tests_properties(srava_gate_side_error PROPERTIES
-  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/gatecache;SRAVA_MODULE_ALL=1;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib"
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/gatecache;SRAVA_MODULE_ALL=1;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_HANG_SECS=60"
   PASS_REGULAR_EXPRESSION "GATE-SIDE-ERROR-OK"
   FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
   TIMEOUT 120)
@@ -3437,6 +4457,24 @@ if(SRAVA_MODULE_PIPEPROX)
   #   プロセス起動コストではなく純粋な計算速度差。
   #   ⇒ TIMEOUT は**素で足りていなかったぶんを実態に合わせた**ものであって、
   #     詰まりを TIMEOUT で逃がしているのではない。
+  # ---- ★ #3502: 走行中の中断の単体回帰。
+  #   ★ ここは **vendor だけ**を叩く (pigBreak も tinyState も出てこない) — ライブラリを
+  #     ホスト非依存に保ったこと自体が検査項目。srava 側の橋 (pigBreak → 述語) は
+  #     end-to-end で確かめてある (SIGINT で、走り切るのを待つ場合の数百分の 1 の時間で畳まれる)。
+  # ★★ 2026-09-12 (統合・Linux): 並行部分は **別 TU**。libstdc++ の C++20 版 <atomic> が
+  #   <unistd.h> を引き、その ::pipe(int[2]) が vendor の namespace pipe と衝突するため
+  #   (include の順では直らない・macOS の libc++ では起きない)。理由の全文は
+  #   test/pipeprox_break_thread.h の冒頭。
+  add_executable(test_pipeprox_break test/pipeprox_break_test.cpp
+                                     test/pipeprox_break_thread.cpp)
+  target_include_directories(test_pipeprox_break PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test)
+  target_link_libraries(test_pipeprox_break PRIVATE pipeprox Threads::Threads)
+  add_test(NAME pipeprox_break COMMAND test_pipeprox_break)
+  set_tests_properties(pipeprox_break PROPERTIES
+    PASS_REGULAR_EXPRESSION "PP-BREAK-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL|PP-BREAK-FAIL|Segmentation|Aborted"
+    TIMEOUT 300)
+
   add_test(NAME srava_pipeprox_vendored_test COMMAND pipeprox_test_pipe)
   set_tests_properties(srava_pipeprox_vendored_test PROPERTIES
     FAIL_REGULAR_EXPRESSION "FAIL:" TIMEOUT 180)
@@ -3523,7 +4561,7 @@ if(SRAVA_MODULE_PIPEPROX)
   add_test(NAME srava_pipeprox_fixed_force
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> pipeprox_fixed_force)
   set_tests_properties(srava_pipeprox_fixed_force PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipefixed"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipefixed;SRAVA_HANG_SECS=600"
     PASS_REGULAR_EXPRESSION "PIPEFIXED_OK"
     FAIL_REGULAR_EXPRESSION "PIPEFIXED_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 900)
@@ -3532,7 +4570,7 @@ if(SRAVA_MODULE_PIPEPROX)
   add_test(NAME srava_pipeprox_wspace
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> pipeprox_wspace)
   set_tests_properties(srava_pipeprox_wspace PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipewspace"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-pipewspace;SRAVA_HANG_SECS=240"
     PASS_REGULAR_EXPRESSION "PIPEWSPACE_OK"
     FAIL_REGULAR_EXPRESSION "PIPEWSPACE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 300)
@@ -3567,8 +4605,9 @@ if(SRAVA_MODULE_PIPEPROX)
   # 統合テスト: 射影的分離パスが、接触する 2 周コイル(ピッチ≈2r)を gap>=dMin へ押し広げるか。
   add_test(NAME srava_plugin_separate
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> plugin_separate)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 7.20s ・ Linux(x86_64/7.8.1) 1.42s ⇒ 30s。
   set_tests_properties(srava_plugin_separate PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipeseparate"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=/tmp/srava-pipeseparate;SRAVA_HANG_SECS=30"
     PASS_REGULAR_EXPRESSION "PIPESEPARATE_OK"
     FAIL_REGULAR_EXPRESSION "PIPESEPARATE_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op"
     TIMEOUT 60)
@@ -3658,6 +4697,10 @@ if(SRAVA_MODULE_MANIFOLD)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaSphere.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaIcosphere.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaUnion.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaHull.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaRefine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaSimplifyCleanup.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaMinkowski.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaIntersection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaDifference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaExport.cpp
@@ -3675,7 +4718,6 @@ if(SRAVA_MODULE_MANIFOLD)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaArea.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaNverts.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaNfaces.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaValid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCentroid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaImport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaRect.cpp
@@ -3684,9 +4726,11 @@ if(SRAVA_MODULE_MANIFOLD)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaEmpty3D.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaNgon.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaExtrude.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaLoftRuled.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaCombine.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaSection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaOffset.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaProjectFlatten.cpp   # ★ #3534: z=0 への直投影
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaTube.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfaColor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/c++/mfatsAgent.cpp
@@ -3711,6 +4755,10 @@ if(SRAVA_MODULE_MANIFOLD)
     modules/manifold/c++/mfaSphere.cpp
     modules/manifold/c++/mfaIcosphere.cpp
     modules/manifold/c++/mfaUnion.cpp
+    modules/manifold/c++/mfaHull.cpp
+    modules/manifold/c++/mfaRefine.cpp
+    modules/manifold/c++/mfaSimplifyCleanup.cpp
+    modules/manifold/c++/mfaMinkowski.cpp
     modules/manifold/c++/mfaIntersection.cpp
     modules/manifold/c++/mfaDifference.cpp
     modules/manifold/c++/mfaExport.cpp
@@ -3728,7 +4776,6 @@ if(SRAVA_MODULE_MANIFOLD)
     modules/manifold/c++/mfaArea.cpp
     modules/manifold/c++/mfaNverts.cpp
     modules/manifold/c++/mfaNfaces.cpp
-    modules/manifold/c++/mfaValid.cpp
     modules/manifold/c++/mfaCentroid.cpp
     modules/manifold/c++/mfaImport.cpp
     modules/manifold/c++/mfaRect.cpp
@@ -3737,9 +4784,11 @@ if(SRAVA_MODULE_MANIFOLD)
     modules/manifold/c++/mfaEmpty3D.cpp
     modules/manifold/c++/mfaNgon.cpp
     modules/manifold/c++/mfaExtrude.cpp
+    modules/manifold/c++/mfaLoftRuled.cpp
     modules/manifold/c++/mfaCombine.cpp
     modules/manifold/c++/mfaSection.cpp
     modules/manifold/c++/mfaOffset.cpp
+    modules/manifold/c++/mfaProjectFlatten.cpp
     modules/manifold/c++/mfaTube.cpp
     modules/manifold/c++/mfaColor.cpp
     modules/manifold/c++/mfatsAgent.cpp
@@ -3762,7 +4811,21 @@ if(SRAVA_MODULE_MANIFOLD)
   target_compile_definitions(srava_mf PRIVATE SRAVA_VALUE_ONLY)
   target_include_directories(srava_mf PUBLIC ${SRAVA_GEN})
   add_dependencies(srava_mf pigts_codegen mf_ts_codegen gen_srava_parser)
-  install(TARGETS srava_mf LIBRARY DESTINATION lib)
+  install(TARGETS srava_mf LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+
+  # ---- ★ #3498: Manifold の中断機構がライブラリ層で効くことの単体回帰。
+  #   occt_break / openvdb_break の姉妹。manifold は中断の口が Cancel() (こちらから撃つ) なので、
+  #   **pigBreak の押し出し口 (pigBreakHook) が別スレッドから撃てること**そのものが検査対象。
+  #   ⚠ 「評価点を compute() へ移しても総仕事量は増えない」もここで見ている (項目 4)。
+  add_executable(test_manifold_break test/manifold_break_test.cpp)
+  target_link_libraries(test_manifold_break PRIVATE srava_mf manifold::manifold)
+  target_include_directories(test_manifold_break PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/manifold/h)
+  add_test(NAME manifold_break COMMAND test_manifold_break)
+  set_tests_properties(manifold_break PROPERTIES
+    PASS_REGULAR_EXPRESSION "MF-BREAK-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL|MF-BREAK-FAIL|Segmentation|Aborted"
+    TIMEOUT 300)
 
   # op だけを .so に残す (幾何クラスは srava_mf 側)
   list(REMOVE_ITEM MF_KERNEL_SRC ${MF_GEOM_SRC})
@@ -3850,6 +4913,7 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaDifference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaComplement.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaMinkowski.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaHull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaOffset.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaConvexDecomposition.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfaNparts.cpp
@@ -3894,6 +4958,7 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
     modules/nef/c++/nfaDifference.cpp
     modules/nef/c++/nfaComplement.cpp
     modules/nef/c++/nfaMinkowski.cpp
+    modules/nef/c++/nfaHull.cpp
     modules/nef/c++/nfaOffset.cpp
     modules/nef/c++/nfaConvexDecomposition.cpp
     modules/nef/c++/nfaNparts.cpp
@@ -3930,28 +4995,42 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
   if(SRAVA_MODULE_NEF_HYBRID)
     list(APPEND _nef_variants hybrid)
   endif()
-  # ★ #3499 (2026-09-07): **幾何クラスを共有ライブラリへ出す** (libsrava_cg / _mf / _oc と同じ構図)。
-  #   nef_snc.so と橋モジュール (nef_cg.so / nef_mf.so) が **同じ nfMesh の実体**を共有する
-  #   必要があるため。各 .so がコピーを持つと in-proc で d_cast が失敗する (openvdb / occt で
-  #   実際に踏んだバグ)。
-  #   ★★ **変種ごとに 1 本建てる** (ひさ判断 2026-09-07)。4CC / 型名 / 形式方針はコンパイル時
-  #     マクロで焼き込まれているので、1 本に統合するには変種を実行時属性へ作り替える必要がある。
-  #     2 変種は **同時ロードを設計で禁止している** (#3433・test/srava_nef.sh 冒頭で必ず片方を
-  #     落とす・lib/module/all.sra は hybrid だけ) ので、同名シンボルが 2 本あっても
-  #     flat namespace の取り違えは起きない。
-  #   ⚠ 共有ライブラリ側は **HIDDEN にできない** (橋から見えないと意味がない)。モジュール .so の
-  #     HIDDEN は従来どおり — 衝突するのは記述子など**モジュール側**のシンボルなので、そちらは
-  #     引き続き隠す。幾何クラスは nfMesh.h で明示的に default 可視性を付けてある。
+  # ★★ #3559 (2026-09-19・ひさ裁定): **幾何クラスは libsrava_cg に置く** — 1 本だけ。
+  #   ---- なぜ移したか ----
+  #   #3499 では「変種ごとに 1 本」(libsrava_nf_snc / libsrava_nf_hybrid) だった。4CC・型名・
+  #   形式方針がコンパイル時マクロで焼き込まれていたので、1 本にするには変種を実行時の属性へ
+  #   作り替える必要があったため。⇒ #3559 でそれをやった (nfMesh / nfMeshSnc の 2 型)。
+  #   ⚠ 変種ごとに幾何ライブラリを建てると、**上流 (CGAL) の実体もその本数だけ増える**。
+  #     CGAL は header-only なので可変大域 (get_default_random()::default_random 等) が
+  #     各 .so に emit される。ELF は @u@ (STB_GNU_UNIQUE) をローダが 1 個に畳むので実害が
+  #     出ないが、**PE には畳む機構が無い** (box で実測: 局所シンボル d で 3 個)。
+  #   ⇒ 引き換えに #3440 の線 (cgal.so / manifold.so を CGAL Nef 非依存に保つ) を畳んだ。
+  #     上流が corefinement と Nef をはっきり分けられない以上やむを得ない、というひさ判断。
+  #   ★ nef_snc.so / nef_hybrid.so と橋 (nef_cg.so / nef_mf.so) は **同じ nfNefMesh の実体**を
+  #     共有する必要がある (各 .so がコピーを持つと in-proc で d_cast が失敗する)。
+  #   ⚠ 共有ライブラリ側は **HIDDEN にできない** (モジュールから見えないと意味がない)。
+  #     モジュール .so の HIDDEN は従来どおり — 衝突するのは記述子など**モジュール側**の
+  #     シンボルなので、そちらは引き続き隠す。幾何クラスは nfMesh.h で明示的に default 可視性。
+  #   ⚠ **-D は付けない**。幾何ライブラリ側の TU は 2 型ともコンパイルする (変種で分岐しない)。
   set(NF_GEOM_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/ptsnfWireCacheStreamWriterMesh.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/ptsnfWireCacheStreamReaderMesh.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfCacheCodec.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfMesh.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfMesh.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/c++/nfWire.cpp)
+  # ★ #3559: 橋 (nef ⇄ cgal の変換) も同居させる。両側の幾何クラスが同じライブラリに在るので、
+  #   別 .so (旧 libsrava_nfcg) を建てる理由が消えた。詳細 = modules/nef_cg/h/nfc/c++/nfcBridge.h
+  if(SRAVA_MODULE_NEF_SNC)
+    list(APPEND NF_GEOM_SRC ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef_cg/c++/nfcBridge.cpp)
+  endif()
+  target_sources(srava_cg PRIVATE ${NF_GEOM_SRC})
+  target_include_directories(srava_cg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef_cg/h)
+  add_dependencies(srava_cg nf_ts_codegen)
+  # ★ nfCacheCodec.cpp (descriptor.codecs の表) は **モジュール側に残る** — 中身が変種ごとに
+  #   違う (自分の型名 1 本) ため。WIRE の定義と reader/writer の生成子だけが nfWire.cpp。
   set(NF_OPS_SRC ${NF_KERNEL_SRC})
   list(REMOVE_ITEM NF_OPS_SRC
     modules/nef/c++/ptsnfWireCacheStreamWriterMesh.cpp
     modules/nef/c++/ptsnfWireCacheStreamReaderMesh.cpp
-    modules/nef/c++/nfCacheCodec.cpp
     modules/nef/c++/nfMesh.cpp)
 
   foreach(_v ${_nef_variants})
@@ -3960,38 +5039,13 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
     else()
       set(_def NF_WIRE_HYBRID)
     endif()
-    add_library(srava_nf_${_v} SHARED ${NF_GEOM_SRC})
-    set_target_properties(srava_nf_${_v} PROPERTIES
-      OUTPUT_NAME "srava_nf_${_v}" INSTALL_RPATH "$ORIGIN")
-    srava_export_all(srava_nf_${_v})   # ★ Windows: 明示エクスポート
-    # ★★ #3499: **シンボルバージョンを変種ごとに分ける**。2 本の libsrava_nf_*.so は同一ソース
-    #   なので同名シンボル (nfMesh の vtable / typeinfo / メンバ関数) を持ち、ローダの
-    #   RTLD_GLOBAL + ELF flat namespace では先に読まれた方へ全参照が束ねられる
-    #   (実測: nef_hybrid.so を置くだけで nef_snc の値が壊れた — 2 変種は lib/module/all.sra +
-    #   明示 module() で**日常的に同時ロードされる**)。バージョン名で分けると参照はリンク時に
-    #   バージョンごと束ねられるので取り違えが起きない。詳細 = modules/nef/link/nf_*.map
-    #   ⚠ ELF 固有の機構。Mach-O は two-level namespace が既定でそもそも取り違えが起きず、
-    #     PE/COFF もインポートは DLL ごとに解決されるので、どちらも要らない。
-    if(NOT APPLE AND NOT WIN32 AND NOT CYGWIN)
-      target_link_options(srava_nf_${_v} PRIVATE
-        "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/link/nf_${_v}.map")
-      set_property(TARGET srava_nf_${_v} APPEND PROPERTY LINK_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/link/nf_${_v}.map)
-    endif()
-    target_link_libraries(srava_nf_${_v} PUBLIC pig CGAL::CGAL)
-    target_compile_definitions(srava_nf_${_v} PUBLIC ${_def})
-    target_compile_definitions(srava_nf_${_v} PRIVATE SRAVA_VALUE_ONLY)
-    target_include_directories(srava_nf_${_v} PUBLIC
-      ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/h)
-    add_dependencies(srava_nf_${_v} pigts_codegen nf_ts_codegen gen_srava_parser)
-    install(TARGETS srava_nf_${_v} LIBRARY DESTINATION lib)
-
     # 外部依存 CGAL は **システムから検出して共有リンク** (規約 C・docs §7.3)。
+    # ★ #3559: 幾何クラスは srava_cg から借りる (自分では持たない)。
     srava_add_module(nef_${_v}
       OUTPUT   nef_${_v}
       SOURCES  ${NF_OPS_SRC} modules/nef/manifest.cpp
       DEPENDS  pigts_codegen nf_ts_codegen gen_srava_parser
-      LINK     srava_nf_${_v} CGAL::CGAL
+      LINK     srava_cg CGAL::CGAL
       DEFINES  SRAVA_VALUE_ONLY ${_def}
       INCLUDES ${SRAVA_GEN}
       # ★ HIDDEN: 2 変種は**同一ソース**なので、既定の可視性だと nftsAgent_descriptor などの
@@ -4022,13 +5076,19 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
   #   方針を持っているため (#3440 / GPL 非汚染)。#3478 は nef_snc 側に厳密境界を付録として
   #   併記させて解いたが、**encode ごとに to_mesh() が走る**代償が大きかった。
   #   ⇒ 変換だけを別 .so に切り出し、**cast が呼ばれたときだけ**払う (occt_mf と同じ構図)。
-  #   ★ 幾何クラスは libsrava_nf_snc / libsrava_cg / libsrava_mf にあるので、ここには実体を
+  #   ★ 幾何クラスは libsrava_cg / libsrava_mf にあるので、ここには実体を
   #     持たない (持つと in-proc で d_cast が失敗する)。
   #   ★ hybrid には橋を建てない — あちらは普通の立体を厳密境界で書くので直接読める。
   if(SRAVA_MODULE_NEF_SNC)
     tinystate_codegen(nfc_ts_codegen
       ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef_cg/c++/nfcCast.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef_cg/c++/nfctsAgent.cpp)
+    # ★★ #3559: **橋の変換は libsrava_cg に同居する** (上の NF_GEOM_SRC へ足してある)。
+    #   #3545 段 4 の時点では、変換が要る nfMesh と cgMesh3D がそれぞれ別の幾何ライブラリに
+    #   居たので「どちらにも置けない ⇒ 橋が自分の .so (libsrava_nfcg) を持つ」形だった。
+    #   #3559 で 2 つが同じ libsrava_cg に入ったので、その .so は要らなくなった。
+    #   ★ 橋の op TU (nfcCast.cpp) が CGAL を 1 枚も引かない形は **そのまま**
+    #     (検査 = test/srava_op_cgal_free.sh)。
     srava_add_module(nef_cg_module
       OUTPUT   nef_cg
       SOURCES  modules/nef_cg/c++/nfcCacheCodec.cpp
@@ -4036,7 +5096,9 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
                modules/nef_cg/c++/nfctsAgent.cpp
                modules/nef_cg/manifest.cpp
       DEPENDS  pigts_codegen nf_ts_codegen nfc_ts_codegen gen_srava_parser
-      LINK     srava_nf_snc srava_cg CGAL::CGAL
+      # ★ #3545 段 4: 変換は幾何ライブラリ (srava_cg) が持つ。⚠ CGAL::CGAL を **外した** —
+      #   op はもう CGAL を呼ばないので、リンク行に残すと「引いてよい」という誤った申告になる。
+      LINK     srava_cg
       DEFINES  SRAVA_VALUE_ONLY NF_WIRE_SNC
       INCLUDES ${SRAVA_GEN}
                ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/h
@@ -4059,7 +5121,8 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
                  modules/nef_mf/c++/nfmtsAgent.cpp
                  modules/nef_mf/manifest.cpp
         DEPENDS  pigts_codegen nf_ts_codegen mf_ts_codegen nfm_ts_codegen gen_srava_parser
-        LINK     srava_nf_snc srava_mf CGAL::CGAL
+        # ★ #3559: nfMeshSnc は srava_cg に在る (旧 srava_nf_snc)。
+        LINK     srava_cg srava_mf CGAL::CGAL
         DEFINES  SRAVA_VALUE_ONLY NF_WIRE_SNC
         INCLUDES ${SRAVA_GEN}
                  ${CMAKE_CURRENT_SOURCE_DIR}/modules/nef/h
@@ -4103,8 +5166,10 @@ if(SRAVA_MODULE_NEF AND SRAVA_MODULE_CGAL)
     foreach(_m ${_NEF_MODES})
       add_test(NAME srava_nef_${_v}_${_m}
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_nef.sh $<TARGET_FILE:srava> ${_m} ${_v})
+      # ⚠ SRAVA_HANG_SECS — subdiv が **機で 12 倍違う** (Linux 3.6s / mac 43.6s ・ 2026-09-22 実測)。
+      #   既定 10 秒だと mac で毎回撮られ、**緑のまま捕獲だけ溜まる** (mac で 222 件溜まっていた)。
       set_tests_properties(srava_nef_${_v}_${_m} PROPERTIES
-        ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/nefcache-${_v}-${_m}"
+        ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/nefcache-${_v}-${_m};SRAVA_HANG_SECS=120"
         PASS_REGULAR_EXPRESSION "NEF-[A-Z]+-OK"
         FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
         TIMEOUT 300)
@@ -4132,19 +5197,46 @@ if(SRAVA_MODULE_GEOGRAM)
   set(GEOGRAM_WITH_TRIANGLE       OFF CACHE BOOL "" FORCE)   # ★非商用限定ライセンス
   set(GEOGRAM_WITH_LEGACY_NUMERICS OFF CACHE BOOL "" FORCE)
   set(BUILD_SHARED_LIBS           OFF CACHE BOOL "" FORCE)   # 静的リンク (規約 B)
-  # ★ 静的にするには **プラットフォーム名**を静的版にする。geogram は OS から
-  #   VORPALINE_PLATFORM を自動判定するが、既定は "…-dynamic" 版で、その config.cmake が
-  #   `set(VORPALINE_BUILD_DYNAMIC true)` を **通常変数として** 実行するため、
-  #   BUILD_SHARED_LIBS=OFF も VORPALINE_BUILD_DYNAMIC=OFF (cache) も上書きされてしまう
-  #   (実際に共有ライブラリが出た)。"-dynamic" の付かない platform を明示するのが正解。
+  # ★★ #3535 (ひさ判断 2026-09-15): geogram は **共有ライブラリ**として建てる。
+  #   ⚠⚠ 以前は静的 (.a) にしていたが、静的アーカイブは *参照されたオブジェクトだけ* を引くので
+  #     libsrava_gg と geogram.so が **それぞれ自分の分を抱え込み**、GEO:: の file-scope な
+  #     可変状態 (CmdLine の変数表・Process のスレッド数) が **.so ごとに別物**になっていた。
+  #     ⇒ 初期化したコピーと使うコピーが食い違って SIGSEGV (2026-09-14・Linux 実測)。
+  #   ★ 共有にすれば **実体がプロセスに 1 つ**になり、この種の絡まりが *構造的に起きえない*。
+  #     可視性をいじる必要も「借りる」配線も要らない — 上流は @c GEOGRAM_API で公開点を
+  #     自分で注釈しており (GEO_DYNAMIC_LIBS 時に visibility("default") になる)、
+  #     **-dynamic 版が geogram 自身の既定**でもある。
+  #   ⇒ 規約 B (FetchContent + 静的) ではなく docs §7.3 末尾の
+  #     「モジュールが私物の共有ライブラリを持ち込む場合は $PREFIX/lib へ install する」に従う。
+  #   ⚠ 代償: 配布物が 1 本増える。install 規則を書き忘れると
+  #     「ビルドツリーでは動くが install したら agent が起動しない」になる (§7.3 の警告どおり)。
+  # ★★ MinGW は上流の dynamic 版が使えない (2026-09-16 に box で実測・#3535 の MinGW 分)。
+  #   ① `Win-vs-dynamic-generic/config.cmake` は `if(CMAKE_CL_64)` で分岐する。これは **MSVC 専用
+  #      変数**なので MinGW では未定義 = 偽 ⇒ **32bit ブランチ**へ落ち、さらに MSVC 用の
+  #      `Windows-vs.cmake` を読む。「未検証」ではなく **当てると壊れる**。
+  #   ② 上流に **Windows/gcc 向けの dynamic 版が無い** (dynamic 版は Darwin-* / Linux64-* と
+  #      Win-vs-dynamic-generic の 9 つだけ。Win64-gcc と MinGW-x86_64-w64 は静的のみ)。
+  #   ③ ⚠⚠ 仮に dynamic で建てても `GEOGRAM_API` が効かない。geogram の `api/defs.h` は
+  #        `GEO_DYNAMIC_LIBS` 下で `_MSC_VER` なら `__declspec(dllexport)`、`__GNUC__` なら
+  #        `__attribute__((visibility("default")))` = **ELF の作法**。**MinGW は GNUC かつ PE**
+  #        なので後者に落ち、**dllexport が一切付かない** (`GEO_IMPORT` も空)。
+  #        ⇒ 上流は「MSVC か、さもなくば ELF」前提で、**MinGW = GNUC + PE が想定外**。
+  #        ★ 対照: 同じ木の OpenVDB `Platform.h` は `#ifdef _WIN32` を**先に**見るので MinGW でも正しい。
+  #          **コンパイラ (`__GNUC__`) はバイナリ形式を判定できない。**
+  #   ⇒ MinGW では **静的のまま**にする。共有化 (#3535) の効能 (実体を 1 つに寄せる) は
+  #     MinGW では別手段で達成する (#3545 の形 = 上流を include する .so を 1 つに限る)。
+  set(_srava_gg_dynamic ON)
   if(APPLE)
-    set(VORPALINE_PLATFORM "Darwin-clang"  CACHE STRING "" FORCE)
+    set(VORPALINE_PLATFORM "Darwin-clang-dynamic"  CACHE STRING "" FORCE)
+  elseif(MSVC)
+    set(VORPALINE_PLATFORM "Win-vs-dynamic-generic" CACHE STRING "" FORCE)   # 本来の用途はここだけ
   elseif(WIN32)
-    set(VORPALINE_PLATFORM "Win64-gcc"     CACHE STRING "" FORCE)
+    set(VORPALINE_PLATFORM "Win64-gcc"             CACHE STRING "" FORCE)   # ★ MinGW: 静的のみ
+    set(_srava_gg_dynamic OFF)
   else()
-    set(VORPALINE_PLATFORM "Linux64-gcc"   CACHE STRING "" FORCE)
+    set(VORPALINE_PLATFORM "Linux64-gcc-dynamic"   CACHE STRING "" FORCE)
   endif()
-  set(VORPALINE_BUILD_DYNAMIC     OFF CACHE BOOL "" FORCE)
+  set(VORPALINE_BUILD_DYNAMIC     ${_srava_gg_dynamic} CACHE BOOL "" FORCE)
   # ★ 静的 .a を **モジュール (.so)** へリンクするので PIC が要る (非 PIC だとリロケーションエラー)。
   #   geogram は dynamic 版の分岐でしか POSITION_INDEPENDENT_CODE を立てないので、こちらで立てる
   #   (pipeprox の静的ライブラリと同じ扱い)。MakeAvailable の前に置くと配下の全ターゲットに効く。
@@ -4174,6 +5266,24 @@ if(SRAVA_MODULE_GEOGRAM)
       "${geogram_SOURCE_DIR}/src/lib/geogram/basic/process_unix.cpp")
     message(STATUS "geogram: Cygwin 対応パッチを適用した (OS 判定 + FPE 制御)")
   endif()
+
+  # ★★ #3535: **install 後も @rpath で解決させる** (mac)。
+  #   ⚠⚠ geogram 自身の CMakeLists が @c set(CMAKE_INSTALL_NAME_DIR "${CMAKE_INSTALL_PREFIX}/lib")
+  #     をしているため、install するとき dylib の install name が **絶対パス**
+  #     (/usr/local/lib/libgeogram.…dylib) に書き換えられる。ビルドツリーでは @rpath なので通り、
+  #     **install したときだけ** dlopen が "Library not loaded" で落ちる。
+  #     ⇒ ctest srava_install_tree が実際にこれを捕まえた (2026-09-15)。§7.3 が警告している
+  #       「ビルドツリーでは動くが install したら agent が起動しない」そのもの。
+  #   ★ @rpath にしておけば、srava_gg の INSTALL_RPATH ($ORIGIN) と モジュールの
+  #     $ORIGIN/../.. がどちらも $PREFIX/lib を指すので解決する。
+  if(APPLE AND TARGET geogram)
+    set_target_properties(geogram PROPERTIES INSTALL_NAME_DIR "@rpath")
+  endif()
+
+  # ★ #3535①の「default 可視性で建てる」手当ては **撤去した** — 共有ライブラリにしたので
+  #   上流の GEOGRAM_API (GEO_DYNAMIC_LIBS 時に visibility("default")) がそのまま効く。
+  #   ⚠ ここで -fvisibility=default を上書きすると *公開点以外まで export* してしまい、
+  #     上流が意図した境界を壊す。⇒ 何もしないのが正しい。
 
   # ★★ geogram は Linux で **GEOGRAM_WITH_TBB=OFF でも無条件に `tbb` をリンクする**
   #   (src/lib/geogram/CMakeLists.txt の "quick and dirty fix, for using parallel STL")。
@@ -4235,16 +5345,13 @@ if(SRAVA_MODULE_GEOGRAM)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaTube.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaSphere.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaUnion.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaHull.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaIntersection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaDifference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaSolidify.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaVolume.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaBbox.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaCentroid.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaArea.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaValid.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaNverts.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaNfaces.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaDistanceAt.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaEstimateNormals.cpp   # ★ #3528
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaExport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaCast.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/c++/ggaTranslate.cpp
@@ -4263,11 +5370,68 @@ if(SRAVA_MODULE_GEOGRAM)
   add_library(srava_gg SHARED ${GG_GEOM_SRC})
   set_target_properties(srava_gg PROPERTIES OUTPUT_NAME "srava_gg" INSTALL_RPATH "$ORIGIN")
   srava_export_all(srava_gg)   # ★ Windows: 明示エクスポート
-  target_link_libraries(srava_gg PUBLIC pig geogram)
+  # ★ #3528: ggCacheCodec.cpp が &ptCloud::WIRE を並べる (点群型を借りる) ので srava_pt に依存する。
+  # ★ #3535 (2026-09-15): geogram が **共有ライブラリ**なら素直に PUBLIC で渡してよい
+  #   (実体がプロセスに 1 つなので、モジュールが直に引いてもコピーは増えない)。
+  # ⚠⚠ 2026-09-16 (macMINI 指摘): **MinGW では静的に戻した** (上の ①②③) ので、
+  #   この木には **共有の枝と静的の枝が同居している**。⇒ 配線も枝ごとに分ける。
+  #   静的アーカイブは *参照されたオブジェクトだけ* を引くので、srava_gg と geogram モジュールが
+  #   **それぞれ自分の分を抱え込む**形になりうる。そうなると GEO:: の file-scope な可変状態が
+  #   .so ごとに別物になる (= #3535 4 節の SIGSEGV)。
+  # ★★★ ⚠ **実測 (box・2026-09-16 夜) では 2 コピーは起きていなかった。** 直す動機は
+  #   「壊れているから」ではなく **「壊れることを *許す* 構造だから」**。訂正しておく:
+  #     libsrava_gg.dll  GEO:: 定義 2961  /  geogram.dll  1  /  openvdb_gg.dll  4
+  #     可変大域 (CmdLine::initialize / Process::initialize) は **libsrava_gg.dll のみ**
+  #   機序: モジュールのリンク行で **srava_gg の import lib が先に GEO:: を全部供給する**ので、
+  #   libgeogram.a からは 1 つもメンバが引かれない (静的アーカイブは未解決があるときだけ引く)。
+  #   ⚠⚠ だが 1 つで済んでいるのは **3 つの偶然が重なっているから**:
+  #     ① srava_export_all の --export-all-symbols が GEO:: を 2961 個 export している
+  #     ② モジュールの LINK の並びで **srava_gg が geogram より先**に来る ← ★暗黙・無警告
+  #     ③ #3545 で op の GEO 参照が減り、未解決が残らない
+  #   ⇒ ②は並びを入れ替えるだけで壊れ、**何の警告も出ない**。⇒ 静的のときは
+  #   **#3535① の「借りる」形**にして、いま偶然成り立っていることを *構造* で保証する:
+  #     ・geogram は srava_gg が **PRIVATE で** 抱える (モジュールへは渡さない)
+  #     ・モジュールは srava_gg が export する GEO:: を **借りる** (下の LINK 行)
+  #     ・可視性は default にする (ELF)。PE は srava_export_all の --export-all-symbols が担う
+  #   ★ 検証済み (box・c05aab1 を素からフルビルド): リンク rc=0 (FAILED 0) ・ GEO:: の数は
+  #     **借りる形でも 2961 / 1 / 4 で前と同一** ・ objdump -p geogram.dll の import 表に
+  #     libsrava_gg.dll が居る ・ ninja -t commands に libgeogram.a が **0 件**。
+  #     ⇒ 「定義が無い」「借り先が名指しで在る」「リンク行に .a が無い」の 3 経路が一致。
+  #   ★ #3528: ggCacheCodec.cpp が &ptCloud::WIRE を並べる (点群型を借りる) ので srava_pt に依存する。
+  if(_srava_gg_dynamic)
+    target_link_libraries(srava_gg PUBLIC pig srava_pt geogram)
+  else()
+    # ★ #3535① の形。⚠ include だけは PUBLIC で流す (モジュールがヘッダを読むため)。
+    target_link_libraries(srava_gg PUBLIC pig srava_pt PRIVATE geogram)
+    target_include_directories(srava_gg SYSTEM PUBLIC
+      $<TARGET_PROPERTY:geogram,INTERFACE_INCLUDE_DIRECTORIES>)
+    foreach(_ggvis geogram geogram_third_party)
+      if(TARGET ${_ggvis})
+        set_target_properties(${_ggvis} PROPERTIES
+          CXX_VISIBILITY_PRESET default C_VISIBILITY_PRESET default
+          VISIBILITY_INLINES_HIDDEN OFF)
+      endif()
+    endforeach()
+    message(STATUS "geogram: 静的 ⇒ #3535① の「借りる」形で配線します (モジュールは直リンクしない)")
+  endif()
   target_compile_definitions(srava_gg PRIVATE SRAVA_VALUE_ONLY)
   target_include_directories(srava_gg PUBLIC ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/h)
   add_dependencies(srava_gg pigts_codegen gg_ts_codegen gen_srava_parser)
-  install(TARGETS srava_gg LIBRARY DESTINATION lib)
+  install(TARGETS srava_gg LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+  # ★ モジュールが引くもの。共有なら geogram も直に引いてよい / 静的なら srava_gg から借りる。
+  if(_srava_gg_dynamic)
+    set(_srava_gg_modlink srava_gg geogram)
+  else()
+    set(_srava_gg_modlink srava_gg)
+  endif()
+  # ★★ #3535: **私物の共有ライブラリを $PREFIX/lib へ install する** (docs §7.3 末尾の規約)。
+  #   ⚠ 書き忘れると「ビルドツリーでは動くが install したら agent が起動しない」になる。
+  #   ★ srava_gg の INSTALL_RPATH ($ORIGIN) と モジュールの $ORIGIN/../.. がどちらもここを指す。
+  #   ⚠ geogram は EXCLUDE_FROM_ALL (規約 B) なので、**こちらから明示的に install する**。
+  #   ⚠ 静的の枝 (MinGW) では geogram は .a で、**配る必要が無い** (srava_gg が抱えている)。
+  if(_srava_gg_dynamic)
+    install(TARGETS geogram LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+  endif()
 
   srava_add_module(geogram_module
     OUTPUT   geogram
@@ -4284,16 +5448,13 @@ if(SRAVA_MODULE_GEOGRAM)
              modules/geogram/c++/ggaTube.cpp
              modules/geogram/c++/ggaSphere.cpp
              modules/geogram/c++/ggaUnion.cpp
+             modules/geogram/c++/ggaHull.cpp
              modules/geogram/c++/ggaIntersection.cpp
              modules/geogram/c++/ggaDifference.cpp
              modules/geogram/c++/ggaSolidify.cpp
              modules/geogram/c++/ggaVolume.cpp
-    modules/geogram/c++/ggaBbox.cpp
-    modules/geogram/c++/ggaCentroid.cpp
-    modules/geogram/c++/ggaArea.cpp
-    modules/geogram/c++/ggaValid.cpp
-             modules/geogram/c++/ggaNverts.cpp
-             modules/geogram/c++/ggaNfaces.cpp
+             modules/geogram/c++/ggaDistanceAt.cpp
+             modules/geogram/c++/ggaEstimateNormals.cpp
              modules/geogram/c++/ggaExport.cpp
              modules/geogram/c++/ggaCast.cpp
              modules/geogram/c++/ggaTranslate.cpp
@@ -4304,7 +5465,11 @@ if(SRAVA_MODULE_GEOGRAM)
              modules/geogram/c++/ggtsAgent.cpp
              modules/geogram/manifest.cpp
     DEPENDS  pigts_codegen gg_ts_codegen gen_srava_parser
-    LINK     srava_gg geogram
+    # ★ #3535: geogram が **共有** なら、モジュールが直にリンクしてもコピーは増えない。
+    # ⚠⚠ 2026-09-16: MinGW では静的に戻したので、**枝で分ける** (macMINI 指摘)。
+    #   静的のまま直リンクすると 2 コピー目ができ、GEO:: の大域状態が割れる
+    #   (#3535 4 節の SIGSEGV)。⇒ 静的のときは srava_gg だけを引いて **借りる**。
+    LINK     ${_srava_gg_modlink}
     DEFINES  SRAVA_VALUE_ONLY
     INCLUDES ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/geogram/h
     INSTALL)
@@ -4430,12 +5595,6 @@ if(SRAVA_MODULE_CHERCHI)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaIntersection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaDifference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaVolume.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaBbox.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaCentroid.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaArea.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaValid.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaNverts.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaNfaces.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaExport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaCast.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/c++/chaTranslate.cpp
@@ -4462,7 +5621,7 @@ if(SRAVA_MODULE_CHERCHI)
     PUBLIC  ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/cherchi/h
     PRIVATE ${IRMB_INCLUDES})
   add_dependencies(srava_ch pigts_codegen ch_ts_codegen gen_srava_parser)
-  install(TARGETS srava_ch LIBRARY DESTINATION lib)
+  install(TARGETS srava_ch LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 
   srava_add_module(cherchi_module
     OUTPUT   cherchi
@@ -4482,12 +5641,6 @@ if(SRAVA_MODULE_CHERCHI)
              modules/cherchi/c++/chaIntersection.cpp
              modules/cherchi/c++/chaDifference.cpp
              modules/cherchi/c++/chaVolume.cpp
-    modules/cherchi/c++/chaBbox.cpp
-    modules/cherchi/c++/chaCentroid.cpp
-    modules/cherchi/c++/chaArea.cpp
-    modules/cherchi/c++/chaValid.cpp
-             modules/cherchi/c++/chaNverts.cpp
-             modules/cherchi/c++/chaNfaces.cpp
              modules/cherchi/c++/chaExport.cpp
              modules/cherchi/c++/chaCast.cpp
              modules/cherchi/c++/chaTranslate.cpp
@@ -4576,8 +5729,15 @@ if(SRAVA_MODULE_OPENVDB)
   # 静的にしても OpenVDB のグローバル状態 (型レジストリ・openvdb::initialize) は
   # openvdb.so の中に 1 つだけなので問題にならない。TBB と扱いが違うのはそのため。
   set(OPENVDB_BUILD_CORE           ON  CACHE BOOL "" FORCE)
-  set(OPENVDB_CORE_SHARED          OFF CACHE BOOL "" FORCE)   # 共有版は作らない
-  set(OPENVDB_CORE_STATIC          ON  CACHE BOOL "" FORCE)
+  # ★★ #3535 (ひさ判断 2026-09-15): OpenVDB も **共有ライブラリ**にする。geogram と同じ理由 —
+  #   静的アーカイブだと libsrava_vd と openvdb.so / openvdb_mf / openvdb_cg / openvdb_gg が
+  #   それぞれ自分の分を抱え込み、**同じものが何コピーも**入る。モジュールが増えるたびに
+  #   その絡まりが増える。⇒ 共有にすれば実体はプロセスに 1 つで、*構造的に起きえない*。
+  #   ⚠ 現状 OpenVDB の型レジストリは libsrava_vd にしか無く状態は割れていないが、
+  #     それは「たまたま op が openvdb を直に触っていないから」であって構造の保証ではない。
+  #   ⇒ 規約 B ではなく docs §7.3 末尾の「私物の共有ライブラリは $PREFIX/lib へ install」に従う。
+  set(OPENVDB_CORE_SHARED          ON  CACHE BOOL "" FORCE)
+  set(OPENVDB_CORE_STATIC          OFF CACHE BOOL "" FORCE)
   set(OPENVDB_BUILD_BINARIES       OFF CACHE BOOL "" FORCE)   # 既定 ON (vdb_print) なので明示 OFF
   set(OPENVDB_BUILD_UNITTESTS      OFF CACHE BOOL "" FORCE)
   set(OPENVDB_BUILD_DOCS           OFF CACHE BOOL "" FORCE)
@@ -4609,6 +5769,11 @@ if(SRAVA_MODULE_OPENVDB)
 
   # ---- openvdb.so (幾何 + manifest)。OpenVDB は静的 bundle・TBB は共有・pig/pts/tinyState は host 供給。----
   tinystate_codegen(vd_ts_codegen
+    # ⚠⚠ **登録は 2 か所**要る — ここ (codegen) と srava_add_module の SOURCES。
+    #   codegen 側を落とすと **ビルドは通ってロードで undefined symbol** になる
+    #   (外側クラスのコンストラクタが生成されないため)。2026-09-22 に #3579 で踏んだ。
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaPtIntersection.cpp   # ★ #3580
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaPtDifference.cpp     # ★ #3580
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/ptsvdWireCacheStreamWriterGrid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/ptsvdWireCacheStreamReaderGrid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaVolume.cpp
@@ -4618,6 +5783,7 @@ if(SRAVA_MODULE_OPENVDB)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaValid.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaSphere.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaTranslate.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaDistanceAt.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaRotate.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaScale.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/c++/vdaMirror.cpp
@@ -4655,22 +5821,76 @@ if(SRAVA_MODULE_OPENVDB)
     OUTPUT_NAME "srava_vd"
     INSTALL_RPATH "$ORIGIN")
   srava_export_all(srava_vd)   # ★ Windows: 明示エクスポート
-  target_link_libraries(srava_vd PUBLIC pig openvdb_static)
+  # ★ #3535: 上流の ALIAS @c openvdb を使う (共有/静的のどちらを建てても当たる)。
+  # ★ #3580: srava_pt — vdCacheCodec.cpp の provides が &ptCloud::WIRE を参照する
+  #   (点群を受けて返す op のため)。⚠ モジュール側の LINK だけでは足りない —
+  #   provides の表は **共有ライブラリ側**に在るので、ここに無いと
+  #   libsrava_vd.so: undefined reference to `ptCloud::WIRE' でリンクが落ちる。
+  #   ★ srava_gu (geomutils) が同じ理由で同じ形にしてある。
+  target_link_libraries(srava_vd PUBLIC pig openvdb srava_pt)
   target_compile_definitions(srava_vd PRIVATE SRAVA_VALUE_ONLY)
   target_include_directories(srava_vd PUBLIC
-    ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/h)
+    ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/h
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h)   # ★ #3580: ptCloud (値の器を借りる)
+
   add_dependencies(srava_vd pigts_codegen vd_ts_codegen gen_srava_parser)
-  install(TARGETS srava_vd LIBRARY DESTINATION lib)
+  install(TARGETS srava_vd LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+  # ★★ #3535: 私物の共有ライブラリを $PREFIX/lib へ (docs §7.3 末尾)。
+  #   ⚠ mac は install 時に install name が絶対パスへ書き換わる罠がある (geogram で実際に踏んだ)
+  #     ⇒ @rpath に固定する。srava_vd の $ORIGIN と モジュールの $ORIGIN/../.. が
+  #     どちらも $PREFIX/lib を指すので解決する。
+  if(TARGET openvdb_shared)
+    if(APPLE)
+      set_target_properties(openvdb_shared PROPERTIES INSTALL_NAME_DIR "@rpath")
+    endif()
+    # ★★ PE (MinGW) は install name も RPATH も持たない。ローダが見るのは
+    #   **exe の隣と PATH** だけで、**読み込む .dll の隣は見ない**。
+    #   ⚠ 上流の CMake は libopenvdb.dll を ${CMAKE_INSTALL_PREFIX}/bin (= build/installtest/bin)
+    #     へ出すので、build/ のモジュールからは見えず **dlopen が 0xC0000135
+    #     (STATUS_DLL_NOT_FOUND) で落ちる** — 2026-09-16 に box で openvdb 系 19 本が道連れになった。
+    #   ⇒ ビルドツリーでは srava.exe / モジュールと**同じ dir** へ出す。
+    if(WIN32)
+      set_target_properties(openvdb_shared PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    endif()
+    # ⚠ PE では .dll は LIBRARY でなく **RUNTIME**。LIBRARY だけ書くと Windows で
+    #   **install から丸ごと漏れる** (import lib だけ入って実体が無い)。
+    install(TARGETS openvdb_shared LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+  endif()
+
+  # ---- ★ #3498: OpenVDB の中断機構がライブラリ層で効くことの単体回帰。
+  #   occt_break と同じ理由でここに要る (planner 経由の SIGINT は #3417 の kill が先に効く)。
+  #   ★ 「止まらない」側 (csgUnion) も一緒に固定してある — 上流が中断点を足したら赤くなり、
+  #     vdBreak.h の表と #3498 の記述を直す合図になる。
+  add_executable(test_openvdb_break test/openvdb_break_test.cpp)
+  target_link_libraries(test_openvdb_break PRIVATE srava_vd)
+  add_test(NAME openvdb_break COMMAND test_openvdb_break)
+  set_tests_properties(openvdb_break PROPERTIES
+    PASS_REGULAR_EXPRESSION "VDB-BREAK-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL|VDB-BREAK-FAIL|Segmentation|Aborted"
+    TIMEOUT 300)
+
+  # ★ #3580: 点群と距離場の積と差。判定器は距離場の符号 (geomutils 版と規約は同じ)。
+  add_test(NAME srava_ptsplit_openvdb
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_ptsplit_openvdb.sh $<TARGET_FILE:srava>)
+  set_tests_properties(srava_ptsplit_openvdb PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ptsplitvdcache"
+    PASS_REGULAR_EXPRESSION "PTSPLITVD-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|PTSPLITVD_FAIL|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
 
   srava_add_module(openvdb_module
     OUTPUT   openvdb
-    SOURCES  modules/openvdb/c++/vdaVolume.cpp
+    SOURCES  modules/openvdb/c++/vdaPtIntersection.cpp   # ★ #3580
+             modules/openvdb/c++/vdaPtDifference.cpp     # ★ #3580
+             modules/openvdb/c++/vdaVolume.cpp
              modules/openvdb/c++/vdaBbox.cpp
              modules/openvdb/c++/vdaCentroid.cpp
              modules/openvdb/c++/vdaArea.cpp
              modules/openvdb/c++/vdaValid.cpp
              modules/openvdb/c++/vdaSphere.cpp
              modules/openvdb/c++/vdaTranslate.cpp
+             modules/openvdb/c++/vdaDistanceAt.cpp
              modules/openvdb/c++/vdaRotate.cpp
              modules/openvdb/c++/vdaScale.cpp
              modules/openvdb/c++/vdaMirror.cpp
@@ -4695,9 +5915,10 @@ if(SRAVA_MODULE_OPENVDB)
              modules/openvdb/c++/vdtsAgent.cpp
              modules/openvdb/manifest.cpp
     DEPENDS  pigts_codegen vd_ts_codegen gen_srava_parser
-    LINK     srava_vd openvdb_static
+    LINK     srava_vd openvdb srava_pt
     DEFINES  SRAVA_VALUE_ONLY
     INCLUDES ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/h
+             ${CMAKE_CURRENT_SOURCE_DIR}/modules/points/h
     INSTALL)
 
   # ★ #3434 (2026-08-22): **openvdb ⇄ manifold の境界モジュール**。
@@ -4751,11 +5972,32 @@ if(SRAVA_MODULE_OPENVDB)
       list(APPEND VC_MOD_SRC modules/openvdb_cg/c++/vcaExportVox.cpp)
     endif()
     tinystate_codegen(vc_ts_codegen ${VC_TS_SRC})
+    # ★★ #3545 段 4: **厳密幾何 (SoS 述語つき voxelize) を橋の共有ライブラリへ**。
+    #   ⚠ これは *橋固有のロジック* なので libsrava_cg には入れない (ひさ判断 2026-09-15:
+    #     「openvdb とも共有しているわけですしね。やめておきましょう」)。⇒ 橋が自分の .so を持つ。
+    #   ★ これで op TU (vcaExportVox.cpp) が CGAL を 1 枚も引かなくなる。
+    #   ⚠ **HIDDEN にしない** (幾何ライブラリと同じ扱い)。op のモジュールだけが HIDDEN。
+    #   ⚠ HDF5 が無いビルドでは export_vox ごと消えるが、このライブラリは HDF5 に依存しない
+    #     (厳密幾何だけ) ので、常に建ててよい。
+    add_library(srava_vdcg SHARED
+      ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb_cg/c++/vdcgExact.cpp)
+    set_target_properties(srava_vdcg PROPERTIES OUTPUT_NAME "srava_vdcg" INSTALL_RPATH "$ORIGIN")
+    srava_export_all(srava_vdcg)   # ★ Windows: 明示エクスポート
+    target_link_libraries(srava_vdcg PUBLIC pig srava_cg CGAL::CGAL)
+    target_compile_definitions(srava_vdcg PRIVATE SRAVA_VALUE_ONLY)
+    target_include_directories(srava_vdcg PUBLIC
+      ${SRAVA_GEN}
+      ${CMAKE_CURRENT_SOURCE_DIR}/modules/cgal/h
+      ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb_cg/h)
+    add_dependencies(srava_vdcg pigts_codegen gen_srava_parser)
+    install(TARGETS srava_vdcg LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+
     srava_add_module(openvdb_cg_module
       OUTPUT   openvdb_cg
       SOURCES  ${VC_MOD_SRC}
       DEPENDS  pigts_codegen vd_ts_codegen vc_ts_codegen gen_srava_parser
-      LINK     srava_vd srava_cg
+      # ★ #3545 段 4: 厳密幾何は srava_vdcg が持つ (op はもう CGAL を呼ばない)。
+      LINK     srava_vd srava_cg srava_vdcg
       DEFINES  SRAVA_VALUE_ONLY $<$<BOOL:${HDF5_FOUND}>:SRAVA_HAVE_HDF5>
       INCLUDES ${SRAVA_GEN}
                ${CMAKE_CURRENT_SOURCE_DIR}/modules/openvdb/h
@@ -4816,8 +6058,15 @@ if(SRAVA_MODULE_OPENVDB)
     foreach(_m inputs converge bools roundtrip dxmix renorm offset steiner cavity_vox)
       add_test(NAME srava_openvdb_${_m}
         COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_openvdb.sh $<TARGET_FILE:srava> ${_m})
+      # ⚠ 番犬の予算 — 一族 9 本のうち **offset / steiner だけ重い**
+      #   (mac 7.18s / 7.41s ・ Linux 0.79s / 1.05s ⇒ 最も遅い機 x3 = 30s)。
+      #   残り 7 本は mac でも軽いので既定 10 秒のまま。
+      set(_vd_hang "")
+      if(_m STREQUAL "offset" OR _m STREQUAL "steiner")
+        set(_vd_hang ";SRAVA_HANG_SECS=30")
+      endif()
       set_tests_properties(srava_openvdb_${_m} PROPERTIES
-        ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/vdcache-${_m}"
+        ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/vdcache-${_m}${_vd_hang}"
         PASS_REGULAR_EXPRESSION "OPENVDB-[A-Z]+-OK"
         FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
         TIMEOUT 300)
@@ -4866,13 +6115,23 @@ if(SRAVA_MODULE_OCCT)
       "  OCCT 側を -DBUILD_MODULE_DataExchange=ON で建て直すか、\n"
       "  brep だけで良いなら -DSRAVA_OCCT_STEP=OFF を **明示**すること。")
   endif()
-  message(STATUS "OCCT: text op = ${SRAVA_OCCT_TEXT} / STEP 入出力 = ${SRAVA_OCCT_STEP}")
+  # ★ #3513: IGES は **TKDEIGES** (STEP の TKDESTEP とは別 toolkit)。⇒ 検査もフラグも別に持つ。
+  #   OCCT 7.8 で DataExchange が toolkit ごとに割られたので、STEP だけ入っていて IGES が
+  #   無いという構成が現に作れる。
+  if(SRAVA_OCCT_IGES AND NOT TARGET TKDEIGES)
+    message(FATAL_ERROR
+      "SRAVA_OCCT_IGES=ON だが この OCCT (${OpenCASCADE_VERSION}) に IGES (TKDEIGES) が無い。\n"
+      "  iges/igs の import/export はそこにしか無い。\n"
+      "  OCCT 側を -DBUILD_MODULE_DataExchange=ON で建て直すか、\n"
+      "  IGES を落として良いなら -DSRAVA_OCCT_IGES=OFF を **明示**すること。")
+  endif()
+  message(STATUS "OCCT: text op = ${SRAVA_OCCT_TEXT} / STEP 入出力 = ${SRAVA_OCCT_STEP} / IGES 入出力 = ${SRAVA_OCCT_IGES}")
 
   # ★ 機能ごとのソース・toolkit・マクロ。ここだけで出し入れが完結するようにしておく。
   set(OC_TEXT_SRC)       # codegen 用 (絶対パス)
   set(OC_TEXT_SRC_REL)   # srava_add_module 用 (相対パス)
   set(OC_TEXT_LIBS)
-  set(OC_STEP_LIBS)
+  set(OC_STEP_LIBS)   # ★ STEP / IGES の toolkit をここに積む (#3513)
   set(OC_FEATURE_DEFS)
   if(SRAVA_OCCT_TEXT)
     set(OC_TEXT_SRC     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaText.cpp)
@@ -4883,6 +6142,10 @@ if(SRAVA_MODULE_OCCT)
   if(SRAVA_OCCT_STEP)
     set(OC_STEP_LIBS TKDESTEP TKXSBase)
     list(APPEND OC_FEATURE_DEFS SRAVA_OCCT_STEP)
+  endif()
+  if(SRAVA_OCCT_IGES)
+    list(APPEND OC_STEP_LIBS TKDEIGES TKXSBase)   # ★ #3513 (TKXSBase は STEP と共用・重複は無害)
+    list(APPEND OC_FEATURE_DEFS SRAVA_OCCT_IGES)
   endif()
 
   # ★ STEP 入出力 (TKDESTEP) を足すと、OCCT の CMake 設定が推移的に Visualization 側の
@@ -4904,6 +6167,10 @@ if(SRAVA_MODULE_OCCT)
   endif()
 
   tinystate_codegen(oc_ts_codegen
+    # ⚠⚠ **登録は 2 か所** — ここ (codegen) と srava_add_module の SOURCES。
+    #   codegen 側を落とすと **ビルドは通ってロードで undefined symbol**。
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaPtIntersection.cpp   # ★ #3581
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaPtDifference.cpp     # ★ #3581
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ptsocWireCacheStreamWriterShape.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ptsocWireCacheStreamReaderShape.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaBox.cpp
@@ -4914,11 +6181,21 @@ if(SRAVA_MODULE_OCCT)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaRect.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaNgon.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaPolygon.cpp
+    # ★ #3532: 格子から自由曲面 (A2 制御点 / A1 通過点 / 制御網の出し入れ)
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaSurfaceControl.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaSurfaceThrough.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaPoles.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaSetPoles.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaCast.cpp          # ★ #3544
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaHlr.cpp           # ★ #3544 段 2
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaNedges.cpp        # ★ #3544 段 2
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaCircle.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaEmpty2D.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaEmpty3D.cpp
     # ★ #3461: 共通コア op (変換 + nverts)。boxa は ocaBox が兼ねる。
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaTranslate.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaDistanceAt.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaSection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaRotate.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaScale.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaMirror.cpp
@@ -4929,6 +6206,10 @@ if(SRAVA_MODULE_OCCT)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaIntersection.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaDifference.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaOffset.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaOffsetThicken.cpp   # ★ #3547 ②
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaVert.cpp   # ★ #3547 ④
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaVerts.cpp   # ★ #3547 ④
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaFaceVerts.cpp   # ★ #3547 ④
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaVolume.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaBbox.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaCentroid.cpp
@@ -4946,6 +6227,14 @@ if(SRAVA_MODULE_OCCT)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaExport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaImport.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaNfaces.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaFace.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaFaceAt.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaSurfaceType.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaProject.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaProjectFlatten.cpp   # ★ #3534: z=0 への直投影
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaUnifyFaces.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaLoft.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaLoftRuled.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/octsAgent.cpp
   )
   # ★ akira-project #3452: **幾何クラスを共有ライブラリへ出す**。
@@ -4956,7 +6245,8 @@ if(SRAVA_MODULE_OCCT)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ptsocWireCacheStreamWriterShape.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ptsocWireCacheStreamReaderShape.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocCacheCodec.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocShape.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocShape.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocDrawing.cpp)   # ★ #3544 段 3: DXF / SVG
   add_library(srava_oc SHARED ${OC_GEOM_SRC})
   set_target_properties(srava_oc PROPERTIES OUTPUT_NAME "srava_oc" INSTALL_RPATH "$ORIGIN")
   srava_export_all(srava_oc)   # ★ Windows: 明示エクスポート (関数側のコメント参照)
@@ -4965,17 +6255,34 @@ if(SRAVA_MODULE_OCCT)
   #     1 行も触っていない (実際 --as-needed が libsrava_oc.so から落としていた)。
   #     TKV3d を要るのは text op = **モジュール側**なので、そちらへ移した。
   #   STEP は ocShape::write_to / read_file が本当に呼ぶので、ここに要る (任意)。
-  target_link_libraries(srava_oc PUBLIC pig
+  # ★ #3547 ④: ocCacheCodec.cpp が &ptCloud::WIRE を並べる (点群型を借りる) ので srava_pt に依存する。
+  #   ⚠ 借りているのは *幾何の機能* ではなく **値の器** — cgal (#3528) と同じ形。
+  target_link_libraries(srava_oc PUBLIC pig srava_pt
     TKernel TKMath TKBRep TKPrim TKBO TKOffset TKTopAlgo TKMesh TKG3d TKGeomBase TKGeomAlgo TKShHealing
     TKFillet ${OC_STEP_LIBS})
   target_compile_definitions(srava_oc PRIVATE SRAVA_VALUE_ONLY ${OC_FEATURE_DEFS})
   target_include_directories(srava_oc PUBLIC ${SRAVA_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/h)
   add_dependencies(srava_oc pigts_codegen oc_ts_codegen gen_srava_parser)
-  install(TARGETS srava_oc LIBRARY DESTINATION lib)
+  install(TARGETS srava_oc LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+
+  # ★ #3581: 点群と B-rep の積と差 + **3 モジュール一致**。
+  # ⚠ 一致の検定は manifold / openvdb / geomutils も要る (どれも既定 ON だが、
+  #   構成を絞ったビルドでは落ちるので条件を書く)。
+  if(SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_OPENVDB)
+    add_test(NAME srava_ptsplit_occt
+      COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_ptsplit_occt.sh $<TARGET_FILE:srava>)
+    set_tests_properties(srava_ptsplit_occt PROPERTIES
+      ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ptsplitoccache"
+      PASS_REGULAR_EXPRESSION "PTSPLITOC-OK"
+      FAIL_REGULAR_EXPRESSION "FAIL:|PTSPLITOC_FAIL|Segmentation|Aborted|core dumped"
+      TIMEOUT 300)
+  endif()
 
   srava_add_module(occt_module
     OUTPUT   occt
-    SOURCES  modules/occt/c++/ocaBox.cpp
+    SOURCES  modules/occt/c++/ocaPtIntersection.cpp   # ★ #3581
+             modules/occt/c++/ocaPtDifference.cpp     # ★ #3581
+             modules/occt/c++/ocaBox.cpp
              modules/occt/c++/ocaPyramid.cpp
              modules/occt/c++/ocaCone.cpp
              modules/occt/c++/ocaTetrahedron.cpp
@@ -4983,6 +6290,13 @@ if(SRAVA_MODULE_OCCT)
              modules/occt/c++/ocaRect.cpp
              modules/occt/c++/ocaNgon.cpp
              modules/occt/c++/ocaPolygon.cpp
+             modules/occt/c++/ocaSurfaceControl.cpp   # ★ #3532
+             modules/occt/c++/ocaSurfaceThrough.cpp   # ★ #3532
+             modules/occt/c++/ocaPoles.cpp            # ★ #3532
+             modules/occt/c++/ocaSetPoles.cpp         # ★ #3532
+             modules/occt/c++/ocaCast.cpp             # ★ #3544
+             modules/occt/c++/ocaHlr.cpp              # ★ #3544 段 2 (陰線処理)
+             modules/occt/c++/ocaNedges.cpp           # ★ #3544 段 2
              modules/occt/c++/ocaCircle.cpp
              modules/occt/c++/ocaEmpty2D.cpp
              modules/occt/c++/ocaEmpty3D.cpp
@@ -4991,6 +6305,10 @@ if(SRAVA_MODULE_OCCT)
              modules/occt/c++/ocaIntersection.cpp
              modules/occt/c++/ocaDifference.cpp
              modules/occt/c++/ocaOffset.cpp
+             modules/occt/c++/ocaOffsetThicken.cpp   # ★ #3547 ②
+             modules/occt/c++/ocaVert.cpp   # ★ #3547 ④
+             modules/occt/c++/ocaVerts.cpp   # ★ #3547 ④
+             modules/occt/c++/ocaFaceVerts.cpp   # ★ #3547 ④
              modules/occt/c++/ocaVolume.cpp
     modules/occt/c++/ocaBbox.cpp
     modules/occt/c++/ocaCentroid.cpp
@@ -5008,8 +6326,18 @@ if(SRAVA_MODULE_OCCT)
              modules/occt/c++/ocaExport.cpp
              modules/occt/c++/ocaImport.cpp
              modules/occt/c++/ocaNfaces.cpp
+             modules/occt/c++/ocaFace.cpp
+             modules/occt/c++/ocaFaceAt.cpp
+             modules/occt/c++/ocaSurfaceType.cpp
+             modules/occt/c++/ocaProject.cpp
+             modules/occt/c++/ocaProjectFlatten.cpp
+             modules/occt/c++/ocaUnifyFaces.cpp
+             modules/occt/c++/ocaLoft.cpp
+             modules/occt/c++/ocaLoftRuled.cpp
              modules/occt/c++/ocaNverts.cpp
              modules/occt/c++/ocaTranslate.cpp
+             modules/occt/c++/ocaDistanceAt.cpp
+             modules/occt/c++/ocaSection.cpp
              modules/occt/c++/ocaRotate.cpp
              modules/occt/c++/ocaScale.cpp
              modules/occt/c++/ocaMirror.cpp
@@ -5018,8 +6346,18 @@ if(SRAVA_MODULE_OCCT)
              modules/occt/manifest.cpp
     DEPENDS  pigts_codegen oc_ts_codegen gen_srava_parser
     LINK     srava_oc
+             # ★ #3547 ④: verts が **点群型 (pt-cloud3d)** を作るので srava_pt に依存する。
+             #   ⚠ 借りているのは *幾何の機能* ではなく **値の器** — 点群は外部ライブラリを
+             #     持たない中立の型 (#3528) なのでモジュール境界の約束①に触れない
+             #     (cgal / geogram / geomutils と同じ形)。
+             srava_pt
              TKernel TKMath TKBRep TKPrim TKBO TKOffset TKTopAlgo TKMesh TKG3d TKGeomBase TKGeomAlgo TKShHealing
              TKFillet          # fillet / chamfer (#3437)
+             # ★★ #3544 段 2: 陰線処理 (HLRBRep_Algo)。⚠ **option にしない** — 構成で op の
+             #   有無が割れると本数が機体ごとに変わり、数字を並べるたびに但し書きが要る
+             #   (NEF_SNC で実際にそうなった)。TKHLR は OCCT の ModelingAlgorithms の
+             #   標準構成に入っているので、無ければリンクで **大きな音を立てて**落ちるのが正しい。
+             TKHLR             # hlr (#3544)
              ${OC_STEP_LIBS}   # ★ STEP 入出力 (#3437) — SRAVA_OCCT_STEP=ON のときだけ
              ${OC_TEXT_LIBS}   # ★ text の StdPrs_BRepFont (#3471) — SRAVA_OCCT_TEXT=ON のときだけ
     DEFINES  ${OC_FEATURE_DEFS}
@@ -5057,6 +6395,21 @@ if(SRAVA_MODULE_OCCT)
       PASS_REGULAR_EXPRESSION "MODULE_OK name=occt_mf .*make_agent=yes")
   endif()
 
+  # ---- ★ #3498: OCCT の中断機構がライブラリ層で効くことの単体回帰。
+  #   planner 経由の SIGINT (srava_teardown_sigint) では **配線が無くても通ってしまう** —
+  #   occt は EXEC_PROCESS 専用なので #3417 の DM_CONT_KILL が agent ごと殺すため。
+  #   ここでは srava_oc を直接叩き、*算法が自分で戻ってくる*ことを見る。
+  #   ⚠ 時間を見る検査なので閾値は「素の所要に対する比」。TIMEOUT は素の所要の数倍を見込む。
+  add_executable(test_occt_break test/occt_break_test.cpp)
+  target_link_libraries(test_occt_break PRIVATE srava_oc)
+  find_package(Threads REQUIRED)
+  target_link_libraries(test_occt_break PRIVATE Threads::Threads)
+  add_test(NAME occt_break COMMAND test_occt_break)
+  set_tests_properties(occt_break PROPERTIES
+    PASS_REGULAR_EXPRESSION "OCCT-BREAK-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL|OCCT-BREAK-FAIL|Segmentation|Aborted"
+    TIMEOUT 300)
+
   add_test(NAME srava_module_occt_so COMMAND srava_module_probe $<TARGET_FILE:occt_module>)
   set_tests_properties(srava_module_occt_so PROPERTIES
     PASS_REGULAR_EXPRESSION "MODULE_OK name=occt .*make_agent=yes")
@@ -5073,19 +6426,119 @@ if(SRAVA_MODULE_OCCT)
   if(SRAVA_OCCT_STEP)
     list(APPEND _oc_modes step)
   endif()
+  #   ★ #3513: iges モードは **STEP と IGES の両方**を持つビルドだけ (球を 3 形式へ出して
+  #     閉形式と突き合わせるので、step / iges / brep が揃っている必要がある)。
+  if(SRAVA_OCCT_STEP AND SRAVA_OCCT_IGES)
+    list(APPEND _oc_modes iges)
+  endif()
   #   ★ contact = #3490 (2026-09-06)。境界だけで接する立体の融合が空洞を埋めないこと。
   if(SRAVA_MODULE_MANIFOLD)
     list(APPEND _oc_modes tri)
   endif()
+  # ★ lossy = #3501 (2026-09-07)。BOPAlgo が黙って材料を落とす融合が明示エラーになること
+  #   (かつ、正しい結果を誤検出で潰していないこと)。判定は「occt >= cgal」という
+  #   カーネル間の不変条件なので **cgal が要る** (occt の球は厳密・cgal は内接多面体)。
+  if(SRAVA_MODULE_CGAL)
+    list(APPEND _oc_modes lossy)
+  endif()
   foreach(_m IN LISTS _oc_modes)
+    # ⚠ lossy だけ重い — **mac 実測 64.4 秒 > 予算 60 秒** (2026-09-22) で毎回撮られていた
+    #   (Linux は 15.6 秒なので、こちらでは越えない = **機で足りる/足りないが変わる**例)。
+    #   ★ loop 全体を伸ばすと軽い mode の捕獲が 3 倍遅れるので、mode ごとに分ける。
+    set(_oc_hang 60)
+    if(_m STREQUAL "lossy")
+      set(_oc_hang 180)
+    endif()
     add_test(NAME srava_occt_${_m}
       COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt.sh $<TARGET_FILE:srava> ${_m})
     set_tests_properties(srava_occt_${_m} PROPERTIES
-      ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/occache-${_m}"
+      ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/occache-${_m};SRAVA_HANG_SECS=${_oc_hang}"
       PASS_REGULAR_EXPRESSION "OCCT-[A-Z]+-OK"
       FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
       TIMEOUT 300)
   endforeach()
+  # ==================================================================
+  # ★★ #3518 の 2: **面を取り出す** (face / face_at)。occt 固有 — メッシュ系の 2D は
+  #   平面に縛られているので「円柱の側面を 2D 領域として持つ」ことができない。
+  #   ⚠ 期待値に **巡回順そのものを焼き付けない** (面積を並べ替えてから比べる)。
+  #     OCCT の内部順は版で変わりうるので、焼き付けると 7.9.3 で落ちる検査になる。
+  # ==================================================================
+  # ★★ #3532: 格子から自由曲面 — surface_through (通過点) / surface_control (制御点)。
+  #   ★ 2 つは **同じ綴り**を受け取り点の意味だけが違うので、意味の違いそのものを検査する。
+  add_test(NAME srava_occt_surface
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_surface.sh
+            $<TARGET_FILE:srava> occt.so 1e-6)
+  set_tests_properties(srava_occt_surface PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ocsurfcache;SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "OCCT-SURFACE-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+  add_test(NAME srava_occt_face
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_face.sh
+            $<TARGET_FILE:srava> occt.so 1e-9)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 49.92s ・ Linux(x86_64/7.8.1) 20.68s ⇒ 180s。
+  set_tests_properties(srava_occt_face PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ocfacecache;SRAVA_HANG_SECS=180"
+    PASS_REGULAR_EXPRESSION "OCCT-FACE-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+  # ★★★ #3544 段 2: **陰線処理 (HLR)**。閉形式だけで固定する (絵は見られない)。
+  #   ★ 球が「ちょうど 1 本」になることが要 — 0 なら輪郭を落として球が消えており、
+  #     2 なら継ぎ目 (seam) を図面に描いている。1 つの数が 2 つの誤りを捕まえる。
+  add_test(NAME srava_occt_hlr
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_hlr.sh
+            $<TARGET_FILE:srava> occt.so)
+  set_tests_properties(srava_occt_hlr PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ochlrcache;SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "OCCT-HLR-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+  # ★★★ #3544 段 3: **2D 図面の入出力** (DXF / SVG)。
+  #   ★ 受け入れ条件は「円を書いて読み戻すと円のまま」。⚠ それだけでは「1 本でした」が
+  #     何を意味するか決まらないので、**同じ円を折れ線で書いた対照** (cgal の書き手 = 64 本)
+  #     を並べる。⇒ cgal.so を 3 引数で渡す (無ければ対照だけ飛ばして名前を言う)。
+  if(SRAVA_MODULE_CGAL)
+    set(OC_DRAW_CG "cgal.so")
+  else()
+    set(OC_DRAW_CG "")
+  endif()
+  # ★ ⑨ (occt → cgal の道) には occt_mf / manifold も要る。無ければ⑨だけ飛ばして名前を言う。
+  if(SRAVA_MODULE_MANIFOLD)
+    set(OC_DRAW_MF "occt_mf.so" "manifold.so")
+  else()
+    set(OC_DRAW_MF "")
+  endif()
+  add_test(NAME srava_occt_drawing
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_drawing.sh
+            $<TARGET_FILE:srava> occt.so ${OC_DRAW_CG} ${OC_DRAW_MF})
+  set_tests_properties(srava_occt_drawing PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ocdrawcache;SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "OCCT-DRAWING-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+  # ★★ #3518 の 5: **掃引 (extrude / revolve) の検査**。符号つき体積が 0 になる掃引を
+  #   明示エラーにする。⚠ 曲面と無関係に **元から在った穴** (平面の面を面内方向へ
+  #   押し出しても 0 になる)。正しい掃引を潰していないことも同じ検査で見る。
+  add_test(NAME srava_occt_sweep
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_sweep.sh
+            $<TARGET_FILE:srava> occt.so 1e-9)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 5.47s ・ Linux(x86_64/7.8.1) 2.49s ⇒ 20s。
+  set_tests_properties(srava_occt_sweep PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ocsweepcache;SRAVA_HANG_SECS=20"
+    PASS_REGULAR_EXPRESSION "OCCT-SWEEP-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+  # ★★ #3511: **loft / loft_ruled**。断面の列を通る立体。検証は閉形式 (円柱・円錐台・角柱)。
+  #   ★ 「なめらか」と「線織」が **本当に違う** ことまで検査する (同じなら区別が空振り)。
+  add_test(NAME srava_occt_loft
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_occt_loft.sh
+            $<TARGET_FILE:srava> occt.so 1e-9)
+  # ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 15.44s ・ Linux(x86_64/7.8.1) 6.96s ⇒ 60s。
+  set_tests_properties(srava_occt_loft PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/ocloftcache;SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "OCCT-LOFT-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
 endif()
 
 # ==================================================================
@@ -5138,7 +6591,10 @@ if(SRAVA_MODULE_CGAL)
              rect2d:1e-8 ngon2d:1e-8 polygon2d:1e-8
              box_cut:1e-12 prism_cut:1e-9
              union:1e-8 difference:1e-8 intersection:1e-8
-             tube3d:1e-8 tube2d:1e-8)
+             tube3d:1e-8 tube2d:1e-8
+             # ★ #3511: 凸包。hull3d / hull2d は閉形式で 9 / 3 ちょうど・hull_convex は
+             #   icosphere2 と同じ値になる (凸なものの凸包はそれ自身)。
+             hull3d:1e-12 hull_convex:1e-12 hull2d:1e-8)
   endif()
   if(SRAVA_MODULE_GEOGRAM)
     # geogram は厳密述語/厳密構成だが **結果の頂点は double** に落ちる (EPECK のように有理数を
@@ -5154,7 +6610,9 @@ if(SRAVA_MODULE_CGAL)
       MODELS box:1e-12 sphere:1e-12 box_cut:1e-12
              pyramid:1e-12 cylinder:1e-12 cone:1e-12 torus:1e-12 tetrahedron:1e-12
              prism:1e-12 icosphere2:1e-12 importstl:1e-12 tube3d:1e-12
-             union:1e-9 difference:1e-9 intersection:1e-9)
+             union:1e-9 difference:1e-9 intersection:1e-9
+             # ★ #3511: 凸包 (geogram は 2D 型を持たないので hull2d は入れない)。
+             hull3d:1e-12 hull_convex:1e-12)
   endif()
   if(SRAVA_MODULE_OCCT)
     # ★ #3461: occt は **box だけ**を表に入れる。完全一致 (tol=0) する。
@@ -5208,16 +6666,180 @@ if(SRAVA_MODULE_CGAL)
         MODELS box:0 sphere:0 box_cut:1e-12
                pyramid:0 cylinder:0 cone:0 torus:0 tetrahedron:0
                prism:0 icosphere2:0 importstl:1e-12 tube3d:1e-12
-               union:1e-12 difference:1e-12 intersection:1e-12)
+               union:1e-12 difference:1e-12 intersection:1e-12
+               # ★ #3511: 凸包 (nef は 2D 型を持たないので hull2d は入れない)。
+               hull3d:1e-12 hull_convex:1e-12)
     endif()
     if(SRAVA_MODULE_NEF_HYBRID)
       srava_add_kernel_agree(nef_hybrid.so
         MODELS box:0 sphere:0 box_cut:1e-12
                pyramid:0 cylinder:0 cone:0 torus:0 tetrahedron:0
                prism:0 icosphere2:0 importstl:1e-12 tube3d:1e-12
-               union:1e-12 difference:1e-12 intersection:1e-12)
+               union:1e-12 difference:1e-12 intersection:1e-12
+               hull3d:1e-12 hull_convex:1e-12)
     endif()
   endif()
+endif()
+
+# ==================================================================
+# ★ #3511: hull (凸包) の **閉形式**回帰。kernel_agree は「cgal と一致するか」しか見ないので、
+#   基準の cgal 自身が正しいことは別に固定する必要がある。ここは真値を直接書く。
+#   ★ 2026-09-12: 退化検査 (flat) を **nef にも付けた**。#3516 で box の寸法検査が入り、
+#     退化入力の作り方が「平らな STL の import」へ変わったので、nef でも踏めるようになった
+#     (以前は box(1,1,0) 自体が SIGSEGV していて付けられなかった)。
+#   ⚠ 2D 検査は 2D 型を持つ cgal / manifold だけ。
+# ==================================================================
+function(srava_add_hull _so _tol _extra)
+  string(REPLACE ".so" "" _hn "${_so}")
+  add_test(NAME srava_hull_${_hn}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_hull.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol} "${_extra}")
+  set_tests_properties(srava_hull_${_hn} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/hullcache-${_hn}"
+    PASS_REGULAR_EXPRESSION "HULL-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|HULL-FAIL|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_hull(cgal.so 1e-12 "2d,flat")
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_hull(manifold.so 1e-12 "2d,flat")
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  # geogram は結果の頂点が double なので相対誤差を緩める (agree の項と同じ理由)。
+  srava_add_hull(geogram.so 1e-9 "flat")
+endif()
+if(SRAVA_MODULE_NEF AND SRAVA_MODULE_NEF_SNC)
+  srava_add_hull(nef_snc.so 1e-12 "flat")
+endif()
+if(SRAVA_MODULE_NEF AND SRAVA_MODULE_NEF_HYBRID)
+  srava_add_hull(nef_hybrid.so 1e-12 "flat")
+endif()
+
+# ==================================================================
+# ★ #3512: refine / remesh / simplify の **閉形式**回帰。値はすべて真値を直接書く。
+#   ★ 一番効くのは「形を変えない」こと — remesh は鋭角エッジを保護しないと単位箱が
+#     体積 0.999107 / 面積 5.98811 になり (角が削れる)、simplify は体積保存の制約を
+#     解かない実装だと面数を落とすたびに体積が動く。どちらも **黙って形が変わる**ので、
+#     体積/面積が 1 / 6 のままであることを固定する。
+#   ★ "angle" を付けると **最小角の改善**まで見る (OFF を書き出して測る。1x1x0.02 の板で
+#     1.15° → 14.87°)。srava に角度を測る op が無いのでテスト側で計算している。
+#   ★ refine は cgal / manifold の 2 実装。**約束は同じ** (形は不変・全辺が len 以下) が
+#     作り方が違うので **面数は一致しない** (箱 len=0.25 で cgal 432 / manifold 312)。
+#     ⇒ 面数では固定せず「増えたか」「辺が len 以下か」で見る。
+#   ⚠ remesh / simplify は cgal だけ。geogram / manifold のライブラリは **同じ約束にできない**
+#     ことを #3512 で実測した (docs/srava_module_reference.md の各節に数値)。
+# ==================================================================
+function(srava_add_remesh _so _tol _extra)
+  string(REPLACE ".so" "" _rn "${_so}")
+  add_test(NAME srava_remesh_${_rn}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_remesh.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol} "${_extra}")
+  set_tests_properties(srava_remesh_${_rn} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/rmcache-${_rn}"
+    PASS_REGULAR_EXPRESSION "REMESH-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|REMESH-FAIL|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_remesh(cgal.so 1e-12 "rs,angle,edge")
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  # ★ manifold は refine だけ (remesh / simplify は持たない = #3512 で実測して見送った)。
+  #   ⚠ 許容は緩める — manifold は体積を double で積むので箱の 1 / 6 が最下位桁でずれる。
+  srava_add_remesh(manifold.so 1e-9 "edge,cleanup")
+endif()
+
+# ==================================================================
+# ★ #3516: 退化した / 負のプリミティブ寸法が **明示エラー**になることの回帰。
+#   ★ 見ているのは検査そのものではなく **カーネル間で歯抜けにならないこと**。
+#     実測 (2026-09-12) では「寸法は > 0」を box / sphere は 2/7 しか持っておらず、
+#     その結果 nef は box(1,1,0) で SIGSEGV し、box(-1,1,1) は 4 カーネルで 4 通りの
+#     違う値を黙って返していた。
+#   ⚠ openvdb は入れない — 引数の並びが違う (末尾に dx)。もともと 7/7 の側。
+#   ★ 2026-09-12 続き: 2D (ngon / circle / rect / polygon / extrude / revolve) と tube / transform /
+#     scale も足した。2D 系列は 2D 型を持つ cgal / manifold / occt だけ ("2d" を渡す)。
+#     ⚠ tube は **元から 7/7** (検査は共通ヘッダ src/h/common/tube.h にある)。歯抜けではないが、
+#       共通ヘッダが退行したら全カーネルが同時に壊れるので、ここで固定しておく。
+# ==================================================================
+function(srava_add_degenerate _so _extra)
+  string(REPLACE ".so" "" _dn "${_so}")
+  add_test(NAME srava_degenerate_${_dn}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_degenerate.sh
+            $<TARGET_FILE:srava> ${_so} "${_extra}")
+  # ⚠ 番犬の予算 — **occt の本だけ重い** (mac 12.85s / Linux 5.64s ⇒ 最も遅い機 x3 = 45s)。
+  set(_dg_hang 30)
+  if(_dn STREQUAL "occt")
+    set(_dg_hang 45)
+  endif()
+  set_tests_properties(srava_degenerate_${_dn} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/dgcache-${_dn};SRAVA_HANG_SECS=${_dg_hang}"
+    PASS_REGULAR_EXPRESSION "DEGEN-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|DEGEN-FAIL|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_degenerate(cgal.so "2d")
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_degenerate(manifold.so "2d")
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  srava_add_degenerate(geogram.so "")
+endif()
+if(SRAVA_MODULE_CHERCHI)
+  srava_add_degenerate(cherchi.so "")
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_degenerate(occt.so "2d")
+endif()
+if(SRAVA_MODULE_NEF AND SRAVA_MODULE_NEF_SNC)
+  srava_add_degenerate(nef_snc.so "")
+endif()
+if(SRAVA_MODULE_NEF AND SRAVA_MODULE_NEF_HYBRID)
+  srava_add_degenerate(nef_hybrid.so "")
+endif()
+
+# ==================================================================
+# ★ #3511: minkowski の **閉形式**回帰。
+#   ⚠ kernel_agree には入れられない — あちらは基準が常に cgal で、**cgal.so は minkowski を
+#     持たない** (CGAL の minkowski_sum_3 は Nef_polyhedron_3 の上の関数なので持ち主は nef)。
+#   ⇒ 真値 (箱⊕箱の厳密値 / Steiner の上界) と直接突き合わせる。
+# ==================================================================
+function(srava_add_minkowski _so _tol)
+  string(REPLACE ".so" "" _mn "${_so}")
+  add_test(NAME srava_minkowski_${_mn}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_minkowski.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol})
+  # ⚠ 番犬の予算 — nef 系の 2 本が重い (最も遅い機 = mac の実測 x3)。
+  #     nef_snc     mac 5.01s / Linux 1.19s ⇒ 20s
+  #     nef_hybrid  mac 4.10s / Linux 1.11s ⇒ 15s
+  #   manifold は mac でも軽いので既定 10 秒のまま。
+  set(_mk_hang "")
+  if(_mn STREQUAL "nef_snc")
+    set(_mk_hang ";SRAVA_HANG_SECS=20")
+  elseif(_mn STREQUAL "nef_hybrid")
+    set(_mk_hang ";SRAVA_HANG_SECS=15")
+  endif()
+  set_tests_properties(srava_minkowski_${_mn} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/mkcache-${_mn}${_mk_hang}"
+    PASS_REGULAR_EXPRESSION "MINKOWSKI-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|MINKOWSKI-FAIL|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_minkowski(manifold.so 1e-9)
+endif()
+if(SRAVA_MODULE_NEF AND SRAVA_MODULE_NEF_SNC)
+  srava_add_minkowski(nef_snc.so 1e-12)
+endif()
+if(SRAVA_MODULE_NEF AND SRAVA_MODULE_NEF_HYBRID)
+  srava_add_minkowski(nef_hybrid.so 1e-12)
 endif()
 
 # ==================================================================
@@ -5236,8 +6858,14 @@ function(srava_add_affine _name _so _tol _dx _cg)
   add_test(NAME srava_affine_${_name}
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_affine.sh
             $<TARGET_FILE:srava> ${_so} ${_tol} "${_dx}" "${_cg}")
+  # ⚠ 番犬の予算 — **occt の本だけ重い** (mac 8.99s / Linux 4.97s ⇒ 最も遅い機 x3 = 30s)。
+  #   他の本は既定 10 秒のまま (srava_hangwatch.sh)。
+  set(_aff_hang "")
+  if(_name STREQUAL "occt")
+    set(_aff_hang ";SRAVA_HANG_SECS=30")
+  endif()
   set_tests_properties(srava_affine_${_name} PROPERTIES
-    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/affcache-${_name}"
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/affcache-${_name}${_aff_hang}"
     PASS_REGULAR_EXPRESSION "AFFINE-OK"
     FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
     TIMEOUT 300)
@@ -5275,6 +6903,289 @@ endif()
 if(SRAVA_MODULE_OPENVDB)
   # ボクセル (dx=0.05) なので許容誤差は 2%。生成 op の末尾に dx が要る。
   srava_add_affine(openvdb openvdb.so 2e-2 0.05 "")
+endif()
+
+# ==================================================================
+# ★★ #3518: **2D (cross2d) のアフィン変換**。3D の回帰 (上) は 2D の経路を 1 行も通らない
+#   ので、2D を持つ 3 カーネル (cgal / manifold / occt) に同じスクリプトを当てる。
+#   ★ occt は #3518 で 2D を受けるようになった (cgal / manifold は元から持っていた = 歯抜け)。
+#   ★★ 面積は剛体変換で不変なので、**extrude して内部に probe を置いて切り取る**
+#     (srava_affine.sh と同じ手。area だけ見ていると何も動いていなくても通る)。
+#   ⚠ 第 4 引数は **能力の宣言**: "" 置けない / "space" 置ける / "oc" space + occt 固有。
+#     ★ #3526 で manifold と cgal の 2D が **枠 (平面)** を持ったので、3 カーネルとも "space"
+#       以上になった ("" を使う行はもう無い)。項が空振りしないよう occt だけ "oc" のまま。
+# ==================================================================
+# ==================================================================
+# ★★ #3533: **平面 → 枠 (O,U,V) の表を 1 箇所に保つ**柵。ソースを数える検査。
+#   ⚠ 値の検査では書けない — bbox / centroid を world にしたので **局所座標は言語から観測
+#     できない** (面積も周長も不変・DXF は法線から OCS を作り直す)。⇒ 表が食い違っても
+#     値の検査は緑のまま通る。守りたいのは「枠を作ってよいのは 1 箇所・ほかは運ぶだけ」。
+#   ★ 較正済み (2026-09-15): mfaSection の呼び出しを手書きの表に戻すと ②③ が赤くなる。
+#   ⚠ モジュールのビルド有無に依らないのでいつでも回る (srava 実行体を使わない)。
+# ==================================================================
+add_test(NAME srava_frame_table
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_frame_table.sh ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(srava_frame_table PROPERTIES
+  PASS_REGULAR_EXPRESSION "FRAMETABLE-OK"
+  FAIL_REGULAR_EXPRESSION "FRAME_FAIL"
+  TIMEOUT 120)
+
+# ==================================================================
+# ★★ #3533: **2D 領域の型が 2 つに割れた** (*-cross2d = z=0 の簡易表現 / *-face3d = 空間に
+#   置かれた一般表現) ことの回帰。規約 4 つを 1 つずつ見る (詳細は test/srava_face3d.sh の冒頭)。
+#   ★ 主眼は **bbox が経路に依らないこと** — x まわり 180 度 と 90 度 x 2 は world では同じ
+#     図形なので、答えも同じでなければならない。#3533 以前は局所座標で答えていたので割れていた。
+#   ★ 2026-09-15 に **負の対照を 2 本**取った (どちらも 3 件赤くなる):
+#       (a) bbox を局所へ戻す        → ★ の行が [[0,-3],[2,0]] 対 [[0,0],[2,3]] に戻る
+#       (b) 型をブロブに書かない     → face3d が読み直しで cross2d に戻る
+#     ⚠ (b) は「cold と warm が一致」の検査では **捕まらない** (両方とも等しく壊れる)。
+#   ⚠ occt は対象外 — oc-face3d しか無い (z=0 の簡易表現という状態が存在しない)。
+# ==================================================================
+function(srava_add_face3d _name _so _pfx)
+  add_test(NAME srava_face3d_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_face3d.sh
+            $<TARGET_FILE:srava> ${_so} ${_pfx})
+  set_tests_properties(srava_face3d_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/f3dcache-${_name};SRAVA_HANG_SECS=30"
+    PASS_REGULAR_EXPRESSION "FACE3D-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_face3d(cgal cgal.so cg)
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_face3d(manifold manifold.so mf)
+endif()
+# ★★ #3544 (2026-09-17): **occt も対象にした**。上の「occt は対象外」は #3533 の読みで、
+#   陰線処理 (HLR) の出力が z=0 に乗る (実測) と分かって覆った。⇒ oc-cross2d を型として戻し、
+#   この検定 (規約 4 つ + bbox/centroid の形) を **他カーネルと同じ 1 本**で見る。
+#   ★ この検査は #3533 のときに *別のカーネル向けに* 書かれたものなので、
+#     実装に合わせて書いた検査ではない = 受け入れ条件として強い。
+if(SRAVA_MODULE_OCCT)
+  srava_add_face3d(occt occt.so oc)
+endif()
+
+# ==================================================================
+# ★★ #3534: **project_flatten** — 空間に置かれた 2D を z=0 へ落とす。
+#   ★ 検査の芯は **経路非依存** — 取り下げた案 A (枠の局所座標をそのまま (x,y) にする) は
+#     同じ world 図形でも式の書き方で結果が変わる。他の項は案 A でも全部通るので、
+#     ⑤ が無いと 2 案を区別できない。
+#   ⚠ occt は曲線の境界だけ近似になる (BRepAlgoAPI_Common が 平面 ∩ 円柱 を BSpline に
+#     落とす・実測 7.2e-6) ので、第 3 引数で分ける。⚠ occt は **型が変わらない** (#3533)。
+# ==================================================================
+function(srava_add_project_flatten _name _so _kind)
+  add_test(NAME srava_project_flatten_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_project_flatten.sh
+            $<TARGET_FILE:srava> ${_so} "${_kind}")
+  set_tests_properties(srava_project_flatten_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/pflatcache-${_name};SRAVA_HANG_SECS=30"
+    PASS_REGULAR_EXPRESSION "PROJFLAT-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_project_flatten(cgal cgal.so "")
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_project_flatten(manifold manifold.so "")
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_project_flatten(occt occt.so "oc")
+endif()
+
+function(srava_add_affine2d _name _so _tol _oc)
+  add_test(NAME srava_affine2d_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_affine2d.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol} "${_oc}")
+  # ⚠ 番犬の予算 — **occt の本だけ重い** (mac 24.67s / Linux 9.63s ⇒ 最も遅い機 x3 = 90s)。
+  #   一族をまとめて伸ばすと軽い本の捕獲が遅れるので、この 1 本だけ分ける (2026-09-22)。
+  set(_a2d_hang 30)
+  if(_name STREQUAL "occt")
+    set(_a2d_hang 90)
+  endif()
+  set_tests_properties(srava_affine2d_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/aff2dcache-${_name};SRAVA_HANG_SECS=${_a2d_hang}"
+    PASS_REGULAR_EXPRESSION "AFFINE2D-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+# ==================================================================
+# ★★ #3511: **loft_ruled** (メッシュ系)。断面の列を直線で結ぶ立体。
+#   ★ occt の srava_occt_loft.sh とは別 — メッシュ系は **loft (なめらか) を持たない**ので
+#     期待値の表がそもそも別。加えて **ねじれ (面内回転) の答えが occt と違う**ことを
+#     検査に固定してある (ひさ判断: そのまま受ける・2026-09-13)。
+#   ⚠ 許容は相対。manifold の 2D は cache から decode すると Clipper2 の格子に載るので、
+#     同じ式でも断面の座標が下位桁で動く (loft の欠陥ではなく 2D 型の性質)。
+#   ★ cgal は #3526 の枠を移してから (いまは 2D を面外へ置けないので断面を空間に置けない)。
+# ==================================================================
+function(srava_add_loft_ruled _name _so _tol)
+  add_test(NAME srava_loft_ruled_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_loft_ruled.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol})
+  set_tests_properties(srava_loft_ruled_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/loftcache-${_name};SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "LOFT-RULED-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_loft_ruled(manifold manifold.so 1e-7)
+endif()
+
+if(SRAVA_MODULE_CGAL)
+  # ★ cgal の 2D は厳密なので manifold より 2 桁きつく見られる (2D が Clipper2 の格子に
+  #   載らないため)。⇒ 同じスクリプトを厳しい許容で当てて、期待値が両カーネルで同じことを見る。
+  srava_add_loft_ruled(cgal cgal.so 1e-9)
+endif()
+
+# ==================================================================
+# ★★ #3529: **cache を経由しても同じ値になること** (同じ式が経路で違う値を返さない)。
+#   manifold の 2D は decode が CrossSection(ps,NonZero) で作り直しており、構成子が Clipper2 の
+#   Union を通るので座標が整数格子に載っていた ⇒ *その場の実体* と *decode した実体* で値が違う。
+#   ⚠ これは性能でなく **正しさ**の問題 — content-addressed cache は「同じ入力なら同じ結果」を
+#     前提に値を再利用する仕組みなので、hit と miss で答えが変わるのは約束そのものに触る。
+#   ⚠⚠ 素朴に「同じ式を 2 回流して比べる」は **検定にならない** (2 回目は終端 op 自体が
+#     cache hit するので同じ値が出て当たり前)。⇒ 焼くときの終端と比べるときの終端を **変える**。
+#   ★ 2D だけでなく 3D も横断する (3D は無罪と実測済みだが、将来 manifold 側が変わったら赤くなる)。
+#   ★ カーネルごとの 2D op の歯抜けは **飛ばして名前を出す** — 「型が無い」と「本当の歯抜け」を
+#     混ぜると表が嘘になる (#3510 の教訓)。
+# ==================================================================
+function(srava_add_cache_path _name _so _has2d)
+  add_test(NAME srava_cache_path_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_cache_path.sh
+            $<TARGET_FILE:srava> ${_so} ${_has2d})
+  set_tests_properties(srava_cache_path_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/cpathcache-${_name};SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "CACHEPATH-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_cache_path(manifold manifold.so 1)
+endif()
+if(SRAVA_MODULE_CGAL)
+  srava_add_cache_path(cgal cgal.so 1)
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_cache_path(occt occt.so 1)
+endif()
+
+# ==================================================================
+# ★★ #3537: **valid は回転で変わらない** — 共有述語 self_intersects の誤検出の回帰。
+#   @revolve@ で作った立体を回すと manifold の valid が 0 になっていた。誤検出していたのは
+#   manifold でも cgal でもなく src/h/common/meshprops.h の *こちらの double 述語*。
+#   ★ @revolve@ の円環の蓋には中心頂点が無いので「非隣接なのに同一平面」の三角形対を持つ。
+#     @cylinder@ の蓋は扇で全部隣接扱いになるため、この穴を踏むのは revolve だけだった。
+#   ⚠ 検査は **不変量の形**にしてある (角度の期待値を並べない) — 起票時の「厳密に表せる角度
+#     なら通る」という見立てが再測で崩れており、角度を並べると別の角度で落ちる版が素通りする。
+#   ★★ 反対側 (自己交差した立体は回しても valid=0) を必ず置く。片側だけだと
+#     「述語が常に 0 を返す」版が満点で通ってしまう。
+#   ★ cgal は **厳密述語**なので独立した対照になる (両方が同じ答えを出すことに意味がある)。
+#     occt は自分の B-rep で判定するので、これも独立した対照。
+#     ⚠ occt の tube は自己交差する背骨を掃引そのものが断るので、反対側は "-" (作れない)。
+# ==================================================================
+function(srava_add_selfintersect _name _so _selfx)
+  add_test(NAME srava_selfintersect_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_selfintersect.sh
+            $<TARGET_FILE:srava> ${_so} "${_selfx}")
+  set_tests_properties(srava_selfintersect_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/selfxcache-${_name};SRAVA_HANG_SECS=60"
+    PASS_REGULAR_EXPRESSION "SELFX-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_selfintersect(manifold manifold.so 0)
+endif()
+if(SRAVA_MODULE_CGAL)
+  srava_add_selfintersect(cgal cgal.so 0)
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_selfintersect(occt occt.so "-")
+endif()
+
+# ==================================================================
+# ★★ #3530: **segs (分割数) / n (辺数) の規約を op x カーネルで数える**。
+#   起票時に数えたら **4 通りの規約が併存**していた (sphere 族 / revolve / ngon 族 /
+#   circle が cgal と manifold で別) — @circle(1,0)@ が cgal で三角形・manifold で 32 角形
+#   になり、**エラーも警告も無く**体積が 2.4 倍違う答えを返していた。
+#   ⚠ これは op を 1 つずつ見ても見えない。表にして初めて出た ⇒ **表を検査にする**。
+#   規約は src/h/common/segs.h に 1 本:
+#     segs (近似の細かさ・既定値あり)  省略 と 0 は同じ / 1,2,負 は明示エラー / 3 以上 は その値
+#     n    (形そのもの・既定値なし)    3 未満 (0 を含む) は明示エラー
+#   ★ occt は segs を **無視する**が検査はする (第 5 引数 0) — しないと同じ式が cg/mf で
+#     落ちて occt で通る、という新しい食い違いになる。
+#   ★ openvdb は末尾の dx が必須なので segs を位置的に省略できない (第 6 引数で dx を渡す)。
+#     ⇒ 「省略」の比較だけ行わない。0 = 未指定 の意味は同じ。
+# ==================================================================
+function(srava_add_segs _name _so _segs_ops _n_ops _honors _tail)
+  add_test(NAME srava_segs_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_segs.sh
+            $<TARGET_FILE:srava> ${_so} "${_segs_ops}" "${_n_ops}" ${_honors} "${_tail}")
+  # ⚠ 番犬の予算 — **occt の本だけ重い** (mac 14.17s / Linux 5.40s ⇒ 最も遅い機 x3 = 45s)。
+  set(_segs_hang 30)
+  if(_name STREQUAL "occt")
+    set(_segs_hang 45)
+  endif()
+  set_tests_properties(srava_segs_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/segscache-${_name};SRAVA_HANG_SECS=${_segs_hang}"
+    PASS_REGULAR_EXPRESSION "SEGS-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_segs(cgal     cgal.so     "circle,sphere,cylinder,cone,torus,tube_ruled,revolve" "ngon,prism,pyramid" 1 "")
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_segs(manifold manifold.so "circle,sphere,cylinder,cone,torus,tube_ruled,revolve" "ngon,prism,pyramid" 1 "")
+endif()
+if(SRAVA_MODULE_OCCT)
+  # ★★ #3570 段3: occt は segs を **そもそも取らない** (記述子から撤去した) ので none。
+  #   以前は 0 (受けるが無視し、検査はする = #3530) だった。
+  srava_add_segs(occt     occt.so     "circle,sphere,cylinder,cone,torus,tube,revolve" "ngon,prism,pyramid" none "")
+endif()
+if(SRAVA_MODULE_CHERCHI)
+  srava_add_segs(cherchi  cherchi.so  "sphere,cylinder,cone,torus,tube_ruled" "prism,pyramid" 1 "")
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  srava_add_segs(geogram  geogram.so  "sphere,cylinder,cone,torus,tube_ruled" "prism,pyramid" 1 "")
+endif()
+if(SRAVA_MODULE_NEF_SNC)
+  srava_add_segs(nef_snc  nef_snc.so  "sphere,cylinder,cone,torus,tube_ruled" "prism,pyramid" 1 "")
+endif()
+if(SRAVA_MODULE_OPENVDB)
+  # ★ openvdb は sphere(r,dx) — 第 2 引数が分割数でなくボクセルサイズなので segs op に入らない
+  srava_add_segs(openvdb  openvdb.so  "cylinder,cone,torus,tube_ruled" "prism,pyramid" 1 ",0.05")
+endif()
+
+# ★★ #3530: **検査の歯抜けを機械で数える** (test/srava_segs_coverage.sh)。
+#   共通検査を 1 本置いても、新しい op を足した人がそこを通し忘れたら元に戻る。
+#   ⚠ 戻ったことは目視では見えない ⇒ 数える検査を常時走らせる (srava_hangwatch_coverage と同型)。
+#   ★ モジュール構成に依らない (srava を起動しない) ので if() の外に置く。
+add_test(NAME srava_segs_coverage
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_segs_coverage.sh
+          ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(srava_segs_coverage PROPERTIES
+  PASS_REGULAR_EXPRESSION "SEGSCOV-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:"
+  TIMEOUT 60)
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_affine2d(cgal cgal.so 1e-9 "space")   # ★ #3526: cgal も 2D を空間に置ける
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_affine2d(manifold manifold.so 1e-9 "space")
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_affine2d(occt occt.so 1e-9 "oc")
 endif()
 
 # ==================================================================
@@ -5347,6 +7258,228 @@ if(SRAVA_MODULE_OPENVDB)
 endif()
 
 # ==================================================================
+# ★ #3514: **位相を直接数える** op (nshells / nparts / genus) の回帰。
+#   ★ 期待値はすべて閉形式で手で書ける整数 (球 / 箱 / トーラス / 中空の箱 / 同心球の xor)。
+#     カーネル同士の合議ではない (#3470 の教訓)。
+#   ★★ 3 本は **違う問い**に答える。中空の箱 (シェル 2 枚・塊 1 個) と同心球の xor
+#     (シェル N 枚・塊 N/2 個) を必ず通し、どれかが他方の別名になっていないことを固定する。
+#   ⚠ nparts は **nef の nparts と同じ約束** (SNC の marked volume = 塊)。cgal / manifold /
+#     geogram の 3 本が同じ期待値表を見ることで、変換を挟まずに同じ数を返すことを保つ。
+#   ⚠ 起票時の検証案「xor の N 球 → 成分 N/2」は **掃引の模型 (線分上の N 球) では成り立たない**
+#     — 破片が球面の交線で接していて 1 枚に繋がるため。テスト側の冒頭に実測つきで書いてある。
+# ==================================================================
+function(srava_add_topology _name _so _seg)
+  add_test(NAME srava_topology_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_topology.sh
+            $<TARGET_FILE:srava> ${_so} ${_seg})
+  # ⚠ 番犬の予算 — cgal / geogram の 2 本が重い (manifold は mac 1.44s / Linux 1.82s で軽い)。
+  #     cgal     mac 5.24s / Linux 3.97s ⇒ 遅い方 (mac)   x3 = 15.7s  ┐ どちらも 20s で足りる
+  #     geogram  mac 3.04s / Linux 3.56s ⇒ 遅い方 (Linux) x3 = 10.7s  ┘
+  #   ★★ geogram は **この木で唯一 Linux の方が遅い本** (他の 25 本はすべて mac が遅い)。
+  #     ⇒ 機の倍率は一律の係数で代替できないどころか **向きも一定でない**。予算は必ず
+  #       両機の実測を並べて **遅い方**から取ること (2026-09-22 ・ mac と往復して確定)。
+  set(_topo_hang "")
+  if(_name STREQUAL "cgal" OR _name STREQUAL "geogram")
+    set(_topo_hang ";SRAVA_HANG_SECS=20")
+  endif()
+  set_tests_properties(srava_topology_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/topocache-${_name}${_topo_hang}"
+    PASS_REGULAR_EXPRESSION "TOPOLOGY-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 600)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_topology(cgal cgal.so 64)
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_topology(manifold manifold.so 64)
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  srava_add_topology(geogram geogram.so 64)
+endif()
+
+# ==================================================================
+# ★★★ #3527 段 4: geomutils.so の **片の取り出し** (part / part_at / shell / shell_at)。
+#   ★ 段 4 の本丸は **入れ子** — 「どの空洞がどの塊のものか」。数えるだけ (nparts / nshells)
+#     なら符号で足りるが、*取り出す* には入れ子が要る。そこが #3514 で part が見送られた
+#     分かれ目で、実体は meshprops.h の nesting() (3D・巻き数) と ringprops.h の nesting()。
+#   ★★ 柱は **和の式が 2 つ在り別物であること**:
+#       part  … Σ |volume(part)|  == |volume(m)|   (符号なし)
+#       shell … Σ  volume(shell)  ==  volume(m)    (符号つき)
+#   ★ 入力を作るカーネルを振って回す — gu は 3 者から同じ 4CC (MFM3) で受けるので、
+#     *どの double 系カーネルが作った値でも同じ分解になる* ことがここで固定される。
+#   ⚠ 2D の節は manifold のときだけ走る (geogram / cherchi は 2D 型を持たない = 対象外で
+#     あって歯抜けではない)。テスト側がカーネル名の表で判断している。
+# ==================================================================
+function(srava_add_geomutils _name _so)
+  add_test(NAME srava_geomutils_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_geomutils.sh
+            $<TARGET_FILE:srava> ${_so})
+  # ⚠ SRAVA_HANG_SECS — Linux 実測 5.2s で既定 10 秒に **余裕が x1.9 しかない** (2026-09-22)。
+  set_tests_properties(srava_geomutils_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/gucache-${_name};SRAVA_HANG_SECS=30"
+    PASS_REGULAR_EXPRESSION "GEOMUTILS_OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|parse error|unknown op"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_geomutils(manifold manifold.so)
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  srava_add_geomutils(geogram geogram.so)
+endif()
+if(SRAVA_MODULE_CHERCHI)
+  srava_add_geomutils(cherchi cherchi.so)
+endif()
+
+# ==================================================================
+# ★★ #3527 段 5: geomutils.so の **頂点を読む** op (vert / verts / face_verts)。
+#   ★ 柱は 3 つ: ① verts(m)[i] == vert(m,i) (同じ列を同じ順) ② face_verts が指す三角形から
+#     組み立てた面積と符号つき体積が m と一致 ③ face3d は **world の 3 成分**。
+#   ⚠ ②は **面の並べ替えには不変** (実測済)。「i 番目が本当に i 番目か」は名指す口が他に無いので
+#     原理的に見られず、代わりに索引の再現性で受けている。テスト側の③にその旨を書いてある。
+#   ★ 陽性対照 4 種を実測: 向きの反転 / verts の列ずれ / face3d を枠内へ戻す は捕まり、
+#     面の並べ替えだけが捕まらない。
+# ==================================================================
+function(srava_add_geomutils_vert _name _so)
+  add_test(NAME srava_geomutils_vert_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_geomutils_vert.sh
+            $<TARGET_FILE:srava> ${_so})
+  # ⚠ SRAVA_HANG_SECS — Linux 実測 8.5s で既定 10 秒に **余裕が x1.2 しかない** (2026-09-22)。
+  set_tests_properties(srava_geomutils_vert_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/guvcache-${_name};SRAVA_HANG_SECS=30"
+    PASS_REGULAR_EXPRESSION "GEOMUTILS_VERT_OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|parse error|unknown op"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_geomutils_vert(manifold manifold.so)
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  srava_add_geomutils_vert(geogram geogram.so)
+endif()
+if(SRAVA_MODULE_CHERCHI)
+  srava_add_geomutils_vert(cherchi cherchi.so)
+endif()
+
+# ==================================================================
+# ★★ #3527 段 6: sig の **型名の綴り** を登録済みの型名と突き合わせる。
+#   sig はただの文字列なので綴り間違いはコンパイルを通り、ルータがその行に一度もヒットしない
+#   **死んだ行** が黙って残る (gg/gu ・ nf/nfb ・ vd-grid3d/vd-grid)。
+#   ⚠⚠ 守備範囲は「その名前が *登録されているか*」だけ。実在する別の型への取り違え
+#     (gg-mesh3d -> gu-mesh3d) は **捕まらない** — 実測済みで、テスト本体の頭に書いてある。
+#   ★ 材料は `srava --module-info` (ソースではなく **実物**。型名はマクロで組まれるため)。
+#     ビルドされていないモジュールの型は台帳 test/sig_typenames.txt で補う。
+# ==================================================================
+add_test(NAME srava_sig_typenames
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_sig_typenames.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_sig_typenames PROPERTIES
+  PASS_REGULAR_EXPRESSION "SIGTYPES_OK"
+  FAIL_REGULAR_EXPRESSION "FAIL:|UNKNOWN|Traceback"
+  TIMEOUT 60)
+
+# ==================================================================
+# ★★ #3527 段 6: **cast が枠 (置き場所) を落とさない** ことの回帰。
+#   #3533 の規約②「降格は cast のみ」を **cast 自身が黙って破っていた** — PLY2 は
+#   regions のあとにガイド層の節を挟んで枠 ("MARF") を置くのに、mf / gu の
+#   decode_cross_exact が regions で止まっており、cg-face3d を渡すと z=0 へ戻っていた。
+#   (#3526 で mf→cg は直っていたが **cg→mf の向きが残っていた**。段 6 の cast 監査で発見)
+#   ⚠ 「3 成分になったか」では足りない ⇒ **高さ違いの 2 枚が別の答え**になることまで見る。
+#   ★ ガイド (line の開いた折れ線) は mf / gu に表現が無いので **断る** — 黙って捨てると
+#     nverts が cgal と食い違う。
+# ==================================================================
+if(SRAVA_MODULE_CGAL AND SRAVA_MODULE_MANIFOLD)
+  add_test(NAME srava_cast_frame
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_cast_frame.sh $<TARGET_FILE:srava>)
+  set_tests_properties(srava_cast_frame PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/castframecache;SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib"
+    PASS_REGULAR_EXPRESSION "CASTFRAME_OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped|parse error"
+    TIMEOUT 120)
+endif()
+
+# ==================================================================
+# ★ #3514: distance_at(m,[x,y,z]) — **点との距離** の回帰。
+#   ★★ 主役は **箱**。球は入れない (srava_meshprops.sh と同じ判断) — occt は解析球なので
+#     |d-r| が厳密に出るが、メッシュ系は **内接多面体**なので構造的に小さい値になる
+#     (半径 2・seg=128 で中心から 1.99805)。許容を緩めて両方通すのは偽のテストになる。
+#     箱なら面が平面なので全カーネルで厳密に一致し、角・稜の外側まで手で書ける。
+#   ★ 第 5 引数 "sphere" = 解析球の検定も行う (B-rep の occt だけ)。
+#     ⚠⚠ これは occt の実装の罠の回帰でもある: TopoDS_Solid をそのまま
+#     BRepExtrema_DistShapeShape に渡すと「中身の詰まった領域」として扱われ、
+#     **内側の点との距離が 0** になる。Face の compound に対して測る必要がある。
+#   ★ 第 5 引数 "band" = openvdb。距離が **場そのもの**なので探索が要らない代わりに、
+#     狭帯域の外は background に飽和する ⇒ そこは明示エラーになることを固定する。
+# ==================================================================
+function(srava_add_distance_at _name _so _tol _dx _mode)
+  add_test(NAME srava_distance_at_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_distance_at.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol} "${_dx}" "${_mode}")
+  # ⚠ 番犬の予算 — **occt の本だけ重い** (mac 3.44s / Linux 1.41s ⇒ 最も遅い機 x3 = 15s)。
+  set(_da_hang "")
+  if(_name STREQUAL "occt")
+    set(_da_hang ";SRAVA_HANG_SECS=15")
+  endif()
+  set_tests_properties(srava_distance_at_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/dacache-${_name}${_da_hang}"
+    PASS_REGULAR_EXPRESSION "DISTANCEAT-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_distance_at(cgal cgal.so 1e-9 "" "")
+endif()
+if(SRAVA_MODULE_GEOGRAM)
+  srava_add_distance_at(geogram geogram.so 1e-9 "" "")
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_distance_at(occt occt.so 1e-9 "" sphere)
+endif()
+if(SRAVA_MODULE_OPENVDB)
+  # ボクセル (dx=0.02) の誤差は絶対で dx 程度。代表寸法 0.03 に対して緩めに 5%。
+  srava_add_distance_at(openvdb openvdb.so 5e-2 0.02 band)
+endif()
+
+# ==================================================================
+# ★ #3514: section(m,P,N[,mode]) — 断面 の回帰。occt へ配線したのを機に **3 カーネル共通**にした。
+#   ★★ 固定するものは 2 つ。① **3 要素配列の規約** (共面かどうかでどの要素が答えかが入れ替わる)
+#     ② **面積だけでなく座標** — 2D 断面は切断平面の局所基底に置かれるので、基底の取り方が違うと
+#     面積が合っていても bbox / extrude が食い違う。断面を extrude して 3D の bbox で固定する。
+#   ★ 第 4 引数: "z" = Z 法線だけ (manifold は Z 以外を断る) / "all" = 6 軸 + 斜め /
+#     "analytic" = さらに解析球 (B-rep の occt だけ — メッシュ系は内接多角形で構造的に違う値)。
+# ==================================================================
+function(srava_add_section _name _so _tol _mode)
+  add_test(NAME srava_section_${_name}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_section.sh
+            $<TARGET_FILE:srava> ${_so} ${_tol} ${_mode})
+  # ⚠ 番犬の予算 — **occt の本だけ重い** (mac 10.28s / Linux 5.62s ⇒ 最も遅い機 x3 = 45s)。
+  #   2026-09-22 に Linux 実測だけで 30s と書いたが、mac を並べたら x2.9 しか無かった。
+  set(_sec_hang 30)
+  if(_name STREQUAL "occt")
+    set(_sec_hang 45)
+  endif()
+  set_tests_properties(srava_section_${_name} PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_BINARY_DIR}/seccache-${_name};SRAVA_HANG_SECS=${_sec_hang}"
+    PASS_REGULAR_EXPRESSION "SECTION-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
+    TIMEOUT 300)
+endfunction()
+
+if(SRAVA_MODULE_CGAL)
+  srava_add_section(cgal cgal.so 1e-9 all)
+endif()
+if(SRAVA_MODULE_MANIFOLD)
+  srava_add_section(manifold manifold.so 1e-9 z)
+endif()
+if(SRAVA_MODULE_OCCT)
+  srava_add_section(occt occt.so 1e-9 analytic)
+endif()
+
+# ==================================================================
 # ★ #3431 P0-a: **依存なし構成**の回帰 (完了条件② 「依存が無い環境でもビルドが通る」)。
 #   SRAVA_MODULE_{CGAL,NEF,MANIFOLD,PIPEPROX} を全部 OFF にした別ビルドを作り、
 #   ビルドが通ることと、残った d3 だけで実際に走ることを見る。option はずっと前からあったが
@@ -5403,11 +7536,28 @@ srava_wire_modules_to_hosts()
 add_test(NAME srava_install_tree
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_install.sh
           ${CMAKE_BINARY_DIR} ${CMAKE_BINARY_DIR}/installtest)
+# ⚠ 番犬の予算 — **最も遅い機**の実測 x3 (2026-09-22)。mac(arm64/OCCT 7.9.3) 9.28s ・ Linux(x86_64/7.8.1) 2.92s ⇒ 30s。
 set_tests_properties(srava_install_tree PROPERTIES
+  ENVIRONMENT "SRAVA_HANG_SECS=30"
   LABELS "install"
   PASS_REGULAR_EXPRESSION "INSTALL-OK"
   FAIL_REGULAR_EXPRESSION "FAIL:|Segmentation|Aborted|core dumped"
   TIMEOUT 600)
+
+# 点群の transform 一族 と union (#3578)。意図は test/srava_points_transform.sh 冒頭。
+#   ★ 本題は **面外へ出す変換だけが pt-cloud3d を返す**こと (行は #xy / #z の変種 + 基底)。
+#   ⚠ 型の検定だけでは足りない — type_of は *routing の申告* を答えるので、計算本体だけが
+#     別の次元を返しても緑になる。⇒ 値の検定 (vert / bbox) を必ず併せて置く。
+#   ★ 番犬の予算 — mac 実測 **4.6 秒** (単独 ・ x3 = 14 秒) で既定 10 秒を越える ⇒ 明示する。
+#     ⚠ -j6 のフル走行では 6.97 秒まで伸びる (検定 1 件ごとに srava を起こすため)。
+#     ⚠ Linux 側は未測定。bench で測って「両機の遅い方 x3」へ詰めてよい (0df54df の原則)。
+add_test(NAME srava_points_transform
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_points_transform.sh $<TARGET_FILE:srava>)
+set_tests_properties(srava_points_transform PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/ptxcache;SRAVA_HANG_SECS=30"
+  PASS_REGULAR_EXPRESSION "PTX_OK"
+  FAIL_REGULAR_EXPRESSION "PTX_FAIL|Segmentation|Aborted|core dumped|parse error|unknown op|closed unexpectedly"
+  TIMEOUT 120)
 
 # ------------------------------------------------------------------
 # ★ 2026-08-12: 全テストにモジュール探索路を固定注入する。
@@ -5422,3 +7572,49 @@ foreach(_t IN LISTS _srava_all_tests)
   set_property(TEST ${_t} APPEND PROPERTY
     ENVIRONMENT "SRAVA_MODULE_PATH=$<TARGET_FILE_DIR:srava>")
 endforeach()
+
+# ------------------------------------------------------------------
+# ★★ #3522 / #3556 (2026-09-20・ひさ指示): **Windows は TIMEOUT を一括で伸ばす**。
+#
+#   278 箇所の TIMEOUT は全部 **Linux の実測**で決めたもので、OS 依存の仕掛けが無かった
+#   (最頻値は 20 秒・129 箇所)。ところが同じ 546 本の所要は
+#       Linux (simu01)  201 秒
+#       Windows (box)  2100 秒     = **約 10 倍**
+#   なので、Linux で 2 秒のテストが box では 20 秒に届き、**素で 20 秒の TIMEOUT に当たる**。
+#
+#   実際 2026-09-20 の box 走行で赤になった 3 本は、静かな機械で再走したら全部緑だった:
+#       srava_vert          通常  5.5 秒 → Timeout 120 秒  (22 倍)
+#       srava_occt_loft     通常 15   秒 → Timeout 300 秒  (20 倍)
+#       srava_segs_coverage 通常 28   秒 → Timeout  60 秒
+#   ⇒ **偽の座り込みはノイズでしかない**ので、Windows では閾値を実測どおり伸ばす。
+#
+#   ⚠ 伸ばすと **本物の座り込みを見つけるのも遅くなる** (300 秒 → 3000 秒)。それは承知のうえ。
+#     本物を早く捕まえる役は番犬に任せる — 番犬は 2026-09-20 から
+#     **CPU が進んでいないこと**を確かめてから撮るので、遅いだけの個体は撮らない。
+#   ⚠ 個々の TIMEOUT には触らない (278 箇所を書き換えると、次に値を決め直すときの
+#     根拠が散る)。**最後に一括で掛ける**。
+#   ★ 倍率は変えられるようにしておく: -DSRAVA_TIMEOUT_SCALE=4 のように指定できる。
+# ------------------------------------------------------------------
+if(WIN32)
+  set(_srava_to_scale_default 10)
+else()
+  set(_srava_to_scale_default 1)
+endif()
+set(SRAVA_TIMEOUT_SCALE "${_srava_to_scale_default}" CACHE STRING
+    "ctest の TIMEOUT に掛ける倍率 (Windows の既定 10 = 実測の Linux 比)")
+
+if(NOT SRAVA_TIMEOUT_SCALE EQUAL 1)
+  set(_srava_to_n 0)
+  get_property(_srava_to_tests DIRECTORY PROPERTY TESTS)
+  foreach(_t IN LISTS _srava_to_tests)
+    get_test_property(${_t} TIMEOUT _to)
+    if(_to)
+      math(EXPR _to_new "${_to} * ${SRAVA_TIMEOUT_SCALE}")
+      set_tests_properties(${_t} PROPERTIES TIMEOUT ${_to_new})
+      math(EXPR _srava_to_n "${_srava_to_n} + 1")
+    endif()
+  endforeach()
+  message(STATUS
+    "ctest TIMEOUT: ${_srava_to_n} 本を ${SRAVA_TIMEOUT_SCALE} 倍にした "
+    "(この機械は Linux 比で約 ${SRAVA_TIMEOUT_SCALE} 倍遅いという実測に合わせる)")
+endif()

@@ -4,6 +4,8 @@
 #   真値が .5 近傍だと libm/FMA 差で振れうる) / clearViol は 0.003 完全一致。
 set -e
 SRAVA="$1"
+# ★★ #3522: ハングの番犬 (共通・常時 ON)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 SRC="$2"
 LIB="$3"
 WORK="$4"

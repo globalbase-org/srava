@@ -86,7 +86,13 @@ TS_STATE(INI_pigfFunction_START)
 	errVal  = thNULL;
 	/* ブロックスコープ: body 文と sync 文を同じ子 env で評価する(pigfSequence と同じ)。
 	 * これで body の var(DEF)を sync 文が参照でき、CACHE_DIR 等は親チェーンで引ける。 */
-	env = thNEW(pigEnvironment,(env));
+	{
+		/* ★ #3482: **囲む try を引き継ぐ**(pigfSequence と同じ)。async body の中で起きたことも
+		 * その try に属する — 待ちリストが入る段 2 で、この 1 行が効き始める。 */
+		sPtr<pigEnvironment> ne = thNEW(pigEnvironment,(env));
+		if ( env.is_notNull() ) ne->set_try( env->get_try() );
+		env = ne;
+	}
 	return rDO|ACT_START;
 }
 

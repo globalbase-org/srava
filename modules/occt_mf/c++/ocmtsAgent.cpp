@@ -51,7 +51,11 @@ static const pigOpEntry OPS[] = {
 	{ "triangulate", TRI_IN, 2, AK_CACHE, OPWIRE(ocmTriangulate, ocGeom), 0, "(" OC_TYPE ")->mf-mesh3d" },
 	/* ★ #3472: triangulate の **2D 版**。曲線の輪郭を折れ線へ落とす。
 	 *   ★★ cast ではない — 粒度 (defl) が要るため (docs §型変換の規約)。 */
-	{ "polygonize",  TRI_IN, 2, AK_CACHE, OPWIRE(ocmPolygonize, ocGeom), 0, "(" OC2_TYPE ")->mf-cross2d" },
+	/* ★★ #3544: occt の 2D が **2 型**になった ⇒ 両方受け、**行き先も対で変える**。
+	 *   ⚠ 片受けのままにすると @polygonize(rect(...))@ が routing で落ちる (rect は
+	 *     cross2d を名乗るようになった)。★ 「occt の 2D は常に空間の面」という #3533 の
+	 *     読みは #3544 で覆っている (HLR の出力は投影面の上の平らな図面)。 */
+	{ "polygonize",  TRI_IN, 2, AK_CACHE, OPWIRE(ocmPolygonize, ocGeom), 0, "(" OC2_TYPE ")->mf-face3d;(" OC2C_TYPE ")->mf-cross2d" },
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));
 
@@ -123,8 +127,15 @@ extern const srava_module_descriptor ocmtsAgent_descriptor = {
 	 *   入力 (BREP) と出力 (MFM3) の **両方の codec を自分で申告する**。
 	 *   実体はどちらも相手側の本物のクラス (ocmCacheCodec.cpp 参照)。 */
 	.provides      = occt_mf_provides,   /* 階層 × 型名 × 4CC (ABI v16) */
-	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。 */
-	.cache_version = 1,
+	/* ★ v18 (#3466): このモジュールが出す結果の版。**計算を変えたら手で上げる**。
+	 * ★★ v2 (#3536・2026-09-14): polygonize が **面の平面を枠として引き継ぐ**ようになった
+	 *   (それまでは z=0 の面しか通さず、world の x,y をそのまま局所座標にしていた)。
+	 *   ⚠ z=0 の面の結果は **1 ビットも変わらない** (枠が既定 = 局所座標も従来どおり) が、
+	 *     それ以外の面は *従来は明示エラーだった* ので、版を上げても失うキャッシュは無い。
+	 *     それでも上げるのは「計算が変わったら上げる」の規約どおりにするため。 */
+	.cache_version = 3,   /* ★ #3533: v3 = 枠の軸表の n∥y の行を右手系に揃えた (cgal の section と
+	                       *   同じ表を共有しているので同時に動く)。y 平面の面だけ局所座標の符号が変わる。
+	                       * v2 = 面の平面を枠として引き継ぐ (#3536) */
 	/* ★ **両側の型を申告する**。新しい型は作っていない — 実体は libsrava_oc / libsrava_mf の
 	 *   本物のクラス (ocShape / mfMesh) なので、in-proc でも d_cast が通る。 */
 	.initialize    = 0,   /* 無し (ocShape::ensure_init は op の入口で呼ぶ) */

@@ -24,7 +24,6 @@
 #include	<string>
 #include	"_ts2/c++/vdaOffset_.h"
 
-#include	<openvdb/tools/LevelSetFilter.h>
 
 CLASS_TINYSTATE(vd/c++/vdaOffset,pig/c++/ptsCalcBody)
 
@@ -90,7 +89,7 @@ vdaOffset_::compute()
 	vdGrid::ensure_init();
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<vdGrid> in = ( na > 0 ) ? sPtr<vdGrid>::d_cast((*args)[0]) : sPtr<vdGrid>();
-	if ( ! in.is_notNull() || ! in->grid() ) {
+	if ( ! in.is_notNull() || ! in->has_grid() ) {
 		result = vda_err(thNEW(stdString,("offset: needs an openvdb grid")));
 		return;
 	}
@@ -100,13 +99,16 @@ vdaOffset_::compute()
 	 * ★ #3474 続き (2026-09-05): 記述子で nreq=2 と申告してあるので **省略してよい**
 	 * (以前はパーサが常に 3 引数へ正規化していた)。渡されても使わないのが正しい。 */
 
-	openvdb::FloatGrid::Ptr g = in->grid()->deepCopy();   /* 入力は DAG で共有されうる = 壊さない */
-	if ( d != 0.0 ) {
-		openvdb::tools::LevelSetFilter<openvdb::FloatGrid> f(*g);
-		f.offset((float)(-d));   /* ★ srava は d>0 で膨張・OpenVDB は phi に足すと収縮 */
+	/* ★ #3545 段 5: 実体 (deepCopy + LevelSetFilter::offset) は **幾何 lib 側** へ移した。
+	 *   ⇒ この TU は OpenVDB のヘッダを引かない。⚠ 中断の判定は従来どおりここで行う —
+	 *     中断されると *途中までしか動いていない格子* が返るので、旗を見て捨てる (#3498)。 */
+	const char *vwhy = 0;
+	out = in->op_offset(d, &brk_, &vwhy);
+	if ( (result = vd_abort_err(brk_, "offset")) != thNULL ) return;
+	if ( ! out.is_notNull() ) {
+		result = vda_err(thNEW(stdString,( vwhy ? vwhy : "offset: failed" )));
+		return;
 	}
-	out = thNEW(vdGrid,());
-	out->set_grid(g);
 	/* ★★ 印は **false**。「LevelSetFilter::offset は各ステップで track() するので距離場は
 	 *   保たれる」と書いていたが、**実測で否定された** (2026-08-20・#3440 の offset 厳密評価)。
 	 *   Steiner の公式で真値を出して box(2,2,2) を d=0.1 でオフセットし、dx を振ると:

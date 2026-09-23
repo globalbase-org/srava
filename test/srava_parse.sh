@@ -4,19 +4,32 @@
 SRAVA="$1"
 MODE="$2"
 D="${SRAVA_CACHE_DIR:?SRAVA_CACHE_DIR not set}"
-# ★ #3452: 起動時 eager-load 撤去に伴い、この回帰群は大半が module() 未呼出のまま幾何 op を
-#   使う (=旧挙動に暗黙依存)。個別に module()/include を足す代わりに、この harness 全体へ
-#   SRAVA_MODULE_ALL=1 を及ぼして「include "module/all.sra";」相当を全ケースの先頭に効かせる。
-#   既に module() を明示するケース(disable_cgal 等)には影響しない(all.sra が読む集合は旧来の
-#   eager-load と同じ実カーネル一式。nef は hybrid のみ・d2-d5/demo/pipe_proximity は対象外
-#   なのでそれらは引き続き個別に module() が必要)。
-export SRAVA_MODULE_ALL=1
-# ★ include "module/all.sra" の解決には $SRAVA_PATH (または install 済み SRAVA_LIBDIR) が要る。
-#   個別テストの cmake ENVIRONMENT には(元々 include を使わなかったので)大半が設定していない。
-#   このスクリプト自身の場所から source tree の lib/ を逆算して補う(cmake 変数に頼らない・
-#   このスクリプトがどの build dir からどう呼ばれても効く)。
+# ★★ #3569: harness 全体へ SRAVA_MODULE_ALL=1 を及ぼす (= 全ケースの先頭に
+#   include "module/all.sra"; 相当を効かせる) のをやめた。#3452 で旧挙動依存のテストを
+#   一括で救うために入れた互換スイッチで、**必要だから在ったのではない**。
+#   ⇒ 各ケースは自分が要るモジュールだけをソースの先頭で読む。短縮名:
+#
+#     $MCG  cgal      … box / rect / polygon / prism / sphere などプリミティブの既定の答え手
+#                       (priority 20 で全カーネル中の最上位。all.sra を敷いていた頃も
+#                        これらに答えていたのは cgal なので、**答えは変わらない**)
+#     $MMF  manifold  ・ $MGG geogram ・ $MOC occt … 相手役が要るケースだけ
+#
+#   ⚠ 「読む本数」は起動固定費に直に効く (all.sra = 16 本で +94ms/回 ・ 1 本なら +5ms/回)。
+MCG='module("cgal.so",{});'
+MMF='module("manifold.so",{});'
+MGG='module("geogram.so",{});'
+MOC='module("occt.so",{});'
+MNH='module("nef_hybrid.so",{});'   # 3D の offset はここが持つ
+MPT='module("points.so",{});'       # .xyz の export はここが持つ
+# ★ SRAVA_PATH は **残す**。この harness には *意図的に* include を使うケースがある
+#   (include "std/curve.sra" / "std/math.sra" / "std/layout.sra" / "std/guide.sra" と、
+#    #3555 の候補列を見る include "module/all.sra" のケース)。⇒ 探索路を明示しないと
+#   /usr/local の **古い all.sra** を読む (2026-09-12 版は points/geomutils が抜けている)。
 SRAVA_PATH="$(cd "$(dirname "$0")/../lib" && pwd)"
 export SRAVA_PATH
+
+# ★★ #3522: ハングの番犬 (共通)。詳細は test/srava_hangwatch.sh。
+. "$(dirname "$0")/srava_hangwatch.sh"
 # Windows(MSYS): native srava は "/tmp" を C:\tmp、MSYS sh は C:\msys64\tmp と解決するため
 # 出力先とチェック先が食い違う。cygpath で両者一致の native 形へ: D(=cache dir。$D.ext を出力に使う
 # ケースを一括で救う)と、直書き /tmp の代替 T。Linux は cygpath 不在 → 従来どおり(/tmp のまま)。
@@ -47,57 +60,57 @@ have() {   # $1 = モジュール名。建っていれば真
 }
 case "$MODE" in
 callform)
-	SRAVA_SOURCE='var mNVF0 = export(union(box(2,2,2), box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(union(box(2,2,2), box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 cachehit)
 	# 同じソースを 2 回実行: 1 回目で生成、2 回目は全部キャッシュ HIT(miss=0)になることを検証。
 	HD=/tmp/srava-hit-test; rm -rf "$HD"
-	S='export(box(2,2,2) ||| box(1,1,3));'
+	S="$MCG"'export(box(2,2,2) ||| box(1,1,3));'
 	SRAVA_CACHE_DIR="$HD" SRAVA_SOURCE="$S" "$SRAVA" >/dev/null 2>&1     # 1 回目(warm)
 	SRAVA_CACHE_DIR="$HD" SRAVA_SOURCE="$S" exec "$SRAVA" ;;            # 2 回目(全 HIT)
 syscmd)
 	# system(cmd): ts2System で非同期実行・完了まで待つ(評価順)。mkdir してから export が成功する。
 	SD="$T/srava-sys-test"
 	rm -rf "$SD"
-	SRAVA_SOURCE="system(\"mkdir -p $SD/sub\"); export(\"$SD/sub/b.stl\", box(2,2,2));" "$SRAVA" >/dev/null 2>&1
+	SRAVA_SOURCE="$MCG system(\"mkdir -p $SD/sub\"); export(\"$SD/sub/b.stl\", box(2,2,2));" "$SRAVA" >/dev/null 2>&1
 	test -f "$SD/sub/b.stl" && echo "SYS_OK" || echo "SYS_FAIL" ;;
 sysrc)
 	# system の終了コードを式で観測(start_flag を _start 後に立てる修正で可能に)。
 	# true→rc==0→ok / false→else。両方正しく分岐すれば SYSRC_OK。
 	rm -f "$T/srava-rc-ok.stl" "$T/srava-rc-ng.stl"
-	SRAVA_SOURCE="var rc = system(\"true\");  if (rc == 0) { export(\"$T/srava-rc-ok.stl\", box(1,1,1)); }" "$SRAVA" >/dev/null 2>&1
-	SRAVA_SOURCE="var rc = system(\"false\"); if (rc == 0) { export(\"$T/srava-rc-ng.stl\", box(1,1,1)); }" "$SRAVA" >/dev/null 2>&1
+	SRAVA_SOURCE="$MCG var rc = system(\"true\");  if (rc == 0) { export(\"$T/srava-rc-ok.stl\", box(1,1,1)); }" "$SRAVA" >/dev/null 2>&1
+	SRAVA_SOURCE="$MCG var rc = system(\"false\"); if (rc == 0) { export(\"$T/srava-rc-ng.stl\", box(1,1,1)); }" "$SRAVA" >/dev/null 2>&1
 	if test -f "$T/srava-rc-ok.stl" && ! test -f "$T/srava-rc-ng.stl"; then echo "SYSRC_OK"; else echo "SYSRC_FAIL"; fi ;;
 export_regen)
 	# 出力ファイルを消して再実行 → 起動時スイープが stale な D_REF を削除し export を再実行 → 再生成。
 	RD="$T/srava-regen-cache"; EF="$T/srava-regen-out.stl"
 	rm -rf "$RD"; rm -f "$EF"
 	S="export(\"$EF\", box(2,2,2));"
-	SRAVA_CACHE_DIR="$RD" SRAVA_SOURCE="$S" "$SRAVA" >/dev/null 2>&1     # 生成
+	SRAVA_CACHE_DIR="$RD" SRAVA_SOURCE="$MCG $S" "$SRAVA" >/dev/null 2>&1     # 生成
 	rm -f "$EF"                                                         # 出力を手で削除
-	SRAVA_CACHE_DIR="$RD" SRAVA_SOURCE="$S" "$SRAVA" >/dev/null 2>&1     # 再実行(再生成されるはず)
+	SRAVA_CACHE_DIR="$RD" SRAVA_SOURCE="$MCG $S" "$SRAVA" >/dev/null 2>&1     # 再実行(再生成されるはず)
 	test -f "$EF" && echo "REGEN_OK" || echo "REGEN_FAIL" ;;
 filearg)
 	# ソースファイル実行 (srava file.sra) + 先頭シェバング行の読み飛ばし。union = 25v46f。
 	F="$D.sra"
-	printf '#!/usr/bin/env srava\n// shebang + file 実行テスト\nvar mNVF = export(box(2,2,2) ||| box(1,1,3));\nprint("NVF", nverts(mNVF), nfaces(mNVF));\n' > "$F"
+	printf '#!/usr/bin/env srava\nmodule("cgal.so",{}); // shebang + file 実行テスト\nvar mNVF = export(box(2,2,2) ||| box(1,1,3));\nprint("NVF", nverts(mNVF), nfaces(mNVF));\n' > "$F"
 	exec "$SRAVA" "$F" ;;
 intersection)
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) &&& box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) &&& box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 difference)
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) --- box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) --- box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 ifaccum)
 	# if + ブロック + 比較 + 自己代入(strict SET)。取られる枝で a を union に更新 → 25v46f
-	SRAVA_SOURCE='var a = box(2,2,2); if (1==1) { a = a ||| box(1,1,3); } var mNVF0 = export(a); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var a = box(2,2,2); if (1==1) { a = a ||| box(1,1,3); } var mNVF0 = export(a); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 ifskip)
 	# 条件偽 → ブロック実行されず a は box のまま → 8v12f
-	SRAVA_SOURCE='var a = box(2,2,2); if (1==2) { a = a ||| box(1,1,3); } var mNVF0 = export(a); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var a = box(2,2,2); if (1==2) { a = a ||| box(1,1,3); } var mNVF0 = export(a); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 prism)
-	SRAVA_SOURCE='var mNVF0 = export(prism(6,2,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(prism(6,2,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 pyramid)
-	SRAVA_SOURCE='var mNVF0 = export(pyramid(4,2,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(pyramid(4,2,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 sphere)
 	# sphere(r, seg): seg=円周分割数。既定 seg=32 相当 = 八面体 n=8 = 258v/512f(測地球)。
-	SRAVA_SOURCE='var mNVF0 = export(sphere(1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(sphere(1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 pipeprox_pin_range)
 	# ★硬ピンの joint 範囲検査 (2026-08-13)。範囲外の joint は以前 **ヒープを壊していた**:
 	#   硬ピンは DOF j+1, j+2 に拘束行を張るので (controller.cpp buildConstraints)、
@@ -141,7 +154,7 @@ mf_color_3mf)
 	#   非多様体になり volume=0/valid=0 になる (2026-08-12 の実バグ。この形でだけ再現する)。
 	O="$T/srava-mfcolor.3mf"
 	rm -f "$O"; rm -rf "$D-c" "$D-w"
-	MOD='module("manifold.so",{priority:99}); '
+	MOD='module("manifold.so",{priority:99});module("geomutils.so",{}); '   # ★ #3527 段 3: valid/volume は gu へ移った
 	EXPR='color(box(2,2,2),"red") +++ color(box(1,1,3),"blue")'
 	PLAINEXPR='box(2,2,2) +++ box(1,1,3)'
 	# export → 同じ式の volume/valid (①②)
@@ -185,7 +198,7 @@ mf_pipe_scene_inproc)
 	#   証明は **存在しない SRAVA_AGENT**: agent プロセスが 1 つでも要るなら 3MF は生まれない。
 	O="$T/srava-mfpipe.3mf"
 	rm -f "$O"; rm -rf "$D-p"
-	PIPE='tube(map([[0,0,0],[6,0,0],[6,5,0],[0,5,0]], \(p){ [p, 0.8]; }), 16)'
+	PIPE='tube_ruled(map([[0,0,0],[6,0,0],[6,5,0],[0,5,0]], \(p){ [p, 0.8]; }), 16)'
 	# ★マーカは中心線でなく **管の表面** に置く (pipe_clearance が接近点=表面に置くのと同じ)。
 	#   中心線に置くと半径 0.4 の球が半径 0.8 の管に完全に含まれ、mf の combine では吸収されて消える
 	#   (mf の combine は包含・重なりを解消する = cg の「交差許容の単純合体」とは意味論が違う)。
@@ -211,8 +224,8 @@ mf_inproc_nested_array)
 	# テキスト化 → pig_value_parse で素の配列になるので気づかないが、in-proc 経路では遅延ノードが
 	# そのまま来て d_cast が null になり「each vertex must be [pos, r]」等の誤エラーになっていた。
 	# 対策 = 要素を compact() してから d_cast。ここでは in-proc と process の一致で見る
-	# (ネスト配列を取る op = tube(3D パス) と polygon(2D 点列) の 2 本)。
-	MAPT='tube(map([[0,0,0],[2,0,0]], \(p){ [p, 0.5]; }), 8)'
+	# (ネスト配列を取る op = tube_ruled(3D パス) と polygon(2D 点列) の 2 本)。
+	MAPT='tube_ruled(map([[0,0,0],[2,0,0]], \(p){ [p, 0.5]; }), 8)'
 	MAPP='polygon(map([0,1,2,3], \(i){ [i*1.0, i*i*1.0]; }))'
 	g() {  # $1=exec_default $2=式 $3=計測 op
 		SRAVA_CACHE_DIR="$D-$1-$3" SRAVA_SOURCE="module(\"manifold.so\",{priority:99,exec_default:\"$1\"}); print(\"R\", $3($2));" \
@@ -251,7 +264,7 @@ mf_tube_inproc)
 	# 対照として cgal を最優先にした同じ式が **失敗する**ことも見る(テストが空振りでない証拠)。
 	O="$T/srava-mftube-inproc.stl"; O2="$T/srava-mftube-ctl.stl"
 	rm -f "$O" "$O2"; rm -rf "$D-mf" "$D-cg"
-	EXPR='tube([[[0,0,0],0.5],[[2,0,0],0.5],[[2,3,1],0.4]], 16) ||| box(1,1,1)'
+	EXPR='tube_ruled([[[0,0,0],0.5],[[2,0,0],0.5],[[2,3,1],0.4]], 16) ||| box(1,1,1)'
 	SRAVA_AGENT=/nonexistent/srava_agent SRAVA_CACHE_DIR="$D-mf" \
 	  SRAVA_SOURCE="module(\"manifold.so\",{priority:99,exec_default:\"thread\"}); export(\"$O\", $EXPR);" \
 	  "$SRAVA" >/dev/null 2>&1
@@ -263,23 +276,23 @@ mf_tube_inproc)
 	echo "MFTUBE-INPROC-OK" ;;
 arrayidx)
 	# array リテラル + 添字参照: a[0] ||| a[1] = union(box,box) = 25v46f
-	SRAVA_SOURCE='var a = [box(2,2,2), box(1,1,3)]; var mNVF0 = export(a[0] ||| a[1]); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var a = [box(2,2,2), box(1,1,3)]; var mNVF0 = export(a[0] ||| a[1]); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 hashlit)
 	# source 側 hash リテラル {k:v,..} + メンバ参照: h.a ||| h.b = union(box,box) = 25v46f
-	SRAVA_SOURCE='var h = {a: box(2,2,2), b: box(1,1,3)}; var mNVF0 = export(h.a ||| h.b); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var h = {a: box(2,2,2), b: box(1,1,3)}; var mNVF0 = export(h.a ||| h.b); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 inlineval)
 	# 構造 inline 引数: array を serialize→wire→agent で value-parse→cgaBox 展開。
 	# hash メンバ→array も経由。boxa([1,1,3]) = 直方体 = 8v12f。
-	SRAVA_SOURCE='var h = {dims: [1,1,3]}; var mNVF0 = export(boxa(h.dims)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var h = {dims: [1,1,3]}; var mNVF0 = export(boxa(h.dims)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 lambda)
 	# lambda + apply(clone/thunk): u(box(2,2,2)) = box(2,2,2) ||| box(1,1,3) = 25v46f。
-	SRAVA_SOURCE='var u = \(s){ s ||| box(1,1,3); }; var mNVF0 = export(u(box(2,2,2))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var u = \(s){ s ||| box(1,1,3); }; var mNVF0 = export(u(box(2,2,2))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 lambda_reapply)
 	# 同一 lambda を別引数で再 apply(body->clone() でメモ衝突回避)。2 union の union = 33v62f。
-	SRAVA_SOURCE='var u = \(s){ s ||| box(1,1,3); }; var mNVF0 = export(u(box(2,2,2)) ||| u(box(3,3,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var u = \(s){ s ||| box(1,1,3); }; var mNVF0 = export(u(box(2,2,2)) ||| u(box(3,3,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 lambda_closure)
 	# クロージャ(カリー化): adder(a) が a を捕捉した lambda を返す。add1(box(1,1,3)) = 25v46f。
-	SRAVA_SOURCE='var adder = \(a){ \(b){ a ||| b; }; }; var add1 = adder(box(2,2,2)); var mNVF0 = export(add1(box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var adder = \(a){ \(b){ a ||| b; }; }; var add1 = adder(box(2,2,2)); var mNVF0 = export(add1(box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 closure_capture)
 	# 値捕捉(by-value): f は定義時の base=4 を凍結 → 後の base=5(set_var)に影響されない。
 	# late-binding なら f()==5 で分岐せず CAPTURE_OK が出ない。env-snapshot の回帰テスト。
@@ -291,12 +304,12 @@ closure_deepcopy)
 workergate)
 	# ワーカーゲート: cap が木の深さより小さくてもデッドロックせず完走する(タイマー緩和の回帰)。
 	# 同時 agent 上限 2 (SRAVA_LOAD_CPU=0 + SRAVA_LOAD_AGENT=2) は ENVIRONMENT で注入。union(6 箱)の二分木は深さ>2。完走すれば末尾サマリが出る。
-	SRAVA_SOURCE='export(union([box(1,1,1), box(1,1,1)>>>[2,0,0], box(1,1,1)>>>[4,0,0], box(1,1,1)>>>[0,2,0], box(1,1,1)>>>[2,2,0], box(1,1,1)>>>[4,2,0]]));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(union([box(1,1,1), box(1,1,1)>>>[2,0,0], box(1,1,1)>>>[4,0,0], box(1,1,1)>>>[0,2,0], box(1,1,1)>>>[2,2,0], box(1,1,1)>>>[4,2,0]]));' exec "$SRAVA" ;;
 workergate_eagain)
 	# PIG_TEST_FORKLIMIT=2(同時 fork>2 を失敗させる)< ゲート上限 32(高め・env)。
 	# limit 固定方針なので backoff せず fork/process limit 超過の明確なエラーで終了する
 	# (黙ったデッドロック/ハングを避け、ユーザに cap を下げて再実行してもらう)。
-	SRAVA_SOURCE='export(union([box(1,1,1), box(1,1,1)>>>[2,0,0], box(1,1,1)>>>[4,0,0], box(1,1,1)>>>[0,2,0], box(1,1,1)>>>[2,2,0], box(1,1,1)>>>[4,2,0]]));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(union([box(1,1,1), box(1,1,1)>>>[2,0,0], box(1,1,1)>>>[4,0,0], box(1,1,1)>>>[0,2,0], box(1,1,1)>>>[2,2,0], box(1,1,1)>>>[4,2,0]]));' exec "$SRAVA" ;;
 module_throw_inproc|module_throw_process)
 	# ★ モジュールが投げた例外を **ホスト側 (ptsCalcBody) の安全網**が受け止めること (ひさ判断 2026-08-26)。
 	#   d4 は exec_caps=THREAD|PROCESS なので、同じフック (PIG_TEST_MODULE_THROW) で両方試せる。
@@ -311,7 +324,7 @@ module_throw_inproc|module_throw_process)
 	*inproc)  EXEC=thread  ;;
 	*)        EXEC=process ;;
 	esac
-	OUT=$(PIG_TEST_MODULE_THROW=1 SRAVA_SOURCE="module(\"d4.so\", {priority:99, exec_default:\"$EXEC\"});
+	OUT=$(PIG_TEST_MODULE_THROW=1 SRAVA_SOURCE="$MCG module(\"d4.so\", {priority:99, exec_default:\"$EXEC\"});
 	      print(d4_nfaces(d4_cube(1)));" "$SRAVA" 2>&1); RC=$?
 	[ "$RC" != "134" ] || { echo "FAIL: exec=$EXEC でプロセスがシグナル死した (rc=134・網が効いていない)"; echo "$OUT"; exit 1; }
 	[ "$RC" != "0" ]   || { echo "FAIL: exec=$EXEC で例外を投げたのに rc=0"; echo "$OUT"; exit 1; }
@@ -319,7 +332,7 @@ module_throw_inproc|module_throw_process)
 	echo "$OUT" | grep -q 'uncaught exception' || {
 		echo "FAIL: exec=$EXEC のエラー文に 'uncaught exception' が無い"; echo "$OUT"; exit 1; }
 	# フックを外せば普通に通ること (網が正常系を壊していない)
-	OUT2=$(SRAVA_SOURCE="module(\"d4.so\", {priority:99, exec_default:\"$EXEC\"});
+	OUT2=$(SRAVA_SOURCE="$MCG module(\"d4.so\", {priority:99, exec_default:\"$EXEC\"});
 	       print(d4_nfaces(d4_cube(1)));" "$SRAVA" 2>&1)
 	echo "$OUT2" | grep -q 'result value' || { echo "FAIL: exec=$EXEC の正常系が壊れた"; echo "$OUT2"; exit 1; }
 	echo "MODULE-THROW-OK exec=$EXEC rc=$RC" ;;
@@ -352,21 +365,21 @@ fdleak)
 	#   (fd 枯渇は必ず 0.1s で "fork failed" エラー終了する。ハングは 60s 無応答)。
 	#   ハングは同時実行数依存で、12 並列なら ~1/12 で再現する(perf/hang_repro.sh)。
 	ulimit -n 64 2>/dev/null
-	SRAVA_SOURCE='var p=[]; var i; for(i=0;i<80;i=i+1){ p=concat(p, prism(3+i,2,1)>>>[i*1.0,0,0]); } export("/tmp/srava-fdleak.stl", combine(p));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var p=[]; var i; for(i=0;i<80;i=i+1){ p=concat(p, prism(3+i,2,1)>>>[i*1.0,0,0]); } export("/tmp/srava-fdleak.stl", combine(p));' exec "$SRAVA" ;;
 while_loop)
 	# while(毎周 clone 再評価): i=1,2 で box(i,i,9) を union 蓄積。box(5,5,5)|||box(1,1,9)|||box(2,2,9)
 	# = 52v100f。i が進む(共有 env への代入)+ 毎周別形状(clone)を検証。
-	SRAVA_SOURCE='var i = 1; var acc = box(5,5,5); while (i < 3) { acc = acc ||| box(i,i,9); i = i + 1; } var mNVF0 = export(acc); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var i = 1; var acc = box(5,5,5); while (i < 3) { acc = acc ||| box(i,i,9); i = i + 1; } var mNVF0 = export(acc); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 for_loop)
 	# for(init;cond;step) → while desugar。while_loop と等価 = 52v100f。
-	SRAVA_SOURCE='var acc = box(5,5,5); for (var i = 1; i < 3; i = i + 1) { acc = acc ||| box(i,i,9); } var mNVF0 = export(acc); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var acc = box(5,5,5); for (var i = 1; i < 3; i = i + 1) { acc = acc ||| box(i,i,9); } var mNVF0 = export(acc); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 for_nested)
 	# 入れ子 for(i,j 各 1..2)。内側 for は外側 body の clone で毎周新鮮 j に再初期化される。
 	# box(9,9,9)|||box(i,j,7) 4 個 = 33v62f。
-	SRAVA_SOURCE='var acc = box(9,9,9); for (var i = 1; i < 3; i = i+1) { for (var j = 1; j < 3; j = j+1) { acc = acc ||| box(i,j,7); } } var mNVF0 = export(acc); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var acc = box(9,9,9); for (var i = 1; i < 3; i = i+1) { for (var j = 1; j < 3; j = j+1) { acc = acc ||| box(i,j,7); } } var mNVF0 = export(acc); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 apply_chain)
 	# 一般呼び出し: 中間変数なしの直接/連鎖適用。adder(box)(box) = カリー化を直に適用 = 25v46f。
-	SRAVA_SOURCE='var adder = \(a){ \(b){ a ||| b; }; }; var mNVF0 = export(adder(box(2,2,2))(box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var adder = \(a){ \(b){ a ||| b; }; }; var mNVF0 = export(adder(box(2,2,2))(box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 recursion)
 	# 再帰 lambda(引数 call-by-value で変数捕捉を回避)。box(i,i,9) を i=2,1 と再帰 union、
 	# 基底 box(5,5,5)。= 52v100f(while/for 版と同形状)。**自己適用**形の再帰を検証。
@@ -374,136 +387,136 @@ recursion)
 	#   (frozen->parent = thNULL)。名前による自己再帰 `var f = \(n){ … f(n-1) … }` は
 	#   f が前方参照になるため「undefined variable: f」の明示エラー。再帰は自分を引数で
 	#   渡す自己適用 `var f = \(f,n){ … f(f,n-1) … }; f(f,2)` で書く。
-	SRAVA_SOURCE='var f = \(f,n){ if (n < 1) { box(5,5,5); } else { box(n,n,9) ||| f(f, n - 1); } }; var mNVF0 = export(f(f,2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var f = \(f,n){ if (n < 1) { box(5,5,5); } else { box(n,n,9) ||| f(f, n - 1); } }; var mNVF0 = export(f(f,2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 import)
 	# import(path): box(2,2,2) を STL に書き → import で読み戻し(soup repair)→ box(1,1,3) と union
 	# = 25v46f。export→import 往復 + 拡張子判別 + DAG 葉としての利用を検証。
-	SRAVA_SOURCE='export("/tmp/srava-import-test.stl", box(2,2,2)); var mNVF0 = export(import("/tmp/srava-import-test.stl") ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export("/tmp/srava-import-test.stl", box(2,2,2)); var mNVF0 = export(import("/tmp/srava-import-test.stl") ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 nary)
 	# 実行木分解: n-ary 可換呼び出し union(a,b,c) をプランナーが二項木に分解(agent は二項のみ)。
 	# 3 box の union = 27v50f。
-	SRAVA_SOURCE='var mNVF0 = export(union(box(2,2,2), box(1,1,3), box(5,5,5))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(union(box(2,2,2), box(1,1,3), box(5,5,5))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 import_err)
 	# import 失敗(不在ファイル)は サイレント空メッシュでなく明示エラーになること(nv= を出さない)。
 	rm -f /tmp/srava-import-missing.stl
-	SRAVA_SOURCE='export(import("/tmp/srava-import-missing.stl"));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(import("/tmp/srava-import-missing.stl"));' exec "$SRAVA" ;;
 import_err_union)
 	# 失敗 import が下流 module(union)の上流にある場合: クリーンな import エラーが伝播し(arg type
 	# /index mismatch でなく)、起動済み orphan agent でハングしないこと(TIMEOUT で検出)。
 	rm -f /tmp/srava-import-missing2.stl
-	SRAVA_SOURCE='export(import("/tmp/srava-import-missing2.stl") ||| box(1,1,3));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(import("/tmp/srava-import-missing2.stl") ||| box(1,1,3));' exec "$SRAVA" ;;
 xlate)
 	# translate(m,x,y,z): box を +1 移動して原位置 box と union(重なり)= 24v44f。座標が動く証明。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| translate(box(2,2,2), 1, 0, 0)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| translate(box(2,2,2), 1, 0, 0)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 rotate)
 	# rotate(m,axis,deg): 45° 回転(任意角→double cos/sin)。原位置 box と union で星型重なり = 22v40f。
-	SRAVA_SOURCE='var mNVF0 = export(box(4,4,1) ||| rotate(box(4,4,1), "z", 45)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(4,4,1) ||| rotate(box(4,4,1), "z", 45)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 mirror)
 	# mirror(m,axis): x=3 に寄せた box を x 鏡像 → x=-3。union で分離 2 個 = 16v24f。向き補正で union 成立。
-	SRAVA_SOURCE='var mNVF0 = export(translate(box(1,2,2), 3,0,0) ||| mirror(translate(box(1,2,2), 3,0,0), "x")); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(translate(box(1,2,2), 3,0,0) ||| mirror(translate(box(1,2,2), 3,0,0), "x")); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 xform)
 	# transform(m,matrix): 3x4 行列の平行移動列で +1 移動 = translate と等価。union 重なり = 24v44f。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| transform(box(2,2,2), [1,0,0,1, 0,1,0,0, 0,0,1,0])); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 rotate_err)
 	# 未対応 axis は明示エラー(サイレント無視でない)。
-	SRAVA_SOURCE='export(rotate(box(1,1,1), "w", 30));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(rotate(box(1,1,1), "w", 30));' exec "$SRAVA" ;;
 op_xlate)
 	# 演算子 >>> = translate。||| より強く結合(括弧なし)→ box ||| (box>>>[1,0,0]) = 24v44f。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| box(2,2,2) >>> [1,0,0]); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| box(2,2,2) >>> [1,0,0]); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 op_rotate)
 	# 演算子 @(axis,d) = rotate。box(4,4,1) ||| (box @ ("z",45)) = 22v40f。
-	SRAVA_SOURCE='var mNVF0 = export(box(4,4,1) ||| box(4,4,1) @ ("z", 45)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(4,4,1) ||| box(4,4,1) @ ("z", 45)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 op_mirror)
 	# 演算子 <> = mirror。x=3 の箱を <>"x" で x=-3 へ、union 分離 = 16v24f。
-	SRAVA_SOURCE='var mNVF0 = export((box(1,2,2) >>> [3,0,0]) ||| (box(1,2,2) >>> [3,0,0]) <> "x"); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export((box(1,2,2) >>> [3,0,0]) ||| (box(1,2,2) >>> [3,0,0]) <> "x"); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 vec_axis)
 	# ベクトル軸回転 rotate(m,[0,0,1],deg) は文字列 "z" と同結果(任意軸 Rodrigues の主軸特例)= 22v40f。
-	SRAVA_SOURCE='var mNVF0 = export(box(4,4,1) ||| rotate(box(4,4,1), [0,0,1], 45)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(4,4,1) ||| rotate(box(4,4,1), [0,0,1], 45)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 vec_degenerate)
 	# 退化軸ベクトル [0,0,0] は明示エラー(正規化不能)。
-	SRAVA_SOURCE='export(rotate(box(1,1,1), [0,0,0], 30));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(rotate(box(1,1,1), [0,0,0], 30));' exec "$SRAVA" ;;
 scale_uniform)
 	# 均等スケール: box(1,1,1)*2 = box(2,2,2) と完全重複 → union 8v12f。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| scale(box(1,1,1), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| scale(box(1,1,1), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 scale_op)
 	# 演算子 *** 均等。box(1,1,1)***2 = box(2,2,2) と重複 8v12f。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| box(1,1,1) *** 2); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| box(1,1,1) *** 2); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 scale_vec)
 	# 軸別スケール(配列)= 3スカラと同一(計算本体で判別)。離れた位置で union 確認。
-	SRAVA_SOURCE='var mNVF0 = export(box(1,1,1) ||| (scale(box(1,1,1), [2,3,4]) >>> [5,0,0])); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(1,1,1) ||| (scale(box(1,1,1), [2,3,4]) >>> [5,0,0])); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 scale_err)
 	# 退化(0)スケールは明示エラー(メッシュが潰れる)。
-	SRAVA_SOURCE='export(scale(box(1,1,1), 0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(scale(box(1,1,1), 0));' exec "$SRAVA" ;;
 neg_literal)
 	# 単項マイナス: 負方向移動 box>>>[-3,0,0] は元 box と分離 → 16v24f。配列内負値の round-trip 検証。
-	SRAVA_SOURCE='var mNVF0 = export(box(1,1,1) >>> [-3,0,0] ||| box(1,1,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(1,1,1) >>> [-3,0,0] ||| box(1,1,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 extrude)
 	# 2D→3D: rect(2,1) を高さ 3 で extrude = 直方体 8v12f。cgMesh2D(PLY2)→ reader 多態 → cgMesh3D。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(rect(2,1), 3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(rect(2,1), 3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 poly2d_union)
 	# 2D ブーリアン(Polygon_set_2)+ 2D translate(apply_affine)。重なる 2 正方形の和 = L 字、extrude。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(rect(2,2) ||| (rect(2,2) >>> [1,1,0]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(rect(2,2) ||| (rect(2,2) >>> [1,1,0]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 extrude_union3d)
 	# 2D→3D extrude した角柱が 3D ブール(corefinement)に乗る(多態スピンの end-to-end)。
-	SRAVA_SOURCE='var mNVF0 = export(box(5,5,5) ||| extrude(rect(2,1), 3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(5,5,5) ||| extrude(rect(2,1), 3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 mixed_dim_err)
 	# 2D ||| 3D は型ガードで明示エラー(op_union が null → A_ERROR)。
-	SRAVA_SOURCE='export(rect(2,2) ||| box(1,1,1));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(rect(2,2) ||| box(1,1,1));' exec "$SRAVA" ;;
 prim_ngon)
 	# 正六角形 extrude = 六角柱 12v20f。任意角頂点(cos/sin)。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(ngon(6, 1), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(ngon(6, 1), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 prim_circle)
 	# 円(32 角形近似)extrude = 円柱 64v124f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(circle(1), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(circle(1), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 prim_circle_segs)
 	# circle 精度ピッチ(第2引数=辺数): circle(1,8)=八角形 → extrude 八角柱 16v28f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(circle(1, 8), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(circle(1, 8), 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 prim_sphere_subdiv)
 	# icosphere(r, subdiv): subdiv=細分回数(二十面体を 2^subdiv 分割)。icosphere(1,2)=162v/320f。
 	# 旧 sphere(1,2) の subdiv 意味論はこの op が継ぐ(sphere は seg 意味論に変更)。
-	SRAVA_SOURCE='var mNVF0 = export(icosphere(1, 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(icosphere(1, 2)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 prim_polygon)
 	# 明示点列(時計回りでも CCW 正規化)→ 三角柱 6v8f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(polygon([[0,0],[1,2],[2,0]]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(polygon([[0,0],[1,2],[2,0]]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 prim_polygon_err)
 	# 2 点は多角形でない → 明示エラー。
-	SRAVA_SOURCE='export(extrude(polygon([[0,0],[1,1]]), 1));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(extrude(polygon([[0,0],[1,1]]), 1));' exec "$SRAVA" ;;
 extrude_hole)
 	# 穴対応 extrude(CDT): 4x4 から中央 2x2 を引いた額縁を立体化 → トンネル付きプリズム 16v32f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(rect(4,4) --- (rect(2,2) >>> [1,1,0]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(rect(4,4) --- (rect(2,2) >>> [1,1,0]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 extrude_hole_union)
 	# 額縁プリズムが閉多様体・向き正しい証明: box との corefinement union が通る → 19v34f。
-	SRAVA_SOURCE='var mNVF0 = export(box(10,10,10) ||| extrude(rect(4,4) --- (rect(2,2) >>> [1,1,0]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(10,10,10) ||| extrude(rect(4,4) --- (rect(2,2) >>> [1,1,0]), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 rotate2d)
 	# 2D rotate 軸不要(単一角度=z 面内回転)。演算子 @(deg)。位相は 8v12f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(rect(2,1) @ (45), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(rect(2,1) @ (45), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 area_expr)
 	# 値返し op(area)を式で観測(cold cache/MISS 経路)。2D 面積 rect(2,3)=6 を == で判定 →
 	# 真なら union(25v46f)。値の VALUE 復元 + 演算子の継続 deref + A_SAVE_BEGIN 本文を検証。
-	SRAVA_SOURCE='if (area(rect(2,3)) == 6) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (area(rect(2,3)) == 6) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 area_arith)
 	# 値の算術 + 2 つの値 op 比較(volume(v1)==volume(v2) パターン)。area(2,3)+area(1,1)=7 → 25v46f。
-	SRAVA_SOURCE='var s = area(rect(2,3)) + area(rect(1,1)); if (s == 7) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var s = area(rect(2,3)) + area(rect(1,1)); if (s == 7) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 cachedir_ctl)
 	# task2: キャッシュ dir 初期化を first-agent 頭へ移動 + mkdir -p。
 	# プログラムが CACHE_DIR を(env 既定を上書きして)深い新規 dir に設定 → mkdir -p で作成し
 	# そこに cache が落ちる。export 成功(25v46f)= mkdir -p と first-agent 初期化が効いている証拠。
 	D="/tmp/srava-cachectl-deep/x/y/z"
 	rm -rf /tmp/srava-cachectl-deep
-	SRAVA_SOURCE="CACHE_DIR = \"$D\"; var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print(\"NVF\", nverts(mNVF0), nfaces(mNVF0));" exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG CACHE_DIR = \"$D\"; var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print(\"NVF\", nverts(mNVF0), nfaces(mNVF0));" exec "$SRAVA" ;;
 lexical_shadow)
 	# レキシカルスコープ(eager-DEF): var b は外側 sz.w=2 で定義 → 内側ブロックで sz=0 が
 	# シャドウしても b は外側 sz を参照(dynamic scope なら 0.w でエラー)。box(2,2,2)|||box(1,1,3)=25v46f。
-	SRAVA_SOURCE='var sz={w:2}; var b=box(sz.w,sz.w,sz.w); { var sz=0; var mNVF0 = export(b ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var sz={w:2}; var b=box(sz.w,sz.w,sz.w); { var sz=0; var mNVF0 = export(b ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); }' exec "$SRAVA" ;;
 arr_varref)
 	# 配列構築 `[..]` を演算子化(pigDataOperatorArray)した回帰: インライン配列内の varref が
 	# **ネストした agent op(union の mesh 引数)**でも正しい env で解決される。
 	# box(1,1,1) を [d,0,0] で平行移動 → box(2,2,2) と非接触 union = 2 箱 = 16v24f。
-	SRAVA_SOURCE='var d=4; var mNVF0 = export(box(2,2,2) ||| (box(1,1,1) >>> [d,0,0])); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var d=4; var mNVF0 = export(box(2,2,2) ||| (box(1,1,1) >>> [d,0,0])); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 export_unit)
 	# SVG/DXF の単位指定(export の 3 番目の引数)。SVG=width/height、DXF=$INSUNITS に反映。
 	O="$T/srava-exunit-out"; rm -rf "$O"; mkdir -p "$O"
-	SRAVA_SOURCE="export(\"$O/u.svg\", rect(260,135), \"mm\"); export(\"$O/u.dxf\", rect(260,135), \"mm\");" "$SRAVA" >/dev/null 2>&1
+	SRAVA_SOURCE="$MCG export(\"$O/u.svg\", rect(260,135), \"mm\"); export(\"$O/u.dxf\", rect(260,135), \"mm\");" "$SRAVA" >/dev/null 2>&1
 	if grep -q 'width="260mm"' "$O/u.svg" && grep -q 'INSUNITS' "$O/u.dxf" ; then
 		echo "EXPORT_UNIT_OK"
 	else
@@ -512,16 +525,16 @@ export_unit)
 parallel_cmp)
 	# trigger(並列 spark): 独立した 2 つの値 op を比較 → 両 agent を並列起動。
 	# 正当性検証(8 != 3 → false → else の union 25v46f)。並列性自体は手動計測(PIG_TEST_SLOW)で確認。
-	SRAVA_SOURCE='if (volume(box(2,2,2)) == volume(box(1,1,3))) { var mNVF0 = export(box(1,1,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (volume(box(2,2,2)) == volume(box(1,1,3))) { var mNVF0 = export(box(1,1,1)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 valid_ok)
 	# 検査(値返し): 健全な 3D box は valid==1 → 真なら union(25v46f)。値 VALUE 復元を検証。
-	SRAVA_SOURCE='if (valid(box(2,2,2)) == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (valid(box(2,2,2)) == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 valid_bad)
 	# 自己交差 2D(bowtie)を polygon() で作れる(検査緩和)→ valid==0 を検出 → 真なら 25v46f。
-	SRAVA_SOURCE='if (valid(polygon([[0,0],[2,2],[2,0],[0,2]])) == 0) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (valid(polygon([[0,0],[2,2],[2,0],[0,2]])) == 0) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 repair_2d)
 	# 2D 修復: bowtie を repair(even-odd)→ 2 三角形に正規化 → valid==1。repair(mesh 返し)+valid(値)合成。
-	SRAVA_SOURCE='if (valid(repair(polygon([[0,0],[2,2],[2,0],[0,2]]))) == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (valid(repair(polygon([[0,0],[2,2],[2,0],[0,2]]))) == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 repair_3d_selfx)
 	# ★ #3442 追補: 3D repair (autorefine) は **自己交差を解消しない** ことを固定する。
 	#   以前ソースに「とぐろ tube 等の自己交差を valid(=1) に持ち込む」と書いてあったが誤りで、
@@ -529,12 +542,12 @@ repair_3d_selfx)
 	#   ので誰も気づいていなかった → ここで実態を固定する。
 	#   ★もしここが REPAIRSELFX_OK でなく「1 1」になったら、repair が本当に直せるようになった合図
 	#   (良い変化なので、そのときはテストと doc を更新する)。
-	S='tube([[[0,0,0],0.5],[[4,0,0],0.5],[[4,2,0],0.5],[[2,2,0],0.5],[[2,-1,0],0.5]], 10)'
-	A=$(SRAVA_SOURCE="print(\"A\", valid($S));" "$SRAVA" 2>&1 | sed -n 's/^A //p')
-	B=$(SRAVA_SOURCE="print(\"B\", valid(repair($S)));" "$SRAVA" 2>&1 | sed -n 's/^B //p')
+	S='tube_ruled([[[0,0,0],0.5],[[4,0,0],0.5],[[4,2,0],0.5],[[2,2,0],0.5],[[2,-1,0],0.5]], 10)'
+	A=$(SRAVA_SOURCE="$MCG print(\"A\", valid($S));" "$SRAVA" 2>&1 | sed -n 's/^A //p')
+	B=$(SRAVA_SOURCE="$MCG print(\"B\", valid(repair($S)));" "$SRAVA" 2>&1 | sed -n 's/^B //p')
 	# 細分は効いていること (交差線が実エッジになる)
-	N0=$(SRAVA_SOURCE="print(\"N\", nfaces($S));" "$SRAVA" 2>&1 | sed -n 's/^N //p')
-	N1=$(SRAVA_SOURCE="print(\"N\", nfaces(repair($S)));" "$SRAVA" 2>&1 | sed -n 's/^N //p')
+	N0=$(SRAVA_SOURCE="$MCG print(\"N\", nfaces($S));" "$SRAVA" 2>&1 | sed -n 's/^N //p')
+	N1=$(SRAVA_SOURCE="$MCG print(\"N\", nfaces(repair($S)));" "$SRAVA" 2>&1 | sed -n 's/^N //p')
 	if [ "$A" != "0" ] ; then echo "REPAIRSELFX_FAIL: 前提の形状が自己交差していない (valid=$A)" ; exit 0 ; fi
 	if [ "$B" != "0" ] ; then
 		echo "REPAIRSELFX_FAIL: repair 後 valid=$B になった = 直せるようになった (doc/テストを更新すべき)"
@@ -548,78 +561,78 @@ repair_3d_selfx)
 
 repair_3d)
 	# 3D 修復: 健全 box は autorefine 無変化 → cache を経て union が通る(repair が usable mesh を返す証明)。25v46f。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| repair(box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| repair(box(1,1,3))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 volume)
 	# 計測(値返し): 3D box(2,2,2) の体積=8 → 真なら 25v46f。発散定理ベース。
-	SRAVA_SOURCE='if (volume(box(2,2,2)) == 8) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (volume(box(2,2,2)) == 8) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 volume_err)
 	# 2D に体積はない → エラー(area を使えと案内)。
-	SRAVA_SOURCE='export(volume(rect(2,3)));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(volume(rect(2,3)));' exec "$SRAVA" ;;
 perimeter)
 	# 計測(値返し): 2D rect(2,3) の境界長=2*(2+3)=10 → 真なら 25v46f。
-	SRAVA_SOURCE='if (perimeter(rect(2,3)) == 10) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (perimeter(rect(2,3)) == 10) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 centroid_2d)
 	# 計測(配列返し): rect(2,3) の面積重心=[1,1.5]。配列 VALUE 復元 + 添字 c[0]/c[1] を検証 → 25v46f。
-	SRAVA_SOURCE='var c = centroid(rect(2,3)); if (c[0] == 1) { if (c[1] == 1.5) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); } } else { var mNVF2 = export(box(1,1,1)); print("NVF", nverts(mNVF2), nfaces(mNVF2)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var c = centroid(rect(2,3)); if (c[0] == 1) { if (c[1] == 1.5) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); } } else { var mNVF2 = export(box(1,1,1)); print("NVF", nverts(mNVF2), nfaces(mNVF2)); }' exec "$SRAVA" ;;
 centroid_3d)
 	# 計測(配列返し): box(2,2,2) の体積重心=[1,1,1]。3 要素配列の添字 c[2] を検証 → 25v46f。
-	SRAVA_SOURCE='var c = centroid(box(2,2,2)); if (c[2] == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var c = centroid(box(2,2,2)); if (c[2] == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 distance)
 	# 近接(値返し・二項): box [0,1]^3 と +3 平行移動した box の最近接距離=2(x=1 と x=3 の隙間)→ 25v46f。
-	SRAVA_SOURCE='if (distance(box(1,1,1), box(1,1,1) >>> [3,0,0]) == 2) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'if (distance(box(1,1,1), box(1,1,1) >>> [3,0,0]) == 2) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 distance_err)
 	# 近接は 3D 専用。2D 入力はエラー。
-	SRAVA_SOURCE='export(distance(rect(1,1), rect(2,2)));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export(distance(rect(1,1), rect(2,2)));' exec "$SRAVA" ;;
 closest)
 	# 近接(配列返し): [dist,[pa],[pb]]。dist=2 かつ pa.x=1(近接面)を**入れ子添字 c[1][0]** で検証 → 25v46f。
-	SRAVA_SOURCE='var c = closest(box(1,1,1), box(1,1,1) >>> [3,0,0]); if (c[0] == 2) { if (c[1][0] == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); } } else { var mNVF2 = export(box(1,1,1)); print("NVF", nverts(mNVF2), nfaces(mNVF2)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var c = closest(box(1,1,1), box(1,1,1) >>> [3,0,0]); if (c[0] == 2) { if (c[1][0] == 1) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); } } else { var mNVF2 = export(box(1,1,1)); print("NVF", nverts(mNVF2), nfaces(mNVF2)); }' exec "$SRAVA" ;;
 farthest)
 	# 近接(配列返し・頂点総当り厳密): 対角隅 (0,0,0)-(4,1,1) → √18≈4.24 > 4 → 25v46f。
-	SRAVA_SOURCE='var c = farthest(box(1,1,1), box(1,1,1) >>> [3,0,0]); if (c[0] > 4) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var c = farthest(box(1,1,1), box(1,1,1) >>> [3,0,0]); if (c[0] > 4) { var mNVF0 = export(box(2,2,2) ||| box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0)); } else { var mNVF1 = export(box(1,1,1)); print("NVF", nverts(mNVF1), nfaces(mNVF1)); }' exec "$SRAVA" ;;
 tube)
 	# 3D 掃引管: 直線パス 2 頂点・半径 0.5・八角断面。側面 8 帯 + 両端平キャップ = 18v32f。
-	SRAVA_SOURCE='var mNVF0 = export(tube([[[0,0,0],0.5],[[0,0,3],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(tube_ruled([[[0,0,0],0.5],[[0,0,3],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 bigtube)
 	# #4 性能崖の回帰ガード: 2048 点の巨大インライン配列(serialize 後 ~157KB > 64KB 既定パイプ)。
 	# 修正前は planner→agent の pipe 送信が EAGAIN yield の resume 不全で停止(>40s〜ハング)。
 	# 修正(agent stdin の F_SETPIPE_SZ 拡張)後は ~2s。TIMEOUT で崖の再発を検知する。
 	PTS=$(python3 -c "import math;print(','.join('[[%g,%g,%g],0.3]'%(round(math.cos(i*0.05),4),round(math.sin(i*0.05),4),round(i*0.02,4)) for i in range(2048)))")
-	SRAVA_SOURCE="var mNVF0 = export(tube([$PTS], 6)); print(\"NVF\", nverts(mNVF0), nfaces(mNVF0));" exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG var mNVF0 = export(tube_ruled([$PTS], 6)); print(\"NVF\", nverts(mNVF0), nfaces(mNVF0));" exec "$SRAVA" ;;
 tube_taper)
 	# 太さ可変 + 端 r=0(尖り): 始端 apex(円錐)/終端 平キャップ。八角。10v16f。
-	SRAVA_SOURCE='var mNVF0 = export(tube([[[0,0,0],0],[[0,0,3],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(tube_ruled([[[0,0,0],0],[[0,0,3],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 tube_union)
 	# 管が閉多様体・外向き正しい証明: box との corefinement union が通る → 34v64f。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) ||| tube([[[0,0,0],0.5],[[0,0,4],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) ||| tube_ruled([[[0,0,0],0.5],[[0,0,4],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 tube_dedup)
 	# 連続重複頂点を弾かず間引く: 重複を含むパスでも、間引き後 2 頂点の素の管(18v32f)になる。
-	SRAVA_SOURCE='var mNVF0 = export(tube([[[0,0,0],0.5],[[0,0,0],0.5],[[0,0,3],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(tube_ruled([[[0,0,0],0.5],[[0,0,0],0.5],[[0,0,3],0.5]], 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 tube2d)
 	# 2D 次元ディスパッチ: 位置が [x,y] なら可変半幅の帯(cgMesh2D)。valid な単一領域になることを確認。
-	SRAVA_SOURCE='var v = valid(tube([[[0,0],3],[[20,5],2],[[35,-8],4]])); if (v == 1) { print("TUBE2D_OK"); }' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var v = valid(tube_ruled([[[0,0],3],[[20,5],2],[[35,-8],4]])); if (v == 1) { print("TUBE2D_OK"); }' exec "$SRAVA" ;;
 revolve)
 	# 2D→3D 回転体: rect[0,1]x[0,2] を Y 軸 360° → 円柱(半径1高2)。軸接辺は潰れる。66v128f。
-	SRAVA_SOURCE='var mNVF0 = export(revolve(rect(1,2), 360)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(revolve(rect(1,2), 360)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 revolve_union)
 	# 円柱が閉多様体・向き正しい証明: box との corefinement union が通る → 70v136f。
-	SRAVA_SOURCE='var mNVF0 = export(box(5,5,5) ||| revolve(rect(1,2), 360)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(5,5,5) ||| revolve(rect(1,2), 360)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 revolve_partial)
 	# 部分角(90°扇形柱)= 両端に CDT キャップ付き閉立体。20v36f。
-	SRAVA_SOURCE='var mNVF0 = export(revolve(rect(1,2), 90)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(revolve(rect(1,2), 90)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 revolve_segs)
 	# 回転分割数(第3引数=回転ピッチ): 8 分割の粗い円柱 → 18v32f。
-	SRAVA_SOURCE='var mNVF0 = export(revolve(rect(1,2), 360, 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(revolve(rect(1,2), 360, 8)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 revolve_partial_union)
 	# 部分角が閉多様体・キャップ向き正しい証明: box union が通る → 22v40f。
-	SRAVA_SOURCE='var mNVF0 = export(box(5,5,5) ||| revolve(rect(1,2), 90)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(5,5,5) ||| revolve(rect(1,2), 90)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 svg_roundtrip)
 	# 2D SVG export→import round-trip。穴あき額縁が保たれて extrude=トンネル付き 16v32f。
 	rm -f /tmp/srava-rt-test.svg
-	SRAVA_SOURCE='export("/tmp/srava-rt-test.svg", rect(4,4) --- (rect(2,2) >>> [1,1,0])); var mNVF0 = export(extrude(import("/tmp/srava-rt-test.svg"), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export("/tmp/srava-rt-test.svg", rect(4,4) --- (rect(2,2) >>> [1,1,0])); var mNVF0 = export(extrude(import("/tmp/srava-rt-test.svg"), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 dxf_export)
 	# 2D DXF export(LWPOLYLINE)。エラーにならず D_REF 出力。
 	rm -f /tmp/srava-dxf-test.dxf
-	SRAVA_SOURCE='export("/tmp/srava-dxf-test.dxf", ngon(6,1));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export("/tmp/srava-dxf-test.dxf", ngon(6,1));' exec "$SRAVA" ;;
 default_kernel_union)
 	# ★manifold 既定 (module("manifold.so",{priority}) で明示・Phase4c で env DEFAULT_OUTPUT 撤去):
 	#   leaf→union→volume が in-proc Manifold で動く。
@@ -639,15 +652,15 @@ default_kernel_2d_extrude)
 default_kernel_offset3d)
 	# ★manifold 既定でも 3D offset は CGAL へ自動フォールバック (mf_agent_supports から offset を
 	# 除外・ひさ判断 2026-08-06)。cast 不要で動くこと + 体積が正 (拡大) であることを見る。
-	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("OVOL", volume(offset(box(2,2,2), 1)) > volume(box(2,2,2)));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG$MNH"'module("manifold.so",{priority:99}); print("OVOL", volume(offset(box(2,2,2), 1)) > volume(box(2,2,2)));' exec "$SRAVA" ;;
 default_kernel_import_obj)
 	# ★manifold 既定で import(.obj) が動くこと (Phase2-2 の import_exts 対称化)。mf は STL/OFF しか
 	# 読めないので .obj は CGAL に振られる。旧実装は import が拡張子未検査で mf に振られ失敗していた。
 	# box(2,2,2) を .obj で書いて読み戻し volume=8 を確認。
 	OBJ=/tmp/srava-defk-import.obj
 	rm -f "$OBJ"
-	SRAVA_SOURCE="export(\"$OBJ\", box(2,2,2));" "$SRAVA" >/dev/null 2>&1 || exit 1
-	SRAVA_SOURCE="module(\"manifold.so\",{priority:99}); print(\"IVOL\", volume(import(\"$OBJ\")));" exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG export(\"$OBJ\", box(2,2,2));" "$SRAVA" >/dev/null 2>&1 || exit 1
+	SRAVA_SOURCE="$MCG module(\"manifold.so\",{priority:99}); print(\"IVOL\", volume(import(\"$OBJ\")));" exec "$SRAVA" ;;
 default_kernel_3mf)
 	# ★manifold 既定: .3mf export は CGAL に振られ (mf は STL/OFF のみ)、**本物の 3MF (zip)** が
 	# できること。旧実装は mf に流れて無言で STL の中身になっていた (2026-08-06 修正の回帰)。
@@ -660,7 +673,7 @@ disable_cgal)
 	#   落ちる。判別子 = 三角形数: cgal union = 46 tri / manifold union = 28 tri。★TRI 28 が出れば
 	#   「cgal 無効化 → manifold へフォールバック」の証明 (priority override は使わない = disable の効果)。
 	rm -f /tmp/srava-disable-cgal.stl
-	SRAVA_SOURCE='module("cgal.so","off"); export("/tmp/srava-disable-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	SRAVA_SOURCE="$MCG$MMF"'module("cgal.so","off"); export("/tmp/srava-disable-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
 	python3 -c 'import struct,sys; b=open("/tmp/srava-disable-cgal.stl","rb").read(); n=struct.unpack_from("<I",b,80)[0]; print("TRI",n); sys.exit(0 if n==28 else 1)' ;;
 module_off_invisible)
 	# ★ #3439 ⑥: module(so,"off") が「最初からロードしなかった場合」と同じ挙動になること。
@@ -670,35 +683,44 @@ module_off_invisible)
 	#   選択ループ 6 箇所だけ)。派生テーブルを全廃し記述子走査 + is_enabled にしたので、
 	#   off にしたモジュールの機能は**どの層からも見えない**はず。
 	#   ① 型/routing 層: その型は産出できない
-	#   ② 拡張子層: cgal だけが書ける .svg は書けない (ファイルもできない)
+	#   ② 拡張子層: cgal を off にすると .svg は書けない (ファイルもできない)
+	#      ⚠ **2026-09-17 に前提が動いた** (#3544 段 3): occt も .svg / .dxf を書くように
+	#        なったので「cgal *だけ* が書ける」ではなくなった。⇒ 見るものは変わらない
+	#        (cgal を off にしたら書けない) が、routing の文言は *より細かい方* になる:
+	#          旧: 拡張子 'svg' を書けるモジュールが無い
+	#          新: 拡張子 'svg' は書けるが、入力の型 'mf-cross2d' を受け取れるモジュールが無い
+	#        (occt は .svg を書けるが oc-cross2d しか受けない。cgal が off なので
+	#         manifold が作った mf-cross2d の引き取り手が居ない)
+	#      ★ 検定の力は落ちていない — cgal が見えていれば cgal が引き取って **書けてしまう**。
+	#        ⇒ 上のファイル有無の検査と合わせて「off が拡張子層に効く」を見ている。
 	#   ③ off の意味は保たれる: 既定カーネルが次点 (manifold) へ落ちて計算は通る
 	#   ④ module(so,{}) で再ロードできる (アンロードは不可逆でない)
 	# ★ #3499: cg-mesh3d を産出できるモジュールは cgal だけではない — 橋 nef_cg.so も名乗る
 	#   (nf-mesh3d → cg-mesh3d の変換専用)。「産出者が 1 つも無い」状態を作るには両方 off に
 	#   する必要がある。nef_cg.so は SRAVA_MODULE_NEF_SNC=ON のビルドにしか無いので
 	#   module_loaded で守る (未ロードへの off は明示エラー)。
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); if (module_loaded("nef_cg.so")) { module("nef_cg.so","off"); }
+	out=$(SRAVA_SOURCE="$MCG$MMF$MOC"'module("cgal.so","off"); if (module_loaded("nef_cg.so")) { module("nef_cg.so","off"); }
 	      print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "産出できるモジュールが無い" || { echo "FAIL(1): off 中の型へ cast できてしまう: $out"; exit 1; }
 	rm -f /tmp/srava-off-invisible.svg
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); export("/tmp/srava-off-invisible.svg", rect(2,2));' "$SRAVA" 2>&1)
+	out=$(SRAVA_SOURCE="$MCG$MMF$MOC"'module("cgal.so","off"); export("/tmp/srava-off-invisible.svg", rect(2,2));' "$SRAVA" 2>&1)
 	if [ -f /tmp/srava-off-invisible.svg ]; then
 		echo "FAIL(2): off 中の cgal が .svg を書いた (拡張子層に off が効いていない)"; exit 1
 	fi
 	# ★ #3439 ⑦: 「書けるモジュールが無い」と routing 段階で言うこと (旧: 一般ロジックへ落ちて
 	#   実行時に "export: no mesh to write" という的外れなエラーになっていた)。
-	echo "$out" | grep -q "拡張子 'svg' を書けるモジュールが無い" ||
+	echo "$out" | grep -q "拡張子 'svg' は書けるが、入力の型 'mf-cross2d' を受け取れるモジュールが無い" ||
 		{ echo "FAIL(2): .svg export のエラーが原因を指していない: $out"; exit 1; }
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); print("V", volume(box(2,2,2)));' "$SRAVA" 2>&1)
+	out=$(SRAVA_SOURCE="$MCG$MMF$MOC"'module("cgal.so","off"); print("V", volume(box(2,2,2)));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "^V 8" || { echo "FAIL(3): off で次点カーネルへ落ちない: $out"; exit 1; }
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); module("cgal.so",{});
+	out=$(SRAVA_SOURCE="$MCG$MMF$MOC"'module("cgal.so","off"); module("cgal.so",{});
 	      print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "^V 8" || { echo "FAIL(4): 再ロードで戻せない: $out"; exit 1; }
 	# ⑤ 未対応の拡張子は import/export とも routing で明示エラー (誰も扱えない形式)
-	out=$(SRAVA_SOURCE='export("/tmp/srava-off-invisible.zzz", box(1,1,1));' "$SRAVA" 2>&1)
+	out=$(SRAVA_SOURCE="$MCG$MMF$MOC"'export("/tmp/srava-off-invisible.zzz", box(1,1,1));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "拡張子 'zzz' を書けるモジュールが無い" ||
 		{ echo "FAIL(5): 未対応拡張子の export が明示エラーでない: $out"; exit 1; }
-	out=$(SRAVA_SOURCE='print("V", volume(import("/tmp/srava-nonexistent.zzz")));' "$SRAVA" 2>&1)
+	out=$(SRAVA_SOURCE="$MCG$MMF$MOC"'print("V", volume(import("/tmp/srava-nonexistent.zzz")));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "拡張子 'zzz' を読めるモジュールが無い" ||
 		{ echo "FAIL(6): 未対応拡張子の import が明示エラーでない: $out"; exit 1; }
 	echo "MODULE-OFF-INVISIBLE-OK" ;;
@@ -710,21 +732,172 @@ cast_no_producer)
 	#     ① 存在しない型名 → エラー
 	#     ② module("cgal.so","off") 下で cg 型へ cast → エラー (= off が cast の行き先にも効く)
 	#     ③ 正常な cast は従来どおり通る (エラーにし過ぎていない)
-	out=$(SRAVA_SOURCE='print("V", volume(cast("zz-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
+	out=$(SRAVA_SOURCE="$MCG$MMF"'print("V", volume(cast("zz-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "産出できるモジュールが無い" || { echo "FAIL(1): 存在しない型への cast が素通り: $out"; exit 1; }
 	echo "$out" | grep -q "^V " && { echo "FAIL(1): 値が返っている: $out"; exit 1; }
 	# ★ #3499: 橋 nef_cg.so も cg-mesh3d を産出すると名乗るので、こちらも落としてから見る。
-	out=$(SRAVA_SOURCE='module("cgal.so","off"); if (module_loaded("nef_cg.so")) { module("nef_cg.so","off"); }
+	out=$(SRAVA_SOURCE="$MCG$MMF"'module("cgal.so","off"); if (module_loaded("nef_cg.so")) { module("nef_cg.so","off"); }
 	      print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "産出できるモジュールが無い" || { echo "FAIL(2): off 中のモジュールの型へ cast できてしまう: $out"; exit 1; }
-	out=$(SRAVA_SOURCE='print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
+	out=$(SRAVA_SOURCE="$MCG$MMF"'print("V", volume(cast("cg-mesh3d", box(2,2,2))));' "$SRAVA" 2>&1)
 	echo "$out" | grep -q "^V 8" || { echo "FAIL(3): 正常な cast が通らない: $out"; exit 1; }
 	echo "CAST-NO-PRODUCER-OK" ;;
+cast_target_row)
+	# ★★ #3554 最後の段 2/5 (2026-09-19): cast の振り分けが **行のマッチ関数**
+	#   (pig_match_cast_target = 目標型が この行の sig の出力型か) に移ったことの検査。
+	#   cast 専用ブロックと sig_dispatch の wantOut は撤去され、普通の検索に戻った。
+	#
+	# ---- ⚠⚠ ここで本当に守っているもの: **1 行 1 出力型** ----
+	# 1 行に出力型を 2 つ書くと、判定が **2 か所に割れる**:
+	#     行が成立するか   … どれかの sigline が目標型を産めば成立     (マッチ関数)
+	#     実際に名乗る型   … *入力型で先に当たった* sigline の出力型   (sig_dispatch)
+	#   ⇒ cgal の旧 1 行 sig は "(cg-face3d)->cg-face3d" が "(cg-face3d)->cg-cross2d" より
+	#     前に在るので、cast("cg-cross2d", <cg-face3d>) が **cg-face3d を名乗って通る**。
+	#   記述子のロード時検査 (srava_module_probe --selftest) はこれを *書いた瞬間*に弾くが、
+	#   ここでは **振る舞いの側**から同じことを見る (検査を外しても値で気づける)。
+	#
+	# ---- ⚠ 何がどれを捕まえるか (2026-09-19 に **壊して実測**した) ----
+	#   行を 1 本に戻した .so で測ると:
+	#     ① は **捕まらない** — bbox が映すのは *値* で、値を作るのは cast の計算本体
+	#        (目標型名を自分で読む) だから、routing の行選びが外れても値は正しく見える
+	#     ② は **捕まる** — area(cast("cg-cross2d", box(2,2,2))) が **24** を返した
+	#        (= 3D の表面積。要求した 2D ではなく **入力そのもの**が返っている)
+	#   ⇒ ① は「**分割で行が落ちていないこと**」の検査として置く (手で sig を 3 本に割った
+	#      ので、sigline を 1 本書き忘れれば到達できない目標型ができる)。
+	#      「目標型で行が選ばれること」を見ているのは ② の方である。
+	#   ★ 書いた瞬間に弾くのは記述子のロード時検査 (srava_module_probe --selftest)。
+	#     こちらは **振る舞いの側**から同じ穴を見る 2 本目の網。
+	#
+	# ★ 観測は **bbox の成分数** — cross2d は 2 / face3d は 3 (型が値の形に出る)。
+	#
+	#   ① 同じ値から、目標型ごとの行が **4 本とも生きている** (cgal / manifold × 2D/2D置き)
+	#   ② 申告に無い降格 (3D → 2D) は **黙って通らない** (= 入力がそのまま返らない)
+	#   ③ 目標型を産む行はあるが入力型を受けない、と **原因を名指し**する
+	R='var r = rotate(rect(2,2), "x", 180);'   # x 軸 180° = z=0 の上に残る face3d (規約①)
+	out=$(SRAVA_SOURCE="$MCG $MMF $R"'
+	      print("F", bbox(cast("cg-face3d", r)));
+	      print("C", bbox(cast("cg-cross2d", r)));
+	      print("MF", bbox(cast("mf-face3d", r)));
+	      print("MC", bbox(cast("mf-cross2d", r)));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q '^F \[\[0,-2,0\],\[2,0,0\]\]' ||
+		{ echo "FAIL(1): cast(\"cg-face3d\") が face3d (3 成分) を返さない: $out"; exit 1; }
+	echo "$out" | grep -q '^C \[\[0,-2\],\[2,0\]\]' ||
+		{ echo "FAIL(2): cast(\"cg-cross2d\") が cross2d (2 成分) を返さない = 降格の行 (cg-face3d)->cg-cross2d が落ちている: $out"; exit 1; }
+	echo "$out" | grep -q '^MF \[\[0,-2,0\],\[2,0,0\]\]' ||
+		{ echo "FAIL(3): manifold の face3d が 3 成分でない: $out"; exit 1; }
+	echo "$out" | grep -q '^MC \[\[0,-2\],\[2,0\]\]' ||
+		{ echo "FAIL(4): manifold の cross2d が 2 成分でない: $out"; exit 1; }
+	# ② 申告に無い降格 (cg-mesh3d → cg-cross2d) は通らない。⚠ **値が返っていない**ことも見る
+	#    (「エラーも出したが値も返した」を捕まえる)。
+	out=$(SRAVA_SOURCE="$MCG$MMF"'print("A", area(cast("cg-cross2d", box(2,2,2))));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "no module declares a conversion" ||
+		{ echo "FAIL(5): 3D→2D の cast が明示エラーでない: $out"; exit 1; }
+	echo "$out" | grep -q "cg-mesh3d" ||
+		{ echo "FAIL(6): エラーが入力の型名を示していない: $out"; exit 1; }
+	# ⚠ 値が返っていないこと自体が要点 — 行を 1 本に戻すと **A 24** (3D の表面積 = 入力が
+	#   そのまま返った) が出る。「エラーが出るか」だけ見ると、この 24 を見落とす。
+	echo "$out" | grep -q "^A " && { echo "FAIL(7): エラーなのに値が返っている (入力がそのまま返っていないか): $out"; exit 1; }
+	out2=$(SRAVA_SOURCE="$MCG$MMF"'print("A", area(cast("mf-cross2d", box(2,2,2))));' "$SRAVA" 2>&1)
+	echo "$out2" | grep -q "^A " && { echo "FAIL(7b): manifold 側でも 3D→2D が通っている: $out2"; exit 1; }
+	# ③ 目標型は作れる = 原因は入力側、と言い分けていること (産出者が無い場合との区別)
+	echo "$out" | grep -q "produces 'cg-cross2d'" ||
+		{ echo "FAIL(8): 「型は作れるが入力を受けない」と言い分けていない: $out"; exit 1; }
+	echo "CAST-TARGET-ROW-OK" ;;
+import_ext_row)
+	# ★★ #3554 最後の段 3/5 (2026-09-19): import の振り分けが **行のマッチ関数**
+	#   (pig_match_import_ext = 拡張子が産む型 (import_exts の型付き CSV) が
+	#    この行の sig の出力型か) に移ったことの検査。import の専用ブロックは撤去した。
+	#
+	# ---- ⚠ import に固有の事情 ----
+	# cast は目標型が **引数** に書いてあるが、import の出力型は **拡張子**で決まる。
+	# sig の入力は 0 個なので、1 行に出力型を 3 つ書くと *先頭の sigline が常に当たり*、
+	# .svg を読んでも cg-mesh3d を名乗る。⇒ 出力型ごとに行を分ける (import#cg-cross2d 等)。
+	#
+	# ---- ⚠⚠ 何で観測するか (2026-09-19 に **壊して実測**した) ----
+	# import の計算本体はファイルを読むだけで目標型を受け取らないので、**値は常に正しい**。
+	# 外れるのは *名乗る型* (継続スタンプ) だけ ⇒ bbox や area では映らない。
+	#   ⇒ **routing が型名を口に出す場面**を使う: volume は 3D しか受けないので、
+	#     2D を渡すと planner が「入力型は cg-cross2d」と名指しして落ちる。
+	#     この型名がそのまま *import がどの行を選んだか* の読み出しになる。
+	# ★ 較正 (cgal の import を 1 行に戻した .so で実測): ①②③ = bbox / volume の **値は全部
+	#   正しいまま通り**、落ちたのは ④ (名乗る型) だけだった。⇒ 値を見る検定をいくら足しても
+	#   この穴は塞がらない。
+	D="${SRAVA_CACHE_DIR:-/tmp/srava-importrow}-f"
+	rm -rf "$D"; mkdir -p "$D" || exit 1
+	# ⚠ 冒頭で D を cygpath -m に直しているが、ここで **作り直している**ので変換が外れる。
+	#   native srava に POSIX の /tmp/... を渡すと cannot write になる (MSYS sh とは別物)。
+	command -v cygpath >/dev/null 2>&1 && D=$(cygpath -m "$D")
+	MK='export("'"$D"'/a.stl", box(2,2,2)); export("'"$D"'/b.svg", rect(2,2)); export("'"$D"'/c.dxf", rect(2,2));'
+	# ① 3 つの拡張子が **別々の行**へ行く (stl=3D / svg=2D / dxf=置かれた 2D)
+	out=$(SRAVA_SOURCE="$MCG $MK"'
+	      print("STL", volume(import("'"$D"'/a.stl")));
+	      print("SVG", bbox(import("'"$D"'/b.svg")));
+	      print("DXF", bbox(import("'"$D"'/c.dxf")));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "^STL 8" || { echo "FAIL(1): .stl の import が 3D として読めない: $out"; exit 1; }
+	echo "$out" | grep -q '^SVG \[\[0,0\],\[2,2\]\]' ||
+		{ echo "FAIL(2): .svg が 2 成分 (cross2d) で返らない: $out"; exit 1; }
+	echo "$out" | grep -q '^DXF \[\[0,0,0\],\[2,2,0\]\]' ||
+		{ echo "FAIL(3): .dxf が 3 成分 (face3d) で返らない: $out"; exit 1; }
+	# ② ★ 名乗る型そのものを見る — volume は 3D しか受けないので、planner が入力型を名指しする
+	out=$(SRAVA_SOURCE="$MCG $MK"' print("V", volume(import("'"$D"'/b.svg")));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "cg-cross2d" ||
+		{ echo "FAIL(4): .svg の import が cg-cross2d を名乗っていない (行が拡張子で選ばれていない): $out"; exit 1; }
+	echo "$out" | grep -q "cg-mesh3d)->value" || { echo "FAIL(4b): 期待の列挙が出ていない (検定が的を外した): $out"; exit 1; }
+	echo "$out" | grep -q "^V " && { echo "FAIL(5): 2D に volume が通っている: $out"; exit 1; }
+	out=$(SRAVA_SOURCE="$MCG $MK"' print("V", volume(import("'"$D"'/c.dxf")));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "cg-face3d" ||
+		{ echo "FAIL(6): .dxf の import が cg-face3d を名乗っていない: $out"; exit 1; }
+	# ③ 誰も読めない拡張子は routing で明示エラー (旧ブロックと同じ文言)
+	out=$(SRAVA_SOURCE="$MCG"'print("V", volume(import("/tmp/srava-nonexistent.zzz")));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "拡張子 'zzz' を読めるモジュールが無い" ||
+		{ echo "FAIL(7): 未対応拡張子の import が明示エラーでない: $out"; exit 1; }
+	rm -rf "$D"
+	echo "IMPORT-EXT-ROW-OK" ;;
+export_ext_row)
+	# ★★ #3554 最後の段 4/5 (2026-09-19): export の振り分けが **行のマッチ関数**
+	#   (pig_match_export_ext = 第 1 引数の拡張子を export_exts が書けるか) + sig に移り、
+	#   同時に **規約① (自型優先) を撤去**したことの検査。
+	#
+	# ---- 規約① とは何だったか ----
+	# 「入力型の home カーネル (module_of_type) が拡張子を書けるなら **そこへ振る**」という
+	# routing の特例。sig でも記述子でもない *3 つめの規則* で、priority と sig の決着を上書き
+	# していた。⇒ 撤去したので export("a.stl", <mf-mesh3d>) は **cgal (priority 20)** が書く
+	# (cgal の export sig は mf-mesh3d を受けると申告している)。manifold (10) ではない。
+	#
+	# ★ 観測は **STL のヘッダ 80 バイト** — cgal は "FileType: Binary" を書き、manifold は
+	#   全部 0 で埋める。⇒ *どのモジュールが書いたか* がファイル自身に出る。
+	#   ⚠ 面数やサイズでは見分けられない (どちらも同じ 684 バイト)。
+	D="${SRAVA_CACHE_DIR:-/tmp/srava-exportrow}-f"
+	rm -rf "$D"; mkdir -p "$D" || exit 1
+	# ⚠ 冒頭で D を cygpath -m に直しているが、ここで **作り直している**ので変換が外れる。
+	#   native srava に POSIX の /tmp/... を渡すと cannot write になる (MSYS sh とは別物)。
+	command -v cygpath >/dev/null 2>&1 && D=$(cygpath -m "$D")
+	# ① mf-mesh3d を .stl へ → **cgal が書く** (規約① があれば manifold が書いていた)
+	SRAVA_SOURCE="$MCG$MMF$MPT"'var m = "manifold"::box(2,2,2); export("'"$D"'/a.stl", m); print("T", type_of(m));' "$SRAVA" > "$D/o1" 2>&1
+	grep -q "^T mf-mesh3d" "$D/o1" || { echo "FAIL(1): 入力が mf-mesh3d になっていない: $(cat "$D/o1")"; exit 1; }
+	head -c 80 "$D/a.stl" | grep -q "FileType: Binary" ||
+		{ echo "FAIL(2): mf-mesh3d の .stl を cgal が書いていない (規約① が残っている?): $(head -c 20 "$D/a.stl" | od -c | head -1)"; exit 1; }
+	# ② ★ 陰性対照: cgal を落とせば manifold が書く (= ① が「cgal しか居ない」で通ったのではない)
+	SRAVA_SOURCE="$MCG$MMF$MPT"'module("cgal.so","off"); export("'"$D"'/b.stl", box(2,2,2));' "$SRAVA" > "$D/o2" 2>&1
+	[ -f "$D/b.stl" ] || { echo "FAIL(3): cgal off で .stl が書けない: $(cat "$D/o2")"; exit 1; }
+	head -c 80 "$D/b.stl" | grep -q "FileType: Binary" &&
+		{ echo "FAIL(4): cgal off なのに cgal のヘッダが出ている (検定が的を外した)"; exit 1; }
+	# ③ 拡張子を誰も書けない → routing で明示エラー (matchedButSig=0 の側)
+	out=$(SRAVA_SOURCE="$MCG$MMF$MPT"'export("'"$D"'/x.zzz", box(1,1,1));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "拡張子 'zzz' を書けるモジュールが無い" ||
+		{ echo "FAIL(5): 未対応拡張子の export が明示エラーでない: $out"; exit 1; }
+	# ④ 書けるが入力型を受け取れない → 別の文言 (matchedButSig=1 の側)
+	#   ★ .xyz は points だけが書き、その sig は pt-cloud3d しか受けない。
+	out=$(SRAVA_SOURCE="$MCG$MMF$MPT"'export("'"$D"'/y.xyz", box(1,1,1));' "$SRAVA" 2>&1)
+	echo "$out" | grep -q "拡張子 'xyz' は書けるが、入力の型 'cg-mesh3d' を受け取れるモジュールが無い" ||
+		{ echo "FAIL(6): 「書けるが型が合わない」と言い分けていない: $out"; exit 1; }
+	rm -rf "$D"
+	echo "EXPORT-EXT-ROW-OK" ;;
 disable_cgal_reenable)
 	# ★ off (アンロード) の後、module(so,{}) で再ロードできること。再ロード後は既定 cgal に戻り TRI 46。
 	#   ★ 2026-08-28: 旧 "on" は撤去した ("off" が実アンロードになった以上、戻すのは再ロード)。
 	rm -f /tmp/srava-reenable-cgal.stl
-	SRAVA_SOURCE='module("cgal.so","off"); module("cgal.so",{}); export("/tmp/srava-reenable-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	SRAVA_SOURCE="$MCG"'module("cgal.so","off"); module("cgal.so",{}); export("/tmp/srava-reenable-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
 	python3 -c 'import struct,sys; b=open("/tmp/srava-reenable-cgal.stl","rb").read(); n=struct.unpack_from("<I",b,80)[0]; print("TRI",n); sys.exit(0 if n==46 else 1)' ;;
 disable_cgal_sugar)
 	# ★ 1 引数 module(so) は module(so,"on") の糖衣 (2026-08-18・ひさ確定)。
@@ -732,7 +905,7 @@ disable_cgal_sugar)
 	#   (以前の 1 引数 module は「ロードし直す」op で、その副作用でロード順まで動かしていた。
 	#    今は記述子の上書きだけを行い、ロード順には触れない。)
 	rm -f /tmp/srava-sugar-cgal.stl
-	SRAVA_SOURCE='module("cgal.so","off"); module("cgal.so"); export("/tmp/srava-sugar-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
+	SRAVA_SOURCE="$MCG"'module("cgal.so","off"); module("cgal.so"); export("/tmp/srava-sugar-cgal.stl", box(2,2,2) ||| box(1,1,3));' "$SRAVA" || exit 1
 	python3 -c 'import struct,sys; b=open("/tmp/srava-sugar-cgal.stl","rb").read(); n=struct.unpack_from("<I",b,80)[0]; print("TRI",n); sys.exit(0 if n==46 else 1)' ;;
 cast_sig_input)
 	# ★ 2026-08-28 (ひさ指摘): cast の routing は sig の **出力型だけ** を見ていたので、
@@ -872,9 +1045,67 @@ module_dup_name)
 		echo "$out" | grep -q "already loaded from" && { echo "FAIL(4): 同じ実体を別物と誤判定: $out"; exit 1; }
 	fi
 	echo "MODULE-DUP-NAME-OK" ;;
+module_optional_refused)
+	# ★★ #3558: @module(so,{optional:1})@ は「**入っていない**」だけを飲み込む。
+	#   **ファイルは在るのに使えない** (ABI 不一致 / 記述子違反 / モジュールでない .so /
+	#   壊れたファイル) は、optional でも必ず落とす。
+	#   ⚠ これを飲み込んでいた間は、lib/module/all.sra (全部 optional:1) の経路で
+	#     壊れた .so が**黙って居なくなり**、次点のカーネルが答えていた。値が返るので
+	#     気づく手掛かりが無く、カーネルが入れ替わっても値が一致する op では検定も落ちない。
+	MD="$T/srava-optref"; rm -rf "$MD"; mkdir -p "$MD"
+	SODIR=$(dirname "$SRAVA")
+	SOEXT=.so; [ -f "$SODIR/demo.so" ] || SOEXT=.dll
+	# ---- ⓪ 負の対照: **入っていない** → optional:1 は黙って飛ばす (ここが壊れたら検定にならない)
+	out=$(SRAVA_SOURCE="module(\"no_such_module_zzz$SOEXT\",{optional:1}); print(\"X\",1);" "$SRAVA" 2>&1)
+	echo "$out" | grep -q "^X 1" || { echo "FAIL(0): 入っていない .so を optional:1 が飲み込まなくなった: $out"; exit 1; }
+	# ---- ① ファイルは在るが dlopen が失敗する (壊れたファイル)
+	printf 'this is not a shared object\n' > "$MD/broken$SOEXT"
+	out=$(SRAVA_SOURCE="module(\"$MD/broken$SOEXT\",{optional:1}); print(\"X\",1);" "$SRAVA" 2>&1)
+	echo "$out" | grep -q "^X 1" && { echo "FAIL(1): 壊れた .so を optional:1 が飲み込んだ: $out"; exit 1; }
+	echo "$out" | grep -q "the file is present but unusable" || { echo "FAIL(1): 飲み込まなかった理由が出ていない: $out"; exit 1; }
+	# ---- ② srava_module シンボルを持たない .so (= モジュールでない)
+	#   ⚠⚠ **libpig を使ってはいけない**。OS ごとに別々に壊れる (2026-09-19 に両方踏んだ):
+	#     ・mac で @libpig.dylib@ と名指し → module() の normalize_module_path() が
+	#       *既知の拡張子をこの OS のものへ書き換える* ので libpig.so (存在しない) になり、
+	#       「入っていない」として **正しく飲み込まれて検定が空振り**した
+	#     ・その直しとして libpig を **コピーして**名指ししたら、こんどは Linux で
+	#       **dlopen が返ってこない** — RTLD_GLOBAL で libpig の 2 つめの実体が載り、
+	#       大域状態が二重化する (ctest は Timeout で赤)
+	#   ⇒ *依存の無い空の .so* (testmod_notamodule) を建てて使う。両方の OS で成り立つ唯一の形。
+	NONMOD="$NOTAMOD"
+	if [ -n "$NONMOD" ] && [ -f "$NONMOD" ]; then
+		out=$(SRAVA_SOURCE="module(\"$NONMOD\",{optional:1}); print(\"X\",1);" "$SRAVA" 2>&1)
+		echo "$out" | grep -q "^X 1" && { echo "FAIL(2): モジュールでない .so を optional:1 が飲み込んだ: $out"; exit 1; }
+		echo "$out" | grep -q "the file is present but unusable" || { echo "FAIL(2b): 飲み込まなかった理由が出ていない: $out"; exit 1; }
+	else
+		echo "NOTE: NOTAMOD が無いので ② は飛ばす"
+	fi
+	# ---- ③ ABI 不一致 (専用のテストモジュール・探索路の外に建ててある)
+	if [ -n "$BADABI" ] && [ -f "$BADABI" ]; then
+		out=$(SRAVA_SOURCE="module(\"$BADABI\",{optional:1}); print(\"X\",1);" "$SRAVA" 2>&1)
+		echo "$out" | grep -q "^X 1" && { echo "FAIL(3): ABI 不一致を optional:1 が飲み込んだ: $out"; exit 1; }
+		echo "$out" | grep -q "ABI mismatch" || { echo "FAIL(3): ABI 不一致だと言っていない: $out"; exit 1; }
+		# optional 無しでも同じ拒否 (理由の文言だけが違う)
+		out=$(SRAVA_SOURCE="module(\"$BADABI\",{}); print(\"X\",1);" "$SRAVA" 2>&1)
+		echo "$out" | grep -q "ABI mismatch" || { echo "FAIL(3b): optional 無しで ABI 不一致が出ない: $out"; exit 1; }
+	else
+		echo "NOTE: BADABI が無いので ③ は飛ばす"
+	fi
+	# ---- ④ 記述子違反 (export op を持つのに export_exts が空)
+	if [ -n "$BADSIG" ] && [ -f "$BADSIG" ]; then
+		out=$(SRAVA_SOURCE="module(\"$BADSIG\",{optional:1}); print(\"X\",1);" "$SRAVA" 2>&1)
+		echo "$out" | grep -q "^X 1" && { echo "FAIL(4): 記述子違反を optional:1 が飲み込んだ: $out"; exit 1; }
+		echo "$out" | grep -q "export_exts" || { echo "FAIL(4): 記述子違反の理由が出ていない: $out"; exit 1; }
+	else
+		echo "NOTE: BADSIG が無いので ④ は飛ばす"
+	fi
+	echo "MODULE-OPTIONAL-REFUSED-OK" ;;
 load_op_removed)
 	# ★ 旧 load(so) op は廃止 (2026-08-18)。module(so) が同じ役割を兼ねるため。
 	#   黙って別の意味にならず、エラーになることを固定する。
+	# ★ #3570 段3.5: 文言が「undefined variable: load」から **op 層の診断**へ変わった。
+	#   呼びの形で書かれた名前が変数として束縛されていないなら、変数の話ではなく
+	#   「その op を持つモジュールが居ない」を言う方が *撤去された* ことを正しく伝える。
 	SRAVA_SOURCE='load("d3.so"); print("X", 1);' exec "$SRAVA" ;;
 disable_bad_option)
 	# ★ 不正な文字列オプションは明示エラー ("off" 以外は無い)。
@@ -884,33 +1115,33 @@ kernel_mix_cast)
 	# cast で cg agent が読む = MFM3→EPECK 昇格読みの回帰 (#3404 の昇格が #3406 の
 	# codec テーブル移行で不通になっていた実バグ・2026-08-06 cgCacheCodecUpgrade で再接続)。
 	# rev4 Phase C: cast は目標**型**指定 (旧 cast("exact") → cast("cg-mesh3d"))。
-	SRAVA_SOURCE='module("manifold.so",{priority:99}); print("VOL", volume(cast("cg-mesh3d", box(2,2,2) ||| box(1,1,3))));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'module("manifold.so",{priority:99}); print("VOL", volume(cast("cg-mesh3d", box(2,2,2) ||| box(1,1,3))));' exec "$SRAVA" ;;
 kernel_mix_cast_downgrade)
 	# ★ cg→mf downgrade の回帰 (2026-08-12 修正): 既定 cgal で作った MESH を cast("mf-mesh3d",…) で
 	#   manifold が読む (mf_codecs の mf-cg-downgrade codec が MESH→mf-mesh3d を decode_mesh_exact で
 	#   double 化)。以前は "cast: needs a mesh" で失敗していた。3D のみ (2D PLY2 は未対応)。
-	SRAVA_SOURCE='print("VOL", volume(cast("mf-mesh3d", box(2,2,2) ||| box(1,1,3))));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG$MMF"'print("VOL", volume(cast("mf-mesh3d", box(2,2,2) ||| box(1,1,3))));' exec "$SRAVA" ;;
 kernel_mix_cast_downgrade_leaf)
 	# ★ leaf 入力 × cross-module 変換の COLD 回帰 (2026-08-12 修正): computed (union) と違い
 	#   leaf (box 直) は生産者が速く、A_SAVE_BEGIN で解決された outCache ハンドルを消費者が即読む。
 	#   leaf 生産者の ACT_START HIT 判定が焼き込んだ CV_INVALID を A_SAVE_BEGIN の mark_valid が
 	#   癒さないと「cache not valid and no writer」で panic した。★cold 必須 → cache dir を毎回消す。
 	rm -rf "$SRAVA_CACHE_DIR"
-	SRAVA_SOURCE='print("VOL", volume(cast("mf-mesh3d", box(2,2,2))));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG$MMF"'print("VOL", volume(cast("mf-mesh3d", box(2,2,2))));' exec "$SRAVA" ;;
 kernel_mix_cast_downgrade_2d)
 	# ★ 2D downgrade (PLY2→mf-cross2d・2026-08-12 実装) + leaf cold の複合回帰。★cold 必須 (同上)。
 	rm -rf "$SRAVA_CACHE_DIR"
-	SRAVA_SOURCE='print("AREA", area(cast("mf-cross2d", rect(4,3))));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG$MMF"'print("AREA", area(cast("mf-cross2d", rect(4,3))));' exec "$SRAVA" ;;
 kernel_mix_dxf)
 	# ★カーネル混成: mf の 2D (MFC2) を .dxf export (CGAL 固定) が読む = MFC2→Pwh 昇格読みの回帰。
 	rm -f /tmp/srava-kmix-test.dxf
-	SRAVA_SOURCE='module("manifold.so",{priority:99}); export("/tmp/srava-kmix-test.dxf", offset(rect(20,10), 2));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'module("manifold.so",{priority:99}); export("/tmp/srava-kmix-test.dxf", offset(rect(20,10), 2));' exec "$SRAVA" ;;
 kernel_mix_cgalonly)
 	# ★ choice A (2026-08-10・sig 化): cgal 専用 op (manifold が持たない) に **mf mesh** を渡すと、
 	#   decide_executor が cgal の foreign sig ((mf-…)->…) で直接一致させ cgal へ振り、cgal が昇格読みして実行。
 	#   旧 coercion を明示 sig 化した後も、この暗黙クロスカーネルが維持されることの回帰。
 	#   perimeter (2D cgal 専用・rect は mf)・repair (3D cgal 専用・box は mf) を mf 入力で。
-	OUT=$(SRAVA_SOURCE='module("manifold.so",{priority:99});
+	OUT=$(SRAVA_SOURCE="$MCG"'module("manifold.so",{priority:99});
 	var ok = 0;
 	if (perimeter(rect(4,3)) > 13) { if (volume(repair(box(2,2,2))) > 7) { ok = 1; } }
 	print("CGONLY", ok);' "$SRAVA" 2>&1 | grep "^CGONLY")
@@ -918,16 +1149,16 @@ kernel_mix_cgalonly)
 dxf_roundtrip)
 	# DXF export→import round-trip。穴あき額縁が包含 nest で復元 → extrude トンネル付き 16v32f。
 	rm -f /tmp/srava-rt-test.dxf
-	SRAVA_SOURCE='export("/tmp/srava-rt-test.dxf", rect(4,4) --- (rect(2,2) >>> [1,1,0])); var mNVF0 = export(extrude(import("/tmp/srava-rt-test.dxf"), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'export("/tmp/srava-rt-test.dxf", rect(4,4) --- (rect(2,2) >>> [1,1,0])); var mNVF0 = export(extrude(import("/tmp/srava-rt-test.dxf"), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 offset_inset)
 	# 2D インセット(straight skeleton): rect(4,4) を -1 収縮 → 2x2 相当 → extrude 8v12f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(offset(rect(4,4), -1), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(offset(rect(4,4), -1), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 offset_shell)
 	# 肉厚枠: offset(-1) を引いて幅1の枠 → 穴あき → extrude トンネル付き 16v32f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(rect(4,4) --- offset(rect(4,4), -1), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(rect(4,4) --- offset(rect(4,4), -1), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 offset_vanish)
 	# インセット過大 → 領域消滅(空)。extrude すると空メッシュ 0v0f。
-	SRAVA_SOURCE='var mNVF0 = export(extrude(offset(rect(2,2), -5), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(extrude(offset(rect(2,2), -5), 1)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 # ★ 3D offset のテストは **nef へ振り替えた** (#3440 の 2: test/srava_nef.sh の offset モード)。
 #   cgal.so の 3D offset は中身が Nef + 凸分解でモジュール境界の約束①違反だったため移設。
 #   2D offset (straight skeleton) は cgal に残るので上の offset / offset_vanish はここに健在。
@@ -949,12 +1180,12 @@ concat)
 	SRAVA_SOURCE='print(length(concat([1,2,3],[4,5],6)));' exec "$SRAVA" ;;
 prism_axis)
 	# prism/pyramid は Z 軸(高さ)に統一 → prism(n,h,r) ≡ extrude(ngon(n,r),h)。体積一致を検証。
-	SRAVA_SOURCE='print("PEQ=", volume(prism(6,8,2)) == volume(extrude(ngon(6,2),8)));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'print("PEQ=", volume(prism(6,8,2)) == volume(extrude(ngon(6,2),8)));' exec "$SRAVA" ;;
 section)
 	# 3D→2D 断面: 中空箱を z=5 で水平に切る → 外周 10x10 − 穴 6x6 = area 64(even-odd で穴検出)。
 	# section(m,P,N) は 3 要素配列 [ε=0, ε−, ε+]。共面でないので [0] が答え・[1][2] は空集合。
 	# 4 引数形 section(m,P,N,0) は単一の断面(移行と使い分け用)。両方が 64 で一致することも見る。
-	SRAVA_SOURCE='var hollow = box(10,10,10) --- (box(6,6,12) >>> [2,2,-1]);
+	SRAVA_SOURCE="$MCG"'var hollow = box(10,10,10) --- (box(6,6,12) >>> [2,2,-1]);
 	var s = section(hollow, [0,0,5], [0,0,1]);
 	print("SECAREA=", area(s[0]) + area(s[1])*1000 + area(s[2])*1000
 	                + (area(section(hollow, [0,0,5], [0,0,1], 0)) - 64)*1000);' exec "$SRAVA" ;;
@@ -964,12 +1195,12 @@ section_coplanar)
 	#   [1] = 直下の極限 = 2x2 の断面 = 4
 	#   [2] = 直上の極限 = 何もない = 0
 	# 旧実装(slicer + 弦で閉じる)はここでキメラ断面を返していた。
-	SRAVA_SOURCE='var t = section(box(2,2,2), [1,1,2], [0,0,1]);
+	SRAVA_SOURCE="$MCG"'var t = section(box(2,2,2), [1,1,2], [0,0,1]);
 	print("COPL=", area(t[0])*100 + area(t[1])*10 + area(t[2]));' exec "$SRAVA" ;;
 empty_set)
 	# empty2d()/empty3d() = 値としての空集合。{}(fold の中立元)とは別物であることを見る:
 	#   intersection(a, empty3d()) = 空(0) / intersection(a, {}) = a(8)
-	SRAVA_SOURCE='var B = box(2,2,2);
+	SRAVA_SOURCE="$MCG"'var B = box(2,2,2);
 	print("EMPTY=", volume(intersection(B, empty3d()))*100 + volume(union(B, empty3d()))*10
 	              + volume(intersection(B, {})) + area(empty2d())*1000);' exec "$SRAVA" ;;
 control_flow)
@@ -992,28 +1223,28 @@ printval)
 	SRAVA_SOURCE='print(42); print("hello"); print(1.5);' exec "$SRAVA" ;;
 printmesh)
 	# print(mesh): 継続を辿り agent 完了後に pigDataCache のハッシュファイル名(.cache パス)を表示。
-	SRAVA_SOURCE='print(box(1,1,1));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'print(box(1,1,1));' exec "$SRAVA" ;;
 combine_op)
 	# +++ 演算子: 交差を解かず 2 箱を単純合体(viewer 用)= 16v24f(2 連結成分)。
-	SRAVA_SOURCE='var mNVF0 = export(box(2,2,2) +++ box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(box(2,2,2) +++ box(1,1,3)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 combine_fn)
 	# combine(a,b,c): n-ary も二項分解で合体。3 箱 = 24v36f。
-	SRAVA_SOURCE='var mNVF0 = export(combine(box(2,2,2), box(1,1,3), box(3,1,1))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'var mNVF0 = export(combine(box(2,2,2), box(1,1,3), box(3,1,1))); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
 rect_neg)
 	# 負の幅 rect は退化ポリゴン → 2D union でエージェントがクラッシュしていた回帰。
 	# 今は rect が明示エラー(位置付き)で弾く。クラッシュ(agent closed)しないことを確認。
-	SRAVA_SOURCE='export("'$D'/x.svg", rect(260,135) ||| rect(-34,145), "mm");' "$SRAVA" 2>&1 \
-	  | grep -E 'rect: width and height must be positive' | head -1 ;;
+	SRAVA_SOURCE="$MCG"'export("'$D'/x.svg", rect(260,135) ||| rect(-34,145), "mm");' "$SRAVA" 2>&1 \
+	  | grep -E 'rect: width and height must be > 0' | head -1 ;;
 selfint_err)
 	# 接して(tangent)非多様体化した中間結果を次の boolean に渡すと CGAL が segfault していた回帰。
 	# throw_on_self_intersection + is_closed ゲートでクラッシュせず明示エラーになることを担保。
 	# box(x[10,30]) と prism(半径10=x[-10,10]) が x=10 で接触 → 自己交差 → 次の |||sphere で従来クラッシュ。
-	SRAVA_SOURCE='var pitch=32;
+	SRAVA_SOURCE="$MCG"'var pitch=32;
 	export("'$D'/o.stl", box(20,13.5,30)>>>[10,0,0] ||| (prism(pitch,30,10)>>>[0,13.5,0]) ||| (sphere(10,pitch)>>>[0,13.5,0]));' "$SRAVA" 2>&1 | grep -E 'boolean failed' | head -1 ;;
 coplanar_err)
 	# 3D boolean が同一平面の一致で非多様体になる場合、黙って空を返さず明確にエラーにする。
 	# shell を上面 coplanar な box で引く → "boolean failed" エラー。
-	SRAVA_SOURCE='var T=1.5;var H=50;var TM=10;
+	SRAVA_SOURCE="$MCG"'var T=1.5;var H=50;var TM=10;
 	var cover = extrude(rect(13,13)>>>[-T,-T] --- rect(10,10), 2*TM)>>>[0,0,H-TM];
 	var base = (box(13,13,H+T)>>>[-T,-T,-T]) --- cover --- (box(10-2*T,10-2*T,H+TM)>>>[T,T,0]);
 	export("'$D'/o.stl", base --- box(10,10,H-TM));' "$SRAVA" 2>&1 | grep -E 'boolean failed' | head -1 ;;
@@ -1021,29 +1252,30 @@ arrerr_prop)
 	# 配列リテラルの要素がエラー(キー誤り等)のとき、agent の "inline arg parse error" に化けず
 	# 本当の原因(hash key not found)が位置付きで出ることを検証。
 	EF="$D.sra"
-	printf 'var h = {height:5};\nexport("%s/x.off",\n  box(1,1,1) >>> [0, h.hight, 0]);\n' "$D" > "$EF"
+	printf 'module("cgal.so",{}); var h = {height:5};\nexport("%s/x.off",\n  box(1,1,1) >>> [0, h.hight, 0]);\n' "$D" > "$EF"
 	"$SRAVA" "$EF" 2>&1 | grep -E 'hash key not found: "hight"' | head -1 ;;
 idxerrloc)
 	# 範囲外添字・未定義変数のエラーが ERROR[file,line] で位置付き(varref/index に位置を刻む)。
 	EF="$D.sra"
 	printf 'var s = [0,0];\nvar i;\nfor (i=0;i<2;i=i+1){ s[i]=i; }\nprint(s[i]);\n' > "$EF"
-	# ★ #3452: SRAVA_MODULE_ALL=1 の include "module/all.sra"; 合成でソース先頭に 1 行増えるため
-	#   実際の行(4行目)は 5 行目として報告される。
-	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,5\] array index out of range' | head -1 ;;
+	# ★ #3569: all.sra の前置をやめたので **報告される行は実際の行と同じ (4)**。
+	#   ⚠ このケースは幾何 op を使わないので module() も要らない。
+	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,4\] array index out of range' | head -1 ;;
 errloc)
 	# エラーの ERROR[file,line] 表示 + エラー時はキャッシュ掃除をしない(Feature1/2)。
 	# 3 行目の volume(2D) がエラー。ファイル名と行番号、cleanup スキップを検証。
-	# ★ #3452: SRAVA_MODULE_ALL=1 の include 合成で +1 行ずれる(idxerrloc と同じ理由)。
+	# ★ #3569: all.sra の前置をやめたので **行番号はファイルに書いたとおり** (3 行目)。
+	#   module() は 1 行目のコメントへ同居させる (行を増やすと再び「ずれ」が生まれるため)。
 	EF="$D.sra"
-	printf '// comment line 1\nvar a = box(1,1,1);\nexport(volume(rect(2,2)));\n' > "$EF"
-	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,4\]|exit cleanup: skipped' | head -2 ;;
+	printf 'module("cgal.so",{}); // comment line 1\nvar a = box(1,1,1);\nexport(volume(rect(2,2)));\n' > "$EF"
+	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,3\]|exit cleanup: skipped' | head -2 ;;
 assignerr)
 	# 通常代入の右辺がエラーのとき、その変数を一度も使わなくても **代入地点で** 報告される (#3476)。
 	# 修正前はエラー値が黙って束縛され、未使用のまま最後まで走り抜けていた(= REACHED_END が出た)。
-	# ★ #3452: SRAVA_MODULE_ALL=1 の include 合成で +1 行ずれる(errloc と同じ理由)。
+	# ★ #3569: all.sra の前置をやめたので **行番号はファイルに書いたとおり** (2 行目)。
 	EF="$D.sra"
-	printf '// comment line 1\nvar bad = volume(rect(2,2));\nprint("REACHED_END");\n' > "$EF"
-	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,3\].*volume|REACHED_END' | head -2 ;;
+	printf 'module("cgal.so",{}); // comment line 1\nvar bad = volume(rect(2,2));\nprint("REACHED_END");\n' > "$EF"
+	"$SRAVA" "$EF" 2>&1 | grep -E 'ERROR\[.*,2\].*volume|REACHED_END' | head -2 ;;
 solids_one_kernel)
 	# ★ #3474: 基本立体の欠落で **式全体のカーネル選択が裏返る**のを止めた回帰。
 	#   manifold **だけ**を載せて 5 立体すべてが引けることを見る。修正前は pyramid が cgal に
@@ -1063,8 +1295,8 @@ errmodule)
 	[ -n "$KLIST" ] || { echo "ERRMODULE-OK (検査対象のカーネルが 1 つも建っていない)"; exit 0; }
 	for K in $KLIST; do
 		rm -rf "$D-$K"
-		OUT=$(SRAVA_CACHE_DIR="$D-$K" SRAVA_SOURCE="module(\"$K.so\",{priority:99});
-		      print(volume(\"$K\"::cone(-1,2,32)));" "$SRAVA" 2>&1)
+		OUT=$(SRAVA_CACHE_DIR="$D-$K" SRAVA_SOURCE="module(\"$K.so\",{priority:99});module(\"geomutils.so\",{});
+		      print(volume(\"$K\"::cone(-1,2)));" "$SRAVA" 2>&1)
 		echo "$OUT" | grep -qE "ERROR\[[^]]*\] $K/cone: radius must be > 0" || {
 			echo "FAIL: $K のエラーが '$K/cone:' で始まっていない"; echo "$OUT"; OK=0; }
 	done
@@ -1080,13 +1312,23 @@ introspect)
 	OK=1
 	EF="$D.sra"
 	printf 'module("manifold.so",{priority:99});\nmodule("cgal.so",{priority:20});\n' > "$EF"
-	printf 'print("M", modules());\n' >> "$EF"
+	printf 'print("M", modules("priority"));\n' >> "$EF"
+	printf 'print("MA", modules());\n' >> "$EF"
 	printf 'print("T", type_of(box(2,2,2)), type_of(3));\n' >> "$EF"
 	printf 'print("W", which("union","cg-mesh3d"));\n' >> "$EF"
 	OUT=$("$SRAVA" "$EF" 2>&1)
-	# ① modules(): priority 降順・module() の指定が効いている
+	# ① modules("priority"): priority 降順・module() の指定が効いている
+	#   ★ #3555 段5: 引数なしは **名前の配列** になったので、従来の文字列は "priority" を渡して取る。
 	echo "$OUT" | grep -qE '^M manifold:99 cgal:20' || {
-		echo "FAIL: modules() が priority 降順で manifold:99 cgal:20 を返していない"; echo "$OUT"; OK=0; }
+		echo "FAIL: modules(\"priority\") が priority 降順で manifold:99 cgal:20 を返していない"; echo "$OUT"; OK=0; }
+	# ①' modules(): 同じ並びを **名前の配列**で。⚠ 番兵 delayed は出さない (候補になり得ないため)
+	#   ⚠ #3569: 末尾を [],] にした (POSIX の括弧式は **] を先頭に置く**) — 以前は all.sra で
+	#     16 本読んでいたので必ず 3 本目が続いていたが、**読む本数に依存する検査**だった
+	#     (見たいのは並び順であって本数ではない)。
+	echo "$OUT" | grep -qE '^MA \[manifold,cgal[],]' || {
+		echo "FAIL: modules() が名前の配列 [manifold,cgal,...] を返していない"; echo "$OUT"; OK=0; }
+	echo "$OUT" | sed -n 's/^MA //p' | grep -q 'delayed' && {
+		echo "FAIL: modules() の配列に番兵 delayed が出ている"; echo "$OUT"; OK=0; }
 	# ② type_of(): manifold が最優先なので box は mf-mesh3d・スカラは value
 	echo "$OUT" | grep -qE '^T mf-mesh3d value$' || {
 		echo "FAIL: type_of() が 'mf-mesh3d value' を返していない"; echo "$OUT"; OK=0; }
@@ -1096,6 +1338,85 @@ introspect)
 		echo "FAIL: which(union,cg-mesh3d) の先頭が cgal でない"; echo "$OUT"; OK=0; }
 	echo "$OUT" | sed -n 's/^W //p' | grep -q 'manifold:' && {
 		echo "FAIL: which(union,cg-mesh3d) に manifold が残っている (cg を食えないはず)"; echo "$OUT"; OK=0; }
+	# ④ ★ kind_of(): **type_of と軸が違う** (2026-09-21 追加・ひさ設計)。
+	#    type_of = 幾何型の軸 (非幾何はすべて "value" に潰れる) / kind_of = 値の種別の軸。
+	#    ⇒ 同じ値に両方を訊くと直交していることが見える。
+	#    ★★ 幾何が "mesh" ではなく **"cache"** なのは、そのハンドルが持つのが *計算結果への参照*
+	#      であって mesh とは限らないから (点群も B-rep も ref も同じ種別)。何のキャッシュかは type_of。
+	KF="$D-kind.sra"
+	printf 'module("manifold.so",{priority:99});\nmodule("points.so",{});\n' > "$KF"
+	printf 'var s = [];\ns[2] = 1;\n' >> "$KF"
+	printf 'print("K", kind_of(3), kind_of(3.0), kind_of("a"), kind_of([1]), kind_of({"a":1}));\n' >> "$KF"
+	printf 'print("L", kind_of(\\(e){e;}), kind_of(s[0]));\n' >> "$KF"
+	printf 'print("C", kind_of(box(1,1,1)), kind_of(points3d([[0,0,0]])), kind_of(export("%s-k.stl", box(1,1,1))));\n' "$D" >> "$KF"
+	printf 'print("A", kind_of(nverts(points3d([[0,0,0],[1,1,1]]))), kind_of(bbox(points3d([[0,0,0],[1,1,1]]))));\n' >> "$KF"
+	printf 'print("X", kind_of(3), type_of(3), kind_of(box(1,1,1)), type_of(box(1,1,1)));\n' >> "$KF"
+	KOUT=$("$SRAVA" "$KF" 2>&1)
+	echo "$KOUT" | grep -qE '^K int float string array hash$' || {
+		echo "FAIL: kind_of() のスカラ/文字列/配列/ハッシュが 'int float string array hash' でない"; echo "$KOUT"; OK=0; }
+	# ★ null は **配列の穴埋め**で作る (null リテラルはまだ無い)。function はラムダ値。
+	echo "$KOUT" | grep -qE '^L function null$' || {
+		echo "FAIL: kind_of() の関数/null が 'function null' でない"; echo "$KOUT"; OK=0; }
+	# ★★ 3 つとも型は違う (mf-mesh3d / pt-cloud3d / ref) のに **種別は同じ "cache"**。
+	echo "$KOUT" | grep -qE '^C cache cache cache$' || {
+		echo "FAIL: kind_of() が幾何/点群/ref を 'cache cache cache' と答えていない"; echo "$KOUT"; OK=0; }
+	# ★ agent が返す **値** は cache ではなく中身の種別になる (継続が解決される)。
+	echo "$KOUT" | grep -qE '^A int array$' || {
+		echo "FAIL: kind_of(nverts(...)) / kind_of(bbox(...)) が 'int array' でない"; echo "$KOUT"; OK=0; }
+	# ★★ 2 つの軸が直交していること (同じ値に両方訊く)。
+	echo "$KOUT" | grep -qE '^X int value cache mf-mesh3d$' || {
+		echo "FAIL: kind_of と type_of の軸が直交していない ('int value cache mf-mesh3d' を期待)"; echo "$KOUT"; OK=0; }
+	# ⑤ ★★ 内省 op は **compact の結果を読む** (ひさ 2026-09-21)。
+	#    ⚠⚠ 以前はエラーが **作られていたのに読み捨てられて**いた。arg_type_set は is_cache() を
+	#      訊く = pigDataDelay の compact ゲートウェイなので、引数は前から暗黙に compact されて
+	#      いた。にもかかわらず is_error() を誰も訊かないので、エラー値の is_cache() が 0 を返し
+	#      "" → "value" に落ちていた (実測: type_of(nosuchvar) → "value" ・ エラー表示なし ・
+	#      終了コードも正常)。⇒ 「compact していない」のではなく **compact の結果を見ていなかった**。
+	UOUT=$(SRAVA_SOURCE='print("U", type_of(nosuchvar));' "$SRAVA" 2>&1)
+	echo "$UOUT" | grep -q "undefined variable" || {
+		echo "FAIL: 未定義変数に type_of がエラーを出さない"; echo "$UOUT"; OK=0; }
+	echo "$UOUT" | grep -qE '^U value' && {
+		echo "FAIL: 未定義変数に type_of が 'value' と答えた (エラーを読み捨てている)"; echo "$UOUT"; OK=0; }
+	KUOUT=$(SRAVA_SOURCE='print("U", kind_of(nosuchvar));' "$SRAVA" 2>&1)
+	echo "$KUOUT" | grep -q "undefined variable" || {
+		echo "FAIL: 未定義変数に kind_of がエラーを出さない"; echo "$KUOUT"; OK=0; }
+	# ★★ **継続の実値までは辿らない** (ひさ判断 2026-09-21: 案③は今回なし)。
+	#    cdr()->cdr() まで待っても **型の答えは 1 文字も変わらない** (継続の car と
+	#    pigDataCache::type_stamp() は同じ文字列)。得る物が無いのに、内省 op を挿しただけで
+	#    **同期点ができる**代償だけが残るため。
+	#    ⚠ 引き換えの限界を **ここで明示的に釘付けする**: agent の中で失敗した計算には
+	#      *宣言された型*を答える。これは既知の割り切りであって、直したくなったら案③に戻す
+	#      (= この検定が落ちるので、黙って振る舞いが変わることはない)。
+	AF="$D-agentfail.sra"
+	printf 'module("points.so",{});\n' > "$AF"
+	printf 'print("F", type_of(points3d("not an array")));\n' >> "$AF"
+	AOUT=$("$SRAVA" "$AF" 2>&1)
+	echo "$AOUT" | grep -qE '^F pt-cloud3d' || {
+		echo "FAIL: 待たない約束が崩れている (agent の失敗に宣言型 'pt-cloud3d' を答えていない)"
+		echo "$AOUT"; OK=0; }
+	# ⑥ ★★ **warm (キャッシュ HIT) でも同じ答え**であること (ひさ 2026-09-21)。
+	#    ⚠⚠ cold と warm は **別の枝を通る** ので、片方だけ見ても検定にならない:
+	#      cold (MISS) … _front->set_result(継続 pair)  ⇒ pig_is_delayed=真 ⇒ cdr()->cdr() で待つ
+	#      warm (HIT)  … _front->set_result(outCache)   ⇒ pig_is_delayed=偽 ⇒ そのまま型スタンプ
+	#      (値を返す op の HIT は outCache->get_body() = 実値になる)
+	#    ★ 答えが一致するのは stamp_out_cache() が **継続の car と同じ文字列**を載せているから。
+	#      そこが崩れると「cold と warm で routing が変わる」に直結するので、ここで釘を打つ。
+	#    ⚠ 上の $KOUT は **cold** (この検定で最初に走った実行)。以降は同じキャッシュ dir なので warm。
+	#      ⇒ **cold の出力そのものと突き合わせる** (warm 対 warm を比べても何も言えない)。
+	COLD=$(echo "$KOUT" | grep -E '^[KLCAX] ')
+	WOUT=$("$SRAVA" "$KF" 2>&1)
+	WARM=$(echo "$WOUT" | grep -E '^[KLCAX] ')
+	[ -n "$COLD" ] || { echo "FAIL: cold 側の出力が空 (検定が成立していない)"; OK=0; }
+	[ "$COLD" = "$WARM" ] || {
+		echo "FAIL: cold と warm で kind_of/type_of の答えが違う"
+		echo "--- cold ---"; echo "$COLD"; echo "--- warm ---"; echo "$WARM"; OK=0; }
+	# ★ 2 回目が本当に HIT だったか (= warm の枝を通ったか)。
+	#   ⚠ これが無いと「毎回 cold」でもこの検定は緑になる。
+	echo "$WOUT" | grep -qE 'cache: [1-9][0-9]* hit' || {
+		echo "FAIL: 2 回目がキャッシュ HIT になっていない (warm の枝を通っていない)"; echo "$WOUT" | tail -3; OK=0; }
+	# ★ 1 回目が本当に MISS だったか (= cold の枝を通ったか)。両方を確かめて初めて対比になる。
+	echo "$KOUT" | grep -qE 'cache: [0-9]+ hit\(s\), [1-9][0-9]* miss' || {
+		echo "FAIL: 1 回目に MISS が無い (cold の枝を通っていない)"; echo "$KOUT" | tail -3; OK=0; }
 	[ "$OK" = "1" ] && echo "INTROSPECT-OK" ;;
 argarity)
 	# ★ #3474 続き (nreq): 「省略できる引数」は **記述子が言い、既定値は op が入れる**。
@@ -1106,26 +1427,45 @@ argarity)
 	#     パーサはどのモジュールが実行するか知らない (routing は eval 時) ので、
 	#     この違いはパーサ側では表現できない = 記述子に持たせるのが正しい。
 	OK=1
-	run() { rm -rf "$D-aa"; SRAVA_CACHE_DIR="$D-aa" SRAVA_SOURCE="$1" "$SRAVA" 2>&1; }
+	run() { rm -rf "$D-aa"; SRAVA_CACHE_DIR="$D-aa" SRAVA_SOURCE="$MCG $1" "$SRAVA" 2>&1; }
 	# ① 省略形は通る (既定値は op の compute() が入れる)
 	echo "$(run 'print("V", volume(sphere(1)));')" | grep -qE '^V 4\.09' || {
 		echo "FAIL: sphere(1) が通らない (nreq=1 が効いていない)"; OK=0; }
-	echo "$(run 'print("V", volume(tube([[[0,0,0],1],[[2,0,0],1]])));')" | grep -q '^V ' || {
-		echo "FAIL: tube(path) が通らない"; OK=0; }
+	echo "$(run 'print("V", volume(tube_ruled([[[0,0,0],1],[[2,0,0],1]])));')" | grep -q '^V ' || {
+		echo "FAIL: tube_ruled(path) が通らない"; OK=0; }
 	# ② ★ 余分な引数は **黙って捨てず**弾く (この回帰が本題)
-	echo "$(run 'print("V", volume(sphere(1,32,5)));')" | grep -q 'too many arguments' || {
+	#   ★★ #3570 段4: 個数は **routing の成立条件**になったので、文言は
+	#     「どれも受けない」を候補ごとに並べる形 (段0 の列挙診断) に変わった。
+	#     ⇒ 以前の "too many arguments" は *勝った行に対する* 文言で、いまは勝つ行が無い。
+	echo "$(run 'print("V", volume(sphere(1,32,5)));')" \
+		| grep -q "no candidate takes 3 argument(s)" || {
 		echo "FAIL: sphere(1,32,5) の余分な引数が弾かれていない"; OK=0; }
-	echo "$(run 'print("V", volume(tube([[[0,0,0],1],[[2,0,0],1]],16,99)));')" \
-		| grep -q 'too many arguments' || { echo "FAIL: tube の余分な引数が弾かれていない"; OK=0; }
-	# ③ 必須より少なければ弾く (範囲つきの文言)
-	echo "$(run 'print("V", volume(sphere()));')" | grep -q 'expected 1 to 2 argument' || {
+	echo "$(run 'print("V", volume(tube_ruled([[[0,0,0],1],[[2,0,0],1]],16,99)));')" \
+		| grep -q "no candidate takes 3 argument(s)" || { echo "FAIL: tube の余分な引数が弾かれていない"; OK=0; }
+	# ③ 必須より少なければ弾く (候補の取れる範囲を添えて言う)
+	echo "$(run 'print("V", volume(sphere()));')" | grep -q "no candidate takes 0 argument(s)" || {
 		echo "FAIL: sphere() が必須不足として弾かれていない"; OK=0; }
+	echo "$(run 'print("V", volume(sphere()));')" | grep -q "cgal: takes 1 to 2" || {
+		echo "FAIL: 候補の取れる範囲が文言に出ていない"; OK=0; }
 	# ④ ★ 同じ op でも **モジュールで必須個数が違う**: openvdb の sphere は dx 必須
-	echo "$(run 'module("openvdb.so",{priority:99}); print("V", volume(sphere(1)));')" \
-		| grep -q 'expected 2 argument' || {
-		echo "FAIL: openvdb の sphere(1) が dx 必須として弾かれていない"; OK=0; }
-	echo "$(run 'module("openvdb.so",{priority:99}); print("V", volume(sphere(1,0.05)));')" \
-		| grep -q '^V ' || { echo "FAIL: openvdb の sphere(1,0.05) が通らない"; OK=0; }
+	#   ⚠ openvdb が建たない構成 (Cygwin 等) では検査できない。無条件に走らせると赤くなる
+	#     (2026-09-13 に Cygwin で実際に踏んだ)。
+	#   ★★ #3570 段4 で **意味が変わった**: 以前は「dx を忘れたら弾かれる」だったが、
+	#     いまは「**dx を書かなければ openvdb は選ばれない**」。priority 99 で最上位に
+	#     居ても、その個数を受けられない行は候補から外れて隣へ降りる (= オーバーロード解決)。
+	if have openvdb; then
+		#   ① dx 無し → openvdb は候補から外れ、**メッシュ系が答える** (エラーではない)
+		echo "$(run 'module("openvdb.so",{priority:99}); print("T", type_of(sphere(1)));')" \
+			| grep -q '^T cg-mesh3d' || {
+			echo "FAIL: dx 無しの sphere(1) が openvdb から降りてこない"; OK=0; }
+		#   ② dx 付き → openvdb だけが受ける
+		echo "$(run 'module("openvdb.so",{priority:99}); print("T", type_of(sphere(1,0.05)));')" \
+			| grep -q '^T vd-grid3d' || { echo "FAIL: openvdb の sphere(1,0.05) が通らない"; OK=0; }
+		#   ③ ★ **指名すれば降りられない** ⇒ そこは従来どおりエラー
+		echo "$(run 'module("openvdb.so",{}); print("V", volume("openvdb"::sphere(1)));')" \
+			| grep -q "no candidate takes 1 argument(s)" || {
+			echo "FAIL: 指名した openvdb の sphere(1) がエラーにならない"; OK=0; }
+	fi
 	[ "$OK" = "1" ] && echo "ARGARITY-OK" ;;
 empty3dset)
 	# ★ #3474 続き (2026-09-05): empty3d() は **値としての空集合**であって fold の中立元 `{}` では
@@ -1143,7 +1483,7 @@ empty3dset)
 	[ -n "$KLIST" ] || { echo "EMPTY3D-OK (検査対象のカーネルが 1 つも建っていない)"; exit 0; }
 	for K in $KLIST; do
 		rm -rf "$D-$K"
-		OUT=$(SRAVA_CACHE_DIR="$D-$K" SRAVA_SOURCE="module(\"$K.so\",{priority:99});
+		OUT=$(SRAVA_CACHE_DIR="$D-$K" SRAVA_SOURCE="module(\"$K.so\",{priority:99});module(\"geomutils.so\",{});
 		      print(\"E\", volume(empty3d()),
 		            volume(intersection(box(2,2,2), empty3d())),
 		            volume(union(box(2,2,2), empty3d())));" "$SRAVA" 2>&1)
@@ -1151,18 +1491,27 @@ empty3dset)
 			echo "FAIL: $K の empty3d が集合演算になっていない (期待 'E 0 0 8')"; echo "$OUT"; OK=0; }
 	done
 	# openvdb は dx を取る (空でも「どの格子の上の空か」が要る)
+	# ⚠ openvdb が建たない構成では検査できない (2026-09-13 に Cygwin で赤くなった)
+	if have openvdb; then
 	rm -rf "$D-vd"
 	OUT=$(SRAVA_CACHE_DIR="$D-vd" SRAVA_SOURCE='module("openvdb.so",{priority:99});
 	      print("E", volume(empty3d(0.05)),
 	            volume(intersection(box(2,2,2,0.05), empty3d(0.05))));' "$SRAVA" 2>&1)
 	echo "$OUT" | grep -qE '^E 0 0' || {
 		echo "FAIL: openvdb の empty3d(dx) が集合演算になっていない"; echo "$OUT"; OK=0; }
-	# dx を省略したら明示エラー (モジュールごとに必須個数が違うことの確認)
+	# ★★ #3570 段4: dx を省略すると openvdb は **候補から外れる** (エラーではなく、
+	#   他のカーネルが答える)。指名した場合だけ降りられないのでエラーになる。
 	rm -rf "$D-vd2"
-	OUT=$(SRAVA_CACHE_DIR="$D-vd2" SRAVA_SOURCE='module("openvdb.so",{priority:99});
-	      print("E", volume(empty3d()));' "$SRAVA" 2>&1)
-	echo "$OUT" | grep -q 'expected 1 argument' || {
-		echo "FAIL: openvdb の empty3d() が dx 必須として弾かれていない"; echo "$OUT"; OK=0; }
+	OUT=$(SRAVA_CACHE_DIR="$D-vd2" SRAVA_SOURCE='module("cgal.so",{}); module("openvdb.so",{priority:99});
+	      print("T", type_of(empty3d()));' "$SRAVA" 2>&1)
+	echo "$OUT" | grep -q '^T cg-mesh3d' || {
+		echo "FAIL: dx 無しの empty3d() が openvdb から降りてこない"; echo "$OUT"; OK=0; }
+	rm -rf "$D-vd3"
+	OUT=$(SRAVA_CACHE_DIR="$D-vd3" SRAVA_SOURCE='module("openvdb.so",{});
+	      print("E", volume("openvdb"::empty3d()));' "$SRAVA" 2>&1)
+	echo "$OUT" | grep -q "no candidate takes 0 argument(s)" || {
+		echo "FAIL: 指名した openvdb の empty3d() がエラーにならない"; echo "$OUT"; OK=0; }
+	fi
 	[ "$OK" = "1" ] && echo "EMPTY3D-OK" ;;
 vdguard)
 	# ★ #3474 続き (2026-09-05): openvdb 系モジュールの **例外境界**。
@@ -1175,6 +1524,9 @@ vdguard)
 	#   ★ TBB はワーカースレッドで投げられた例外を execute() の呼び出し元で rethrow するので、
 	#     この層に置けば op 内並列からの throw も受けられる。
 	OK=1
+	# ⚠ openvdb 専用のモード。建たない構成 (Cygwin 等) では検査対象が無い
+	#   (2026-09-13 に Cygwin で無条件に走って赤くなった)。
+	have openvdb || { echo "VDGUARD-OK (openvdb が建っていない)"; exit 0; }
 	# dx が小さすぎると openvdb 自身が ArithmeticError を投げる = 自然に throw する経路
 	rm -rf "$D-g"
 	OUT=$(SRAVA_CACHE_DIR="$D-g" SRAVA_SOURCE='module("openvdb.so",{priority:99});
@@ -1194,7 +1546,7 @@ vdguard)
 logic)
 	# 論理演算子 && || ! と優先順位。&&>||(prec1)、比較>&&(prec0)、!>==(notp)。
 	# 値返し op(valid/volume)を論理オペランドにも使える。出力 "L 1 0 1 0 1 0 1 0 1 1"。
-	SRAVA_SOURCE='var m = box(2,2,2) ||| box(1,1,3);
+	SRAVA_SOURCE="$MCG"'var m = box(2,2,2) ||| box(1,1,3);
 	print("L",
 	  1 && 1, 1 && 0,            // 1 0
 	  0 || 3, 0 || 0,            // 1 0
@@ -1207,13 +1559,13 @@ identity)
 	# fold 単位元 {}(空ハッシュ・型分離): union/intersection を if(i==0) なしで畳む。a---{}=a。valid({})=0。
 	# u: 3 つの離れた箱の union = 24。s: 3 つの 10 立方の積 = 800。box---{} = 8。valid({})=0。
 	# 出力 "I 24 800 8 0"。
-	SRAVA_SOURCE='var u = {}; var s = {}; var i;
+	SRAVA_SOURCE="$MCG"'var u = {}; var s = {}; var i;
 	for ( i = 0 ; i < 3 ; i = i + 1 ) { u = u ||| box(2,2,2) >>> [i*3,0,0]; }
 	for ( i = 0 ; i < 3 ; i = i + 1 ) { s = s &&& box(10,10,10) >>> [i,0,0]; }
 	print("I", volume(u), volume(s), volume(box(2,2,2) --- {}), valid({}));' exec "$SRAVA" ;;
 xformbcast)
 	# transform 演算子の配列対応: broadcast / instancing / zip / 単一(従来)。"X 3 3 2 8"
-	SRAVA_SOURCE='var arr = [box(1,1,1),box(1,1,1),box(1,1,1)];
+	SRAVA_SOURCE="$MCG"'var arr = [box(1,1,1),box(1,1,1),box(1,1,1)];
 	print("X",
 	  length(arr >>> [0,0,5]),
 	  volume(union(box(1,1,1) >>> [[0,0,0],[10,0,0],[0,10,0]])),
@@ -1222,7 +1574,7 @@ xformbcast)
 curvelib)
 	# std/curve.sra(arc/bezier/spline/clothoid)。polygon に通して指数表記座標の round-trip も検証。
 	# arc 17点 / bezier 11点 / 扇形の面積>0=1。"CU 17 11 1"
-	SRAVA_SOURCE='include "std/curve.sra";
+	SRAVA_SOURCE="$MCG"'include "std/curve.sra";
 	var s = polygon(concat(arc(0,0,5,0,1.5707963,12), [[0,0]]));
 	print("CU", length(arc(0,0,5,0,PI,16)), length(bezier([[0,0],[0,10],[10,10],[10,0]],10)), area(s) > 0);' exec "$SRAVA" ;;
 arrayops)
@@ -1238,7 +1590,7 @@ mathlib)
 layout)
 	# stdlib(std/layout.sra)を include して row/grid を使う(SRAVA_PATH は CMake が repo/lib に設定)。
 	# row(parts,1) は重ならない → vol = 8+64+1 = 73。grid 3要素。2D row の面積 4+9=13。"LAY 73 3 13"。
-	SRAVA_SOURCE='include "std/layout.sra";
+	SRAVA_SOURCE="$MCG"'include "std/layout.sra";
 	var parts = [box(2,2,2), box(4,4,4), box(1,1,1)];
 	print("LAY",
 	  volume(union(row(parts,1))),
@@ -1258,14 +1610,14 @@ includeerr)
 maptest)
 	# map(array, fn): 1引数 \(m){…} と 2引数 \(m,i){…}。インスタンス化(map+union)も。
 	# 出力 "M [1,8,27] [10,120,230] 3"。
-	SRAVA_SOURCE='print("M",
+	SRAVA_SOURCE="$MCG"'print("M",
 	  map([box(1,1,1),box(2,2,2),box(3,3,3)], \(m){ volume(m); }),
 	  map([10,20,30], \(p,i){ p + i*100; }),
 	  volume(union(map([[0,0,0],[5,0,0],[0,5,0]], \(p){ box(1,1,1) >>> p; }))));' exec "$SRAVA" ;;
 arrayfold)
 	# union(配列): concat で集めた mesh 配列を eval 時に均衡二分木で一気に union(並列・直列 fold 回避)。
 	# 4 つの離れた箱 → vol 32。union(単一 mesh)=その mesh(vol 27)。union([])={}(valid 0)。"AF 32 27 0"。
-	SRAVA_SOURCE='var a = [];
+	SRAVA_SOURCE="$MCG"'var a = [];
 	a = concat(a, box(2,2,2));
 	a = concat(a, box(2,2,2) >>> [5,0,0]);
 	a = concat(a, box(2,2,2) >>> [0,5,0]);
@@ -1275,7 +1627,7 @@ asyncexport)
 	# export_async(非ブロッキング書き出し) + flush(明示バリア)。flush 後の system がファイルを観測可能。
 	# a.stl(export_async→flush で完成)、b.copy(flush 後の system で複製)が両方できれば OK。
 	rm -f "$T/srava-ae-a.stl" "$T/srava-ae-b.copy"
-	SRAVA_SOURCE="export_async(\"$T/srava-ae-a.stl\", box(2,2,2));
+	SRAVA_SOURCE="$MCG export_async(\"$T/srava-ae-a.stl\", box(2,2,2));
 	flush();
 	system(\"cp $T/srava-ae-a.stl $T/srava-ae-b.copy\");" "$SRAVA" >/dev/null 2>&1
 	if test -f "$T/srava-ae-a.stl" && test -f "$T/srava-ae-b.copy"; then echo "ASYNC_OK"; else echo "ASYNC_FAIL"; fi ;;
@@ -1294,11 +1646,11 @@ destructure)
 	#  (1) 基本: [1,2] → a=1,b=2   (2) 余りは無視: [1,2,3] を 2 名で受ける
 	#  (3) 不足はエラー   (4) 右辺が配列でなければエラー
 	#  (5) ★ 1 文なので並列: [volume(..),volume(..)] を同時に起動して束縛できる
-	O1=$(SRAVA_SOURCE='var [a,b] = [1,2]; print("D", a, b);' "$SRAVA" 2>/dev/null | grep "^D ")
-	O2=$(SRAVA_SOURCE='var [a,b] = [1,2,3]; print("D", a, b);' "$SRAVA" 2>/dev/null | grep "^D ")
-	O3=$(SRAVA_SOURCE='var [a,b,c] = [1,2]; print("X");' "$SRAVA" 2>&1 | grep -c "destructuring: need 3")
-	O4=$(SRAVA_SOURCE='var [a] = 5; print("X");' "$SRAVA" 2>&1 | grep -c "needs an array")
-	O5=$(SRAVA_SOURCE='var [x,y] = [volume(box(1,1,1)), volume(box(2,2,2))]; print("D", x, y);' "$SRAVA" 2>/dev/null | grep "^D ")
+	O1=$(SRAVA_SOURCE="$MCG"'var [a,b] = [1,2]; print("D", a, b);' "$SRAVA" 2>/dev/null | grep "^D ")
+	O2=$(SRAVA_SOURCE="$MCG"'var [a,b] = [1,2,3]; print("D", a, b);' "$SRAVA" 2>/dev/null | grep "^D ")
+	O3=$(SRAVA_SOURCE="$MCG"'var [a,b,c] = [1,2]; print("X");' "$SRAVA" 2>&1 | grep -c "destructuring: need 3")
+	O4=$(SRAVA_SOURCE="$MCG"'var [a] = 5; print("X");' "$SRAVA" 2>&1 | grep -c "needs an array")
+	O5=$(SRAVA_SOURCE="$MCG"'var [x,y] = [volume(box(1,1,1)), volume(box(2,2,2))]; print("D", x, y);' "$SRAVA" 2>/dev/null | grep "^D ")
 	if [ "$O1" = "D 1 2" ] && [ "$O2" = "D 1 2" ] && [ "$O3" = "1" ] && [ "$O4" = "1" ] \
 	   && [ "$O5" = "D 1 8" ]; then
 		echo "DESTRUCT_OK"
@@ -1329,7 +1681,7 @@ bbox)
 	# bbox(mesh): 軸平行 AABB を [min隅, max隅] の入れ子配列で返す(2D/3D 多態)。添字 b[i][j] 可。
 	# 3D box(2,3,4)>>>[1,1,1] → min[1,1,1] max[3,4,5]。2D rect(5,2)>>>[10,20] → min[10,20] max[15,22]。
 	# 出力 "B 1 5 10 22"(bb[0][0], bb[1][2], c[0][0], c[1][1])。
-	SRAVA_SOURCE='var bb = bbox(box(2,3,4) >>> [1,1,1]);
+	SRAVA_SOURCE="$MCG"'var bb = bbox(box(2,3,4) >>> [1,1,1]);
 	var c = bbox(rect(5,2) >>> [10,20]);
 	print("B", bb[0][0], bb[1][2], c[0][0], c[1][1]);' exec "$SRAVA" ;;
 identity_export_err)
@@ -1339,14 +1691,14 @@ identity_export_err)
 polygon_dedup)
 	# 曲線を concat した継ぎ目等で出る連続重複頂点を polygon が間引く → 単純多角形(valid=1)。
 	# 重複が残ると非単純(valid=0)になり offset が空になる回帰。出力 "DEDUP 1"。
-	SRAVA_SOURCE='print("DEDUP", valid(polygon([[0,0],[10,0],[10,0],[10,10],[0,10]])));' exec "$SRAVA" ;;
+	SRAVA_SOURCE="$MCG"'print("DEDUP", valid(polygon([[0,0],[10,0],[10,0],[10,10],[0,10]])));' exec "$SRAVA" ;;
 offset_err)
 	# 不正(自己交差=蝶ネクタイ)ポリゴンの offset は黙って空 SVG でなく明示エラー(union 等と一貫)。
-	SRAVA_SOURCE='export("'$D'/o.svg", offset(polygon([[0,0],[10,10],[10,0],[0,10]]), 1));' "$SRAVA" 2>&1 \
+	SRAVA_SOURCE="$MCG"'export("'$D'/o.svg", offset(polygon([[0,0],[10,10],[10,0],[0,10]]), 1));' "$SRAVA" 2>&1 \
 	  | grep -E 'offset failed' | head -1 ;;
 add_lineno)
 	# mesh + mesh(非対応 add)のエラー行は、被演算子の値が作られた行ではなく **+ の式の行**(=3行目)。
-	SRAVA_SOURCE='var m = box(2,2,2);
+	SRAVA_SOURCE="$MCG"'var m = box(2,2,2);
 	var n = box(2,2,2);
 	var bad = m + n;
 	print(bad);' "$SRAVA" 2>&1 | grep -E 'unsupported operation' | head -1 ;;
@@ -1360,14 +1712,14 @@ grid_axes)
 	# grid 軸別 gap([gx,gy]=格子ピッチ) と 3D grid3(層は Z 自動)。
 	# grid 列1の x = c*gx = 1*4 = 4(rect 原点は隅=0)。grid3 1x1 で 2 層 gz=10 → 層1 の z = L*gz = 1*10 = 10。
 	# 出力 "GAXES 4 10"。
-	SRAVA_SOURCE='include "std/layout.sra";
+	SRAVA_SOURCE="$MCG"'include "std/layout.sra";
 	var b = grid([rect(10,10), rect(30,10)], 2, [4, 20]);
 	var c = grid3([box(10,10,10), box(10,10,10)], 1, 1, [3,3,10]);
 	print("GAXES", bbox(b[1])[0][0], bbox(c[1])[0][2]);' exec "$SRAVA" ;;
 dist_bool)
 	# combine(+++)入力へのブール分配則。**重なる**2 箱を束ね(自己交差→分配経路)、slab で積/差。
 	# (a+++b)&&&c = 500+500 = 1000 / (a+++b)---c = 500+500 = 1000。出力 "DIST 1000 1000"。
-	SRAVA_SOURCE='var a = box(10,10,10); var b = box(10,10,10) >>> [5,0,0];
+	SRAVA_SOURCE="$MCG"'var a = box(10,10,10); var b = box(10,10,10) >>> [5,0,0];
 	var c = box(40,5,10);
 	print("DIST", volume((a +++ b) &&& c), volume((a +++ b) --- c));' exec "$SRAVA" ;;
 chain_assign)
@@ -1380,14 +1732,14 @@ chain_assign)
 thin_spots)
 	# 肉厚 SDF。薄板 10x10x0.6(12三角形)→ 閾値2.0・既定45°で12。厚塊 8x8x8 → 0。
 	# cone=5°(ほぼ垂直)だと側面は厚さ方向を見ず10mm読む → 上下4面のみ。出力 "THIN 12 0 4"。
-	SRAVA_SOURCE='var slab = box(10, 10, 0.6); var blk = box(8, 8, 8);
+	SRAVA_SOURCE="$MCG"'var slab = box(10, 10, 0.6); var blk = box(8, 8, 8);
 	print("THIN", length(thin_spots(slab, 2.0)), length(thin_spots(blk, 2.0)), length(thin_spots(slab, 2.0, 25, 5)));' exec "$SRAVA" ;;
 export_formats)
 	# 単位つき出力 AMF/3MF(どちらも自前・依存なし・全環境)。box∪sphere を両形式に書き、
 	# AMF=unit 属性+三角形、3MF=ZIP(PK)先頭 かつ 中の 3dmodel.model に unit=inch を検証。
 	AMF="$T/srava-exp.amf"; TMF="$T/srava-exp.3mf"
 	rm -f "$AMF" "$TMF"
-	SRAVA_SOURCE='var m = box(10,10,10) ||| sphere(6); export("'"$AMF"'", m, "mm"); export("'"$TMF"'", m, "inch");' "$SRAVA" >/dev/null 2>&1
+	SRAVA_SOURCE="$MCG"'var m = box(10,10,10) ||| sphere(6); export("'"$AMF"'", m, "mm"); export("'"$TMF"'", m, "inch");' "$SRAVA" >/dev/null 2>&1
 	amf_ok=0
 	if test -s "$AMF" && grep -q 'unit="millimeter"' "$AMF" && grep -q '<triangle>' "$AMF"; then amf_ok=1; fi
 	tmf_ok=0
@@ -1404,20 +1756,20 @@ export_formats)
 print_mesh_array)
 	# 配列/ハッシュ内の mesh を print → 各要素が解決されキャッシュパス(.cache)が出る
 	# (従来 (delayed . <delayed>) が漏れていた回帰)。delayed が出ず .cache が 2 つ出れば OK。
-	OUT=$(SRAVA_SOURCE='print([box(2,2,2) ||| box(1,1,3), box(1,1,1)]);' "$SRAVA" 2>&1 | grep -v '^\[srava\]')
+	OUT=$(SRAVA_SOURCE="$MCG"'print([box(2,2,2) ||| box(1,1,3), box(1,1,1)]);' "$SRAVA" 2>&1 | grep -v '^\[srava\]')
 	if printf '%s' "$OUT" | grep -q 'delayed'; then echo "PMA_FAIL delayed: $OUT"
 	elif [ "$(printf '%s' "$OUT" | grep -o '\.cache' | wc -l | tr -d '[:space:]')" = "2" ]; then echo "PMA_OK"
 	else echo "PMA_FAIL: $OUT"; fi ;;
 guide_ruler)
 	# std/guide.sra の ruler(細い tube の ものさし)。box(10,10,10) +++ ruler(0,50,10,0.3) →
 	# 主線が x=50 まで(端 cap 0.3)伸びるので bbox x-max ≈ 50.3。出力 "RULER 50.2..."。
-	SRAVA_SOURCE='include "std/guide.sra";
+	SRAVA_SOURCE="$MCG"'include "std/guide.sra";
 	print("RULER", bbox(box(10,10,10) +++ ruler(0, 50, 10, 0.3))[1][0]);' exec "$SRAVA" ;;
 color_export)
 	# color(mesh,c) + combine の per-face 色。COFF に 赤(255 0 0)と青(0 0 255)の両方が出れば OK。
 	OFF="$T/srava-color.off"
 	rm -f "$OFF"
-	SRAVA_SOURCE='var a = color(box(10,10,10), "red");
+	SRAVA_SOURCE="$MCG"'var a = color(box(10,10,10), "red");
 	var b = color(box(10,10,10) >>> [20,0,0], "blue");
 	export("'"$OFF"'", a +++ b);' "$SRAVA" >/dev/null 2>&1
 	if grep -q '255 0 0' "$OFF" && grep -q '0 0 255' "$OFF"; then echo "COLOR_OK"; else echo "COLOR_FAIL"; fi ;;
@@ -1477,7 +1829,7 @@ route_no_sig)
 	#   撤去前は「その op 名を実装するモジュールが 1 つだけならそこへ直送」という経路があり、
 	#   d3 まで届いてから読めずに落ちていた (原因が sig の書き漏らしだと分からないエラーになる)。
 	#   型でなく **op 名**で振る概念は srava の設計に無い (ひさ指摘) ので撤去した。
-	OUT=$(SRAVA_SOURCE='
+	OUT=$(SRAVA_SOURCE="$MCG"'
 	module("d3.so");
 	print("N", d3_nfaces(box(2,2,2)));' "$SRAVA" 2>&1)
 	if echo "$OUT" | grep -q "^N " ; then
@@ -1625,8 +1977,405 @@ decode_refusal_reason)
 	#   ⚠ 2026-09-06: 以前ここは **稜だけで接する 2 つの箱** (非 2-多様体) を使っていたが、
 	#     nef が非 2-多様体でも境界を併記するようになったので **読めるようになった** =
 	#     拒否の題材にならない。境界表現がそもそも取れない値 = **非有界** (complement) に替えた。
-	SRAVA_SOURCE='module("nef_hybrid.so",{priority:100});
+	SRAVA_SOURCE="$MCG$MMF"'module("nef_hybrid.so",{priority:100});
 	print("vol", volume(cast("mf-mesh3d", complement(box(1,1,1)))));' exec "$SRAVA" ;;
+# ★★ #3482 段 1: try/catch 文 — 直列系のエラーを捕まえる。
+#   ⚠ この段で捕まるのは **評価チェーンを上方伝播するエラー**だけ。async 本体のように
+#     planner の集約 (set_agentError / drain_async) へ落ちるものは **まだ捕まらない** (段 2〜4)。
+trycatch)
+	# ★ 値で検定する (print の素通しでは「error() が何も返していなくても緑」になる):
+	#   e1 … 1 件目の error() は **文言** (0 ではない)
+	#   e2 … 2 件目は **0** (段 1 = 待つ相手が居ないので即終わる)
+	#   tail … エラーの **後ろの文は走らない** (statement1 は打ち切られる)
+	#   ran … 正常系では catch は **呼ばれない**。かつ try/catch の後続の文が走る
+	SRAVA_SOURCE='var tail = 0; var e1 = 0; var e2 = 1;
+	try { print(nosuchvar); tail = 1; } catch { e1 = error(); e2 = error(); }
+	var ran = 0; try { ran = 1; } catch { ran = 2; }
+	if ( e1 != 0 ) { if ( e2 == 0 ) { if ( tail == 0 ) { if ( ran == 1 ) {
+		print("TRYCATCH_OK");
+	} } } }' exec "$SRAVA" ;;
+trycatch_control)
+	# コントロール系 (break / continue / return) は **捕まえずそのまま抜ける** —
+	# try が持つのは制御の分岐ではなく「{} で囲った範囲」だから。
+	# ⚠ **catch を付けた形で見る** — catch が無いと、コントロール系を握り潰す実装でも
+	#   「発生したものをそのまま戻り値にする」経路で同じ値が返り、区別がつかない
+	#   (2026-09-18 の負の対照で発覚。caught / f の戻り値が本当の判別点)。
+	SRAVA_SOURCE='var i = 0; var hit = 0; var caught = 0;
+	while ( i < 5 ) { i = i + 1; try { if ( i == 3 ) { break; } hit = hit + 1; } catch { caught = 1; } }
+	var f = \(x){ try { return x * 2; } catch { return 0; } };
+	if ( i == 3 ) { if ( hit == 2 ) { if ( caught == 0 ) { if ( f(5) == 10 ) {
+		print("TRYCTRL_OK");
+	} } } }' exec "$SRAVA" ;;
+trycatch_nocatch)
+	# catch 無し = 発生したエラーをそのまま戻り値にする (握り潰さない)。
+	OUT=$(SRAVA_SOURCE='try { print(nosuchvar); } print("NOT_REACHED");' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" != "0" ] && echo "$OUT" | grep -q "undefined variable" && ! echo "$OUT" | grep -q "NOT_REACHED"; then
+		echo "TRYNOCATCH_OK"
+	else
+		echo "TRYNOCATCH_FAIL: rc=$RC out=$OUT"
+	fi ;;
+trycatch_static)
+	# ★ error() は catch 本体の中だけ。外は **パース時に**エラー (実行前に分かる)。
+	# ⚠ 「エラーになった」だけでは検定にならない — 実行時の網も同じことを言うので、
+	#   静的検査を外しても緑のままだった (2026-09-18 に負の対照で発覚)。
+	#   ⇒ **前の文が 1 つも走っていない** ことと、**パース時の文言** の 2 つで見る。
+	OUT=$(SRAVA_SOURCE='print("STATIC_RAN"); print(error());' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" != "0" ] && echo "$OUT" | grep -q "only valid inside a catch block" \
+	   && ! echo "$OUT" | grep -q "STATIC_RAN" && ! echo "$OUT" | grep -q "at run time"; then
+		echo "TRYSTATIC_OK"
+	else
+		echo "TRYSTATIC_FAIL: rc=$RC out=$OUT"
+	fi ;;
+trycatch_dynamic)
+	# ★★ try の帰属は **動的**: ヘルパ lambda を try の外で定義して中で呼ぶのが普通の書き方
+	#   (レキシカルだとここが効かない)。catch 内で定義した lambda の error() も呼び出し元の
+	#   try に届く (pigfApply が caller env から tryPtr を引き継ぐ)。
+	SRAVA_SOURCE='var h = \(x){ print(nosuchvar); };
+	try { h(1); } catch { var g = \(x){ return error(); }; var m = g(0);
+	                      if ( m != 0 ) { print("TRYDYN_OK"); } }' exec "$SRAVA" ;;
+trycatch_escape)
+	# catch の外へ持ち出した lambda の error() は **実行時**に弾く (構文では見切れない経路)。
+	# ★ 段 3 以降は「try が無い」ではなく **catch を持たない try** (= 根の try) に当たるので弾かれる。
+	OUT=$(SRAVA_SOURCE='var g; try { print(nosuchvar); } catch { g = \(x){ return error(); }; }
+	print(g(0));' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" != "0" ] && echo "$OUT" | grep -q "no enclosing catch block at run time"; then
+		echo "TRYESCAPE_OK"
+	else
+		echo "TRYESCAPE_FAIL: rc=$RC out=$OUT"
+	fi ;;
+trycatch_hash)
+	# ★ error() は **中身のハッシュ** を返す (message / class / file / line の 4 鍵)。
+	#   ⚠ 値を 1 つずつ見る — 「ハッシュが返った」だけでは中身が空でも緑になる。
+	#   class は実物に合わせる: 未定義変数は既存コードで PE_FATAL なので "fatal"。
+	# ⚠ 行番号は **絶対値で書かない** — この harness は SRAVA_MODULE_ALL=1 で
+	#   `include "module/all.sra";` を実ソースの前に合成するので 1 行ずれる。
+	#   **連続する 2 行で起きた 2 つのエラーの差が 1** を見れば、前置きに依らず「行が
+	#   落ちた文を指している」ことを検定できる。
+	SRAVA_SOURCE='var ok = 0; var l1 = 0; var l2 = 0; var e1 = 0;
+	try { print(nosuchvar); } catch { e1 = error(); l1 = e1.line; }
+	try { print(alsobad); }  catch { l2 = error().line; }
+	if ( e1.message == "undefined variable: nosuchvar" ) { if ( e1.class == "fatal" ) {
+		if ( e1.file != "" ) { if ( l1 > 0 ) { if ( l2 - l1 == 1 ) { ok = 1; } } } } }
+	if ( ok == 1 ) { print("TRYHASH_OK"); }' exec "$SRAVA" ;;
+trycatch_throw)
+	# ★★ 「try { s } は try { s } catch { throw error(); } と同じ意味」を **出力の一致で**見る。
+	#   ⚠ どちらも失敗するので、rc と表示の両方を突き合わせる (rc だけだと文言の取り違えを見逃す)。
+	# ⚠ throw を **落ちた文と違う行**に置く — 同じ行だと、位置の復元が壊れていても
+	#   (throw の位置が出ても) 表示が一致してしまい検定にならない (負の対照で発覚)。
+	A=$(SRAVA_SOURCE='try { print(nosuchvar); }' "$SRAVA" 2>&1 | grep '^\*\*\*')
+	B=$(SRAVA_SOURCE='try { print(nosuchvar); } catch {
+		throw error();
+	}' "$SRAVA" 2>&1 | grep '^\*\*\*')
+	# 復元できない値を渡したら「復元できない」というエラーになる (黙って無視しない)。
+	C=$(SRAVA_SOURCE='try { print(nosuchvar); } catch { error(); throw error(); }' "$SRAVA" 2>&1)
+	if [ -n "$A" ] && [ "$A" = "$B" ] && echo "$C" | grep -q "cannot rebuild an error"; then
+		echo "TRYTHROW_OK"
+	else
+		echo "TRYTHROW_FAIL: A=[$A] B=[$B] C=[$C]"
+	fi ;;
+trycatch_barrier)
+	# ★★ #3482 段 2: try は **自分のスコープで起動した agent を見送る** (待ちリスト)。
+	#   同じ検査を try の **中** と **後** で 1 本のプログラムの中で行う:
+	#     中 = まだ書けていない (pre != 0) / 後 = 書けている (post == 0)
+	#   ⇒ 「try が待った」ことだけが両者の差になる (別プロセスの実行時間を比べない)。
+	#   ⚠ pre は「まだ終わっていない」= 重い op であることに依存する。反復して安定を確かめてから
+	#     採用した (軽い op にすると pre が 0 になり嘘の赤になる)。
+	rm -f "$T/srava-tc-barrier.stl"
+	SRAVA_SOURCE='include "module/all.sra";
+	var pre = 0;
+	try {
+		async { export("'"$T"'/srava-tc-barrier.stl", sphere(3,96)); }
+		pre = system("test -f '"$T"'/srava-tc-barrier.stl");
+	}
+	var post = system("test -f '"$T"'/srava-tc-barrier.stl");
+	if ( pre != 0 ) { if ( post == 0 ) { print("TRYBARRIER_OK"); } }
+	if ( pre == 0 ) { print("TRYBARRIER_SKIPPED: agent が速すぎて中でも書けていた"); }' exec "$SRAVA" ;;
+trycatch_destroyop)
+	# ★★ #3482 段 3: **根の見えない try** が入ったので、destroy() は **トップレベルでも効く**
+	#   (送り先 = 根の待ちリスト)。何も走っていなければ 0 を返して正常終了する。
+	#   ⇒ 「try の中か外か」で振る舞いが変わる場所が 1 つ減った。
+	OUT=$(SRAVA_SOURCE='print("N=", destroy());' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" = "0" ] && echo "$OUT" | grep -q "N= 0" && ! echo "$OUT" | grep -q "no enclosing"; then
+		echo "TRYDESTROYOP_OK"
+	else
+		echo "TRYDESTROYOP_FAIL: rc=$RC out=$OUT"
+	fi ;;
+trycatch_derived)
+	# ★★ #3482: **try が畳んだ agent の失敗は「畳まれた跡」(PE_DERIVED)** で、
+	#   planner の報告・終了コードから外れる。`catch { destroy(); }` が rc=1 にならないこと。
+	#   ⚠ 「エラーを全部握り潰した」でも同じ緑になるので、**本物の失敗が今も rc!=0 で
+	#     報告されること**を同じテストで併せて見る (片側だけでは検定にならない)。
+	rm -f "$T/srava-tc-der.stl"
+	A=$(SRAVA_SOURCE='include "module/all.sra";
+	try { async { export("'"$T"'/srava-tc-der.stl", sphere(3,96)); } print(nosuchvar); }
+	catch { destroy(); }
+	print("A_DONE");' "$SRAVA" 2>&1); RA=$?
+	B=$(SRAVA_SOURCE='include "module/all.sra";
+	try { async { export("/nonexistent-dir-xyz/der.stl", box(1,1,1)); } print("ok"); }
+	print("B_DONE");' "$SRAVA" 2>&1); RB=$?
+	if [ "$RA" = "0" ] && echo "$A" | grep -q "A_DONE" && ! echo "$A" | grep -q "aborted" \
+	   && [ "$RB" != "0" ] && echo "$B" | grep -q "cannot write"; then
+		echo "TRYDERIVED_OK"
+	else
+		echo "TRYDERIVED_FAIL: rcA=$RA rcB=$RB A=[$A] B=[$B]"
+	fi ;;
+trycatch_async)
+	# ★★ #3482 段 4: **async 本体の失敗が try/catch で捕まる**。
+	#   async は値を直列に観測する者が居ないので、待ちリスト経由でしか try に届かない
+	#   (ptsFireAndForget が生成時に登録され、失敗を try へ渡す)。
+	#   ⚠ 3 つ揃えて見る — ①だけだと「握り潰した」実装が緑で通る:
+	#     ① catch あり     … 捕まって rc=0 で続行する
+	#     ② catch 無し     … そのまま伝播して rc!=0 (握り潰していない)
+	#     ③ トップレベル   … 根の見えない try の下 = **従来どおり** planner が報告 rc!=0
+	A=$(SRAVA_SOURCE='include "module/all.sra";
+	try { async { export("/nonexistent-dir-xyz/tca.stl", box(1,1,1)); } }
+	catch { print("CAUGHT=", error().message); }
+	print("A_DONE");' "$SRAVA" 2>&1); RA=$?
+	B=$(SRAVA_SOURCE='include "module/all.sra";
+	try { async { export("/nonexistent-dir-xyz/tcb.stl", box(1,1,1)); } }
+	print("B_DONE");' "$SRAVA" 2>&1); RB=$?
+	C=$(SRAVA_SOURCE='include "module/all.sra";
+	async { export("/nonexistent-dir-xyz/tcc.stl", box(1,1,1)); }
+	print("C_DONE");' "$SRAVA" 2>&1); RC2=$?
+	if [ "$RA" = "0" ] && echo "$A" | grep -q "CAUGHT=.*cannot write" && echo "$A" | grep -q "A_DONE" \
+	   && [ "$RB" != "0" ] && echo "$B" | grep -q "cannot write" \
+	   && [ "$RC2" != "0" ] && echo "$C" | grep -q "cannot write"; then
+		echo "TRYASYNC_OK"
+	else
+		echo "TRYASYNC_FAIL: rcA=$RA rcB=$RB rcC=$RC2 A=[$A] B=[$B] C=[$C]"
+	fi ;;
+trycatch_flush)
+	# ★★ #3482: flush() は **その地点を囲む try の待ちリストが空になるまで**待つバリア。
+	#   statement1 の中 / catch の中 / トップレベル (根の見えない try) の 3 か所で同じ意味。
+	#   ⚠ 判定は 1 本のプログラムの中で「flush の **前** はまだ書けていない / **後** は書けている」
+	#     を見る (別プロセスの実行時間を比べない)。barrier テストと同じ型。
+	#
+	# ⚠⚠ **「まだ書けていない」を async の速さに賭けない** (ひさ 2026-09-19)。
+	#   2026-09-19 にフル ctest (-j8) で B だけ `pre` が 0 (= もう書けていた) になり赤くなった:
+	#       A=[IN= 256 0]  B=[IN= 0 0]  C=[IN= 256 0]
+	#   A が先に sphere(3,96) を計算してキャッシュを温めるので B はほぼ即完了し、そこへ
+	#   system() の fork/exec が重なると **async が先に勝つ**。⚠ 単独 10 回・CPU 負荷つき
+	#   10 回では再現せず、*フル走行の I/O + プロセス競合*のときだけ出た
+	#   (= 「負荷をかければ出る」形でもないので、見つけても再現に手間がかかる型)。
+	#   ⇒ async の **頭に system("sleep 5") を置いて**、測る瞬間に終わっていないことを
+	#     *こちらで決める*。flush は待つので後半の 0 は変わらない。
+	#   ★ 3 枝あるので実行時間は 15 秒ほど増える (TIMEOUT 90 に収まる)。
+	rm -f "$T"/srava-tcf1.stl "$T"/srava-tcf2.stl "$T"/srava-tcf3.stl
+	A=$(SRAVA_SOURCE='include "module/all.sra";
+	try { async { system("sleep 5"); export("'"$T"'/srava-tcf1.stl", sphere(3,96)); }
+	      var pre = system("test -f '"$T"'/srava-tcf1.stl");
+	      flush();
+	      print("IN=", pre, system("test -f '"$T"'/srava-tcf1.stl")); }' "$SRAVA" 2>&1 | grep '^IN=')
+	B=$(SRAVA_SOURCE='include "module/all.sra";
+	try { async { system("sleep 5"); export("'"$T"'/srava-tcf2.stl", sphere(3,96)); } print(nosuchvar); }
+	catch { var pre = system("test -f '"$T"'/srava-tcf2.stl"); flush();
+	        print("IN=", pre, system("test -f '"$T"'/srava-tcf2.stl")); }' "$SRAVA" 2>&1 | grep '^IN=')
+	C=$(SRAVA_SOURCE='include "module/all.sra";
+	async { system("sleep 5"); export("'"$T"'/srava-tcf3.stl", sphere(3,96)); }
+	var pre = system("test -f '"$T"'/srava-tcf3.stl");
+	flush();
+	print("IN=", pre, system("test -f '"$T"'/srava-tcf3.stl"));' "$SRAVA" 2>&1 | grep '^IN=')
+	if [ "$A" = "IN= 256 0" ] && [ "$B" = "IN= 256 0" ] && [ "$C" = "IN= 256 0" ]; then
+		echo "TRYFLUSH_OK"
+	else
+		echo "TRYFLUSH_FAIL: A=[$A] B=[$B] C=[$C]"
+	fi ;;
+agent_fail_name)
+	# ★★ #3482: **agent が途中で死んだときの文言にも module/op を前置きする** (#3475 の規約に揃える)。
+	#   位置 (ERROR[file,line]) は前から付いていたが、汎用文言だと「どのカーネルのどの op か」が
+	#   落ちていた (§4.1 の「どの op が壊れたか分からない」はこの経路のこと)。
+	#   ⚠ 決定的に起こすため **agent を「すぐ終わる実行体」に差し替える** (kill の timing に頼らない)。
+	#   ⚠⚠ **/bin/true を直書きしてはいけない** — macOS に /bin/true は無い (/usr/bin/true)。
+	#     直書きしていた間、mac では *起動そのものが失敗* して別の枝 ("agent exited N") に入り、
+	#     そちらは前置きが付いていなかった (2026-09-19 に発見 ⇒ 下の ② を足した)。
+	TRUEBIN=""
+	for c in /bin/true /usr/bin/true; do [ -x "$c" ] && TRUEBIN="$c" && break; done
+	[ -n "$TRUEBIN" ] || { echo "AGENTFAILNAME_FAIL: true(1) が見つからない"; exit 0; }
+	# ---- ① 握手前に **閉じた** 側 (exit 0 で終わる実行体)
+	OUT=$(SRAVA_AGENT="$TRUEBIN" SRAVA_SOURCE='include "module/all.sra";
+	print("V=", volume(box(1,1,1)));' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" = "0" ] || ! echo "$OUT" | grep -qE 'cgal/box: agent closed'; then
+		echo "AGENTFAILNAME_FAIL: (閉じた側) rc=$RC out=$OUT"; exit 0
+	fi
+	# ---- ② ★ 非 0 で **終了した** 側。mediator が status から理由を組み立てる経路で、
+	#      2026-09-19 まで **module/op の前置きが落ちていた** (#3482 a590bcf が汎用文言だけを
+	#      覆っていた)。⇒ 「どのカーネルのどの op が壊れたか」が読めることを固定する。
+	# ⚠ Windows(native srava): CreateProcess は **shebang を解釈しない**ので .sh を agent に
+	#   据えると「起動できない」側に倒れ、srava はそれを *fork failed (process limit)* と
+	#   誤って報告する (この検定が見たい「非 0 終了」の経路に入らない)。
+	#   ⇒ MSYS では .cmd を置く。Linux/mac は従来どおり .sh。
+	if command -v cygpath >/dev/null 2>&1; then
+		FAKE="$T/srava-fakeagent-$$.cmd"
+		printf '@echo off\r\nexit /b 7\r\n' > "$FAKE"
+	else
+		FAKE="$T/srava-fakeagent-$$.sh"
+		printf '#!/bin/sh\nexit 7\n' > "$FAKE"; chmod +x "$FAKE"
+	fi
+	OUT=$(SRAVA_AGENT="$FAKE" SRAVA_SOURCE='include "module/all.sra";
+	print("V=", volume(box(1,1,1)));' "$SRAVA" 2>&1); RC=$?
+	rm -f "$FAKE"
+	if [ "$RC" = "0" ] || ! echo "$OUT" | grep -qE 'cgal/box: .*agent exited 7'; then
+		echo "AGENTFAILNAME_FAIL: (非 0 終了の側) rc=$RC out=$OUT"; exit 0
+	fi
+	echo "AGENTFAILNAME_OK" ;;
+trycatch_tree_destroy)
+	# ★★ #3482 (ひさ 2026-09-19): **撤収は pigData の木を通って伝播する**。
+	#   題材に @system()@ を使うのが肝 — これは **待ちリストに載らない** (agent でも async でもない)
+	#   ので、木を通らなければ絶対に届かない。内側の try の中・async の中に置く。
+	#   ⚠ 判定は **状態** (マーカーファイルの有無) で行う。wall 時間では共有機体で当てにならない。
+	#   ★ 陽性対照つき: destroy しない同じプログラムでは **マーカーが出来る**ことも見る
+	#     (出来なければマーカーの仕掛け自体が壊れており、「無い」は何の証拠にもならない)。
+	# ⚠⚠ 2026-09-23 に **2 つの穴**が実測で見つかったので形を変えた (ひさ指摘の競合を含む)。
+	#
+	#  穴1: system() に **シェルの文法 (';')** を渡していた。MinGW の ts2System は sh -c 非対応で、
+	#       pigfSystem は '#' 前置の **直接 exec** に落とす (argv は空白区切り・pigfSystem.cpp:110)。
+	#       ⇒ Windows では子が一度も走らず、**陽性対照 b すら出ない** = 検定が死ぬ。
+	#       ⇒ 子は **<sh> <helper> の 2 トークン**で起動する (Linux/mac も同じ形で揃える)。
+	#
+	#  穴2: ★ **volume(box(1,1,1)) が速すぎて、async の system() が起動する前に例外が飛ぶ**。
+	#       実測 (Windows n=3): 待ち無しだと a は **start すら付かない** (= 起動前キャンセル)。
+	#       それでも b は起動するので a/b の差は出て、テストは **緑になってしまう**。
+	#       つまり「走っている子を撃ち落とした」ではなく「起動前に畳んだ」を見て OK と言っていた。
+	#       ⇒ 例外の前に **同期の system("sleep 1")** を挟み、子が起動済みであることを保証する。
+	#       ⇒ 判定にも **start マーカー**を入れ、「起動を確認したうえで done が無い」を要求する。
+	#         (start を見ないと、起動しなかっただけの a=no を撃墜と誤読する)
+	#       実測 (Windows n=3): 待ちを挟むと a は **start=yes done=no** = 走っている子を止めている。
+	rm -f "$T/srava-tcmark-a" "$T/srava-tcmark-b" "$T/srava-tcstart-a" "$T/srava-tcstart-b"
+	TCSH=$(command -v sh)
+	for m in a b; do
+		printf '#!/bin/sh\ntouch %s/srava-tcstart-%s\nsleep 3\ntouch %s/srava-tcmark-%s\n' \
+			"$T" "$m" "$T" "$m" > "$T/srava-tchelp-$m.sh"
+		chmod +x "$T/srava-tchelp-$m.sh"
+	done
+	command -v cygpath >/dev/null 2>&1 && TCSH=$(cygpath -m "$TCSH")
+	SRAVA_SOURCE='include "module/all.sra";
+	try {
+		async { try { system("'"$TCSH"' '"$T"'/srava-tchelp-a.sh"); } }
+		print("sync=", volume(box(1,1,1)));
+		system("sleep 1");
+		print(nosuchvar);
+	}
+	catch { destroy(); }' "$SRAVA" >/dev/null 2>&1
+	SRAVA_SOURCE='include "module/all.sra";
+	try {
+		async { try { system("'"$TCSH"' '"$T"'/srava-tchelp-b.sh"); } }
+		print("sync=", volume(box(1,1,1)));
+		system("sleep 1");
+		print(nosuchvar);
+	}
+	catch { print("no-destroy"); }' "$SRAVA" >/dev/null 2>&1
+	# 陽性対照の子は 3 秒スリープしてから done を刻む。取りこぼさないよう上限つきで待つ
+	# (固定 sleep にしない = 共有機体で遅いときに偽の赤を出さないため)。
+	i=0; while [ ! -f "$T/srava-tcmark-b" ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
+	tcv() { test -f "$1" && echo yes || echo no; }
+	if [ -f "$T/srava-tcstart-a" ] && [ ! -f "$T/srava-tcmark-a" ] &&
+	   [ -f "$T/srava-tcstart-b" ] && [ -f "$T/srava-tcmark-b" ]; then
+		echo "TRYTREEDESTROY_OK"
+	else
+		echo "TRYTREEDESTROY_FAIL: a(start=$(tcv "$T/srava-tcstart-a") done=$(tcv "$T/srava-tcmark-a")) b(start=$(tcv "$T/srava-tcstart-b") done=$(tcv "$T/srava-tcmark-b"))"
+	fi ;;
+try_relay)
+	# ★★ #3482 (ひさ 2026-09-19): **env を作る場所は全部 try をリレーする**という不変条件。
+	#   引けなかったら pigfAgent / ptsFireAndForget は **明示エラー**にする (黙って根へ落とさない)。
+	#   ⇒ 「考えられるシーケンス制御 op を一通り回して、エラーが出ないこと」で不変条件を守る。
+	#   ⚠ 各構文の中で **agent を起こす** のが肝 (agent の INI が登録するので、リレーが切れていれば
+	#     そこで必ずエラーになる)。構文だけ通しても検定にならない。
+	OUT=$(SRAVA_SOURCE='include "module/all.sra";
+	var n = 0;
+	n = n + volume(box(1,1,1));                                  // トップレベル (根の try)
+	{ n = n + volume(box(2,1,1)); }                              // ブロック = sequence
+	if ( 1 ) { n = n + volume(box(3,1,1)); } else { n = n + 1; }  // if
+	var i = 0;
+	while ( i < 2 ) { n = n + volume(box(4,1,1)); i = i + 1; }    // while
+	for ( var k = 0; k < 2; k = k + 1 ) { n = n + volume(box(5,1,1)); }   // for
+	var f = \(x){ return volume(box(x,1,1)); };
+	n = n + f(6);                                                // apply (lambda)
+	var r = map([7,8], \(x){ volume(box(x,1,1)); });             // map
+	n = n + r[0] + r[1];
+	async { var a1 = volume(box(9,1,1)); }                        // async
+	async { var t = volume(box(10,1,1)); sync: print("SY=", t); } // async + sync:
+	n = n + volume(gate(box(11,1,1), volume(box(12,1,1))));       // gate
+	try { n = n + volume(box(13,1,1)); } catch { n = n + 1000; }  // try 本体
+	try { print(nosuchvar); } catch { n = n + volume(box(14,1,1)); }      // catch 本体
+	try { try { n = n + volume(box(15,1,1)); } } catch { n = n + 1000; } // 入れ子の try
+	flush();
+	print("RELAY n=", n);' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" = "0" ] && echo "$OUT" | grep -q "RELAY n=" \
+	   && ! echo "$OUT" | grep -q "no enclosing try"; then
+		echo "TRYRELAY_OK"
+	else
+		echo "TRYRELAY_FAIL: rc=$RC out=$OUT"
+	fi ;;
+agent_error_list)
+	# ★★ #3482 の上位互換の守り: **try を書かないプログラム**で複数の agent が失敗したとき、
+	#   従来どおり「主エラー + 末尾で other agents reported: に列挙」になること。
+	#   ⚠ 台帳は根の見えない try へ移したので、この経路が生きていることを **形**で押さえる
+	#     (2026-09-19 に手で変更前ビルドと並べて一致を確認したが、テストが無かった)。
+	#   ★ 3 本のうち box が 2 本・cylinder が 1 本。box の 2 本目は **文言で重複排除**されるので
+	#     列挙に出るのは cylinder だけ = 「全部出す」でも「1 件も出さない」でもないことが見える。
+	OUT=$(SRAVA_SOURCE='include "module/all.sra";
+	var r = [volume(box(-1,-1,-1)), volume(box(-2,-2,-2)), volume(cylinder(-3,-3))];
+	print("R=", r);' "$SRAVA" 2>&1); RC=$?
+	if [ "$RC" != "0" ] \
+	   && echo "$OUT" | grep -q 'cgal/box: sizes must be > 0' \
+	   && echo "$OUT" | grep -q 'other agents reported' \
+	   && echo "$OUT" | grep -q 'cgal/cylinder'; then
+		echo "AGENTERRLIST_OK"
+	else
+		echo "AGENTERRLIST_FAIL: rc=$RC out=$OUT"
+	fi ;;
+trycatch_multi)
+	# ★★ #3482 §2-A: catch の中で error() を **何度でも呼べる** — 発生した順に 1 件ずつ返し、
+	#   尽きたら 0。async を 2 本失敗させて 3 回呼ぶ。
+	#   ★ 2 件目は **error() が待って**取れる (1 件目が来た時点では 2 本目はまだ失敗していない)。
+	#     ⇒ 「待ちを担うのは error()」も同時に検定している。
+	#   ⚠ **順序は当てにしない** — 2 本の async の失敗順は timing で決まる (手元では同じ順だったが
+	#     原理的な保証は無い)。⇒ 「2 件が互いに違い、集合として期待の 2 件と一致し、
+	#     3 回目が 0」で見る。順序まで縛ると偽の赤を作る。
+	OUT=$(SRAVA_SOURCE='include "module/all.sra";
+	var m1 = 0; var m2 = 0; var m3 = 1;
+	try {
+		async { export("/nope-a/1.stl", box(1,1,1)); }
+		async { export("/nope-b/2.stl", box(2,2,2)); }
+	}
+	catch { m1 = error().message; m2 = error().message; m3 = error(); }
+	print("M1=[", m1, "]"); print("M2=[", m2, "]"); print("M3=[", m3, "]");' "$SRAVA" 2>&1)
+	M1=$(echo "$OUT" | sed -n 's/^M1=\[ \(.*\) \]$/\1/p')
+	M2=$(echo "$OUT" | sed -n 's/^M2=\[ \(.*\) \]$/\1/p')
+	M3=$(echo "$OUT" | sed -n 's/^M3=\[ \(.*\) \]$/\1/p')
+	BOTH=$(printf '%s\n%s\n' "$M1" "$M2" | sort | tr '\n' '|')
+	WANT='cgal/export: cannot write /nope-a/1.stl|cgal/export: cannot write /nope-b/2.stl|'
+	if [ "$BOTH" = "$WANT" ] && [ "$M3" = "0" ]; then
+		echo "TRYMULTI_OK"
+	else
+		echo "TRYMULTI_FAIL: M1=[$M1] M2=[$M2] M3=[$M3]"
+	fi ;;
+trycatch_scope)
+	# ★★ #3482 (ひさ 2026-09-19): **catch の中から呼んだ destroy() は、その try で生成された
+	#   agent / async **以外**を壊さないこと**。
+	#   try の外で起動した async を残したまま catch で destroy() し、外の書き出しが **完走する**
+	#   ことを見る。⚠ 判定は状態 (ファイルの有無) で行う。
+	#   ★ N=1 も併せて見る = 送り先が **その try の分だけ** (外の async を巻き込んでいない)。
+	#     N だけだと「送ったが外も壊れた」を見逃し、ファイルだけだと「1 件も送っていない」でも
+	#     緑になる。両方で挟む。
+	rm -f "$T/srava-tcscope.stl"
+	OUT=$(SRAVA_SOURCE='include "module/all.sra";
+	async { export("'"$T"'/srava-tcscope.stl", sphere(3,110)); }
+	try { print("sync=", volume(box(1,1,1))); print(nosuchvar); }
+	catch { print("N=", destroy()); }
+	flush();
+	print("OUT=", system("test -f '"$T"'/srava-tcscope.stl"));' "$SRAVA" 2>&1)
+	if echo "$OUT" | grep -q '^N= 1$' && echo "$OUT" | grep -q '^OUT= 0$' \
+	   && [ -f "$T/srava-tcscope.stl" ]; then
+		echo "TRYSCOPE_OK"
+	else
+		echo "TRYSCOPE_FAIL: out=$OUT"
+	fi ;;
+trycatch_geom)
+	# 幾何エラー (モジュール名前置きつき) も直列に伝播するものは捕まる。
+	SRAVA_SOURCE='include "module/all.sra";
+	try { print(volume(box(-1,-1,-1))); } catch { var m = error();
+	      if ( m != 0 ) { print("TRYGEOM_OK"); } }' exec "$SRAVA" ;;
 *)
 	echo "unknown mode: $MODE"; exit 2 ;;
 esac

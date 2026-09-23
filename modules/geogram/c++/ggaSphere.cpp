@@ -6,6 +6,7 @@
 #include	"pig/c++/pigData.h"
 #include	"gg/c++/ggMesh.h"
 #include	"ts2/c++/stdString.h"
+#include	"common/segs.h"   /* ★ #3530: segs / n の共通検査 */
 #include	"common/geodesic.h"   /* cgal/manifold/nef と共通の生成器 = 頂点が bit 一致する */
 #include	"_ts2/c++/ggaSphere_.h"
 
@@ -65,8 +66,20 @@ ggaSphere_::compute()
 {
 	int na = ( args != 0 ) ? args->length() : 0;
 	double r   = ( na > 0 ) ? (*args)[0]->get_flt() : 1.0;
-	int    seg = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 円周分割数。0=既定 */
+	int    seg_in = ( na > 1 ) ? (int)(*args)[1]->get_int() : 0;   /* 0 = 未指定 */
+	int    seg = 0;
+	/* ★★ #3530: segs の意味を全 op / 全カーネルで 1 本に揃えた (src/h/common/segs.h)。
+	 *   0 or 省略 = 既定値 / 1,2 / 負 = 明示エラー / 3 以上 = その値。 */
+	if ( srava_geo::check_segs(seg_in, 0, &seg) != srava_geo::SEGS_OK ) {
+		result = gga_err(thNEW(stdString,(srava_geo::segs_error("sphere").c_str()))); return;
+	}
 	int    n   = srava_geo::seg_to_n(seg);
+	/* ★ #3516: 退化・負の半径を弾く (icosphere / cylinder / cone などは元から持っていた検査を
+	 *   sphere にも揃えた)。⚠ 弾かないと半径 0 が「体積 0 の球」として黙って下流へ流れる。 */
+	if ( !(r > 0) ) {
+		result = gga_err(thNEW(stdString,("sphere: radius must be > 0")));
+		return;
+	}
 
 	mesh = thNEW(ggMesh,());
 	struct GeoSink {

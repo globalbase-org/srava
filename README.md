@@ -110,11 +110,11 @@ ctest --test-dir build
 sudo cmake --install build          # installs srava, srava_agent, stdlib, modules
 ```
 
-Every geometry module is built by default except `nef_snc`, which offers the same operations
-as `nef_hybrid` using a different internal representation. To build the full set:
+Every geometry module is built by default, including `nef_snc`, which offers the same
+operations as `nef_hybrid` using a different internal representation:
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DSRAVA_MODULE_NEF_SNC=ON
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 ```
 
 Individual modules can be turned off with `-DSRAVA_MODULE_<NAME>=OFF` (`CGAL`, `MANIFOLD`,

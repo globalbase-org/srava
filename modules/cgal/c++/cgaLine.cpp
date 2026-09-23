@@ -8,6 +8,7 @@
 #include	"pig/c++/ptsApplication.h"
 #include	"pig/c++/pigData.h"
 #include	"cg/c++/cgMesh.h"
+#include	<vector>
 #include	"cg/c++/ptscgWireCacheStreamWriterMesh.h"
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/cgaLine_.h"
@@ -66,7 +67,6 @@ cgaLine_::cgaLine_(TS_ARGS0)
 void
 cgaLine_::compute()
 {
-	typedef cgMesh::K K;
 	int na = ( args != 0 ) ? args->length() : 0;
 	sPtr<pigDataArray> pts = ( na > 0 ) ? (*args)[0]->obt_array()
 	                                    : sPtr<pigDataArray>();
@@ -77,7 +77,8 @@ cgaLine_::compute()
 		    "line: needs >= 2 points [[x,y],...]")));
 		return;
 	}
-	cgMesh2D::Guide g;
+	/* ★ #3545: 頂点は **素の (x,y)** で集める (CGAL へ積むのは幾何 lib 側)。 */
+	std::vector<double> g;
 	for ( int i = 0 ; i < np ; ++i ) {
 		sPtr<pigDataArray> xy = pts->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
 		if ( ! xy.is_notNull() || xy->length() < 2 ) {
@@ -87,9 +88,10 @@ cgaLine_::compute()
 		}
 		double x = xy->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();
 		double y = xy->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
-		g.push_back(K::Point_2(K::FT(x), K::FT(y)));
+		g.push_back(x); g.push_back(y);
 	}
-	mesh->guides().push_back(g);   /* regions は空・guides 層のみ(面積 0 のガイド) */
+	/* regions は空・guides 層のみ(面積 0 のガイド) */
+	mesh->add_guide(g.empty() ? 0 : &g[0], (int)(g.size() / 2));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

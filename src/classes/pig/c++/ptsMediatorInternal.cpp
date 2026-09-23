@@ -33,6 +33,10 @@
 #include	"pig/c++/pigModuleRegistry.h"   /* ★ #3427 ③: app 所有レジストリ (agents/codecs) */
 #include	"pig/c++/pigData.h"
 #include	"ts2/c++/stdEvent.h"
+#include	"pig/c++/osglue.h"   /* osglue_env_int (診断) */
+#include	"ts2/c++/stdInterval.h"   /* #3503: in-proc panic の猶予タイマ */
+#include	<stdlib.h>   /* getenv / abort (#3503) */
+#include	<stdio.h>
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ptsMediatorInternal_.h"
 
@@ -57,6 +61,13 @@ public:
 	 *   override はここで無視する。パラメタ名を省略しないのは「意図的に無視」を明示するため。 */
 	virtual int	pl_write_arg(int idx, sPtr<pigData> d);
 	virtual int	pl_write_end(sPtr<pigDataCache> outCache);
+	/* ⚠⚠ **public に置くこと**。protected だと tscpp2 が interface 側に override を
+	 *   生成せず、glue が基底を **修飾付き (非仮想)** で呼ぶため、エラーも警告も出ないまま
+	 *   基底の no-op が走り続ける (pigfAgent::priority が踏んだのと同じ罠。#3503 で再度踏んだ —
+	 *   猶予が一切効かず gms=0 のままだった)。 */
+	virtual void	set_grace_ms(int ms);   /* ★ #3503 (基底の但し書き参照) */
+	virtual void	set_panic_ms(int ms);   /* ★ #3503 (基底の但し書き参照) */
+
 protected:
 	/* 破棄列。**界面ではない** (§2.1/§4.1: 外からの終了要求は destroy() に統一) — 自分の
 	 * FIN からだけ呼ぶ。 */
@@ -68,6 +79,9 @@ protected:
 	sPtr<pigData>		agentResult;
 	sPtr<pigDataCache>	outCache;
 	int			retSent;   /* parent への TSE_RETURN を必ず 1 回・2 回以上送らない (§2.2.1) */
+	int			graceMs;    /* ★ #3503: pigfAgent が起動時に渡す実効値 */
+	int			panicArmed; /* ★ #3503: 0=未 / 1=タイマを張って待っている */
+	int			panicMs;    /* ★ #3503: pigfAgent が起動時に渡す実効値 (<=0 = 無効) */
 	/* ★ #3419 §14.9: load control へ in-proc として登録済みか (External の retPid>0 と同じ役割。
 	 * enable 失敗時に teardown で二重解除しないための印)。 */
 	int			inprocCredited;
@@ -95,6 +109,7 @@ ptsMediatorInternal_::ptsMediatorInternal_(TS_ARGS0)
         : ptsMediator_(parent),
 	  parent(tinyState_::parent)
 {
+    graceMs = 0; panicArmed = 0; panicMs = 0;   /* ★ #3503 */
     TS_CPARGS0
     retSent = 0;
     inprocCredited = 0;
@@ -214,6 +229,21 @@ ptsMediatorInternal_::teardown()
 }
 
 
+
+/* ★ #3503: pigfAgent が起動直後に 1 回だけ渡す。Internal では **-1 かどうか**だけを見る
+ *   (「自分で必ず畳まれる」と宣言したモジュールは panic しない)。待ち時間は set_panic_ms。 */
+void
+ptsMediatorInternal_::set_grace_ms(int ms)
+{
+	graceMs = ms;
+}
+
+void
+ptsMediatorInternal_::set_panic_ms(int ms)
+{
+	panicMs = ms;
+}
+
 /*******************************************
 	STATE MACHINE
 ********************************************/
@@ -237,7 +267,64 @@ TS_STATE(ACT_START)
 		return rDO|ACT_ptsMediatorInternal_RESULT;
 	}
 	if ( is_destroyed() ) {
-		if ( agent.is_notNull() ) { agent->destroy(); return 0; }   /* TSE_RETURN を待つ */
+		if ( agent.is_notNull() ) {
+			/* ★★ #3503 (ひさ提案 2026-09-07): **in-proc 居座りの panic** (#3417 の保留事項)。
+			 *
+			 * 旧: agent->destroy() を撃って TSE_RETURN を **無限に待つ**。実行体が計算に
+			 *   入り込んで中断要求を見なければ、planner はそこで永久に固まる
+			 *   (このファイルの冒頭に ☐ TODO(§6.1) として残っていたもの)。
+			 *   ⚠ process 実行と違い **殺せる子プロセスが無い**。スレッドを外から安全に
+			 *     殺す手段は無い (ロックを握ったまま消えるとプロセスごと壊れる) ので、
+			 *     抜ける道は planner ごと abort する以外に無い。
+			 *
+			 * 新: destroy を撃ったら猶予タイマを張り、切れても TSE_RETURN が来なければ
+			 *   **どのモジュールが応じなかったかを名指しして abort する**。
+			 *   ★ abort にするのは core が残るため — 固まったスレッドのスタックが見えないと、
+			 *     次に直しようがない。黙って _exit すると原因が消える。
+			 *
+			 * ⚠ **猶予は External の grace_ms より桁で長い** (下の panic_ms)。代償が違うから —
+			 *   process なら猶予切れで失うのは agent 1 つだが、in-proc は **セッション全体**
+			 *   (まだ保存していない全結果) が飛ぶ。500ms で撃つと、次のポーリング点まで
+			 *   800ms かかるだけのモジュールが利用者の実行を丸ごと壊す。
+			 * ⚠ grace_ms = -1 (自分で必ず畳まれると宣言) は **panic しない** (External と同じ)。 */
+			agent->destroy();
+			if ( graceMs < 0 ) return 0;              /* graceful のみ = 待ち続ける */
+			const int pms = panicMs;
+			/* ⚠⚠ **0 以下は「無効」= タイマを張らない**。
+			 *   stdInterval::wait(ifThis, 0, ...) は *即座に* 発火するので、
+			 *   ここで弾かないと「既定 = 無効」のつもりが「既定 = 即 panic」になる
+			 *   (#3503 の実装中に踏んだ。回帰は srava_inproc_panic_off)。 */
+			if ( pms <= 0 ) return 0;
+			if ( panicArmed == 0 ) {
+				panicArmed = 1;
+				stdInterval::wait(ifThis, (INTEGER64)pms * 1000, TSE_TIMER);
+				return 0;
+			}
+			if ( ev != thNULL && ev->type == TSE_TIMER ) {
+				/* ★★ #3503 (ひさ設計 2026-09-07): **ここでは要求を上げるだけ**。
+				 *
+				 *   ⚠ mediator が自分で abort してはいけない — in-proc と process は
+				 *     **同居する** (exec_default はモジュールごと。manifold が in-proc で
+				 *     cgal が process、は普通の構成)。その状態で abort すると生きている
+				 *     agent プロセスが全部迷子になる。子は setpgid で別プロセスグループに
+				 *     居るので端末のシグナルも届かず、#3417 が潰した居残りに戻る。
+				 *   ⚠ そもそも一介の mediator がプロセスの生死を決めるのは層が違う。
+				 *
+				 *   ⇒ planner (WAITAGENTS) が「生きている MediatorExternal が 0」を
+				 *     確認してから撃つ。こちらは名前を添えて要求するだけで、以後は
+				 *     TSE_RETURN を待ち続ける (来ないが、待つこと自体は害にならない)。 */
+				if ( ptsApp != thNULL ) {
+					sPtr<stdString> mn = module_name();
+					char b[256];
+					::snprintf(b, sizeof b,
+					    "in-proc module %s did not fold after the abort request "
+					    "(the planner cannot kill a thread)",
+					    ( mn.is_notNull() ) ? mn->get_str() : "(unknown)");
+					ptsApp->set_agentError(thNEW(pigDataError,(b, thNULL, PE_PANIC)));
+				}
+			}
+			return 0;   /* TSE_RETURN を待つ */
+		}
 		return rDO|FIN_START;                                       /* 待つ子は居ない */
 	}
 	return 0;

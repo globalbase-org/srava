@@ -94,10 +94,12 @@ vdaRotate_::compute()
 		result = vda_err(thNEW(stdString,(why)));
 		return;
 	}
-	out = in->op_affine(e);
-	if ( ! out.is_notNull() )
+	out = in->op_affine(e, &brk_);   /* ★ #3498 */
+	if ( ! out.is_notNull() ) {
+		if ( (result = vd_abort_err(brk_, "rotate")) != thNULL ) return;
 		result = vda_err(thNEW(stdString,(
 		    "rotate: openvdb resampleToMatch failed")));
+	}
 	}, vdwhy) )
 		result = vda_err(thNEW(stdString,(vdwhy.c_str())));
 }

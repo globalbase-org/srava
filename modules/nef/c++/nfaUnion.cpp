@@ -28,7 +28,7 @@ public:
 
 protected:
 	virtual void	compute();
-	sPtr<nfMesh>	mesh;
+	sPtr<nfNefMesh>	mesh;
 private:
 	TS_DEFARGS
 };
@@ -42,7 +42,7 @@ TS_BEGIN_INTERFACE
 class ptsObject;
 class pigData;
 class stdString;
-class nfMesh;
+class nfNefMesh;
 TS_END_INTERFACE
 
 #endif
@@ -65,7 +65,7 @@ nfaUnion_::compute()
 {
 	/* ★ #3436 P4: n 項で受ける (agent の中で逐次に畳む = 中間 SNC の往復が消える)。 */
 	const char *msg = 0;
-	mesh = nfMesh::bool_from_args(args, "union", &msg);
+	mesh = nfNefMesh::bool_from_args(args, "union", &msg);
 	if ( ! mesh.is_notNull() ) {
 		char b[128];
 		::snprintf(b, sizeof b, "union: %s", msg ? msg : "boolean failed");

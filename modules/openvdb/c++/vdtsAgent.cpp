@@ -23,6 +23,7 @@
 #include	"vd/c++/vdaEmpty3D.h"
 #include	"vd/c++/vdaTube.h"
 #include	"vd/c++/vdaTranslate.h"
+#include	"vd/c++/vdaDistanceAt.h"   /* ★ #3514: 点との距離 */
 #include	"vd/c++/vdaRotate.h"
 #include	"vd/c++/vdaScale.h"
 #include	"vd/c++/vdaMirror.h"
@@ -37,8 +38,12 @@
 #include	"vd/c++/vdaUnion.h"
 #include	"vd/c++/vdaIntersection.h"
 #include	"vd/c++/vdaDifference.h"
+#include	"vd/c++/vdaPtIntersection.h"   /* ★ #3580 */
+#include	"vd/c++/vdaPtDifference.h"     /* ★ #3580 */
+#include	"pt/c++/ptCloud.h"
 #include	"vd/c++/vdaRenormalize.h"
 #include	"vd/c++/vdaOffset.h"
+#include	"pig/c++/pigOpMatch.h"   /* ★ #3554 最後の段 3/5: import の共通マッチ述語 */
 #include	"_ts2/c++/vdtsAgent_.h"
 
 #include	<stdio.h>    /* SRAVA_LOAD_LOG の診断出力 */
@@ -56,7 +61,14 @@ mkCalcT(sPtr<ptsObject> parent, sArray<sPtr<pigData> > *args, sPtr<stdString> ta
 
 static const pigArgKind MESHDX_IN[]  = { AK_CACHE, AK_INLINE };   /* voxelize(mesh, dx) */
 static const pigArgKind MEASURE_IN[] = { AK_CACHE };              /* grid 1 個入力 */
-/* ★ #3462: プリミティブ。dx は module(so,{dx:N}) から取るので op 引数には入れない。 */
+/* ★★ #3570 (2026-09-21): 上の一文は **嘘だった** — dx は *op の引数に入っている*
+ *   (下の PRIM*_IN の末尾がそれ)。実測: module("openvdb.so",{dx:0.1}); "openvdb"::sphere(1)
+ *   は「no candidate takes 1 argument(s) (openvdb: takes 2)」で落ちる。
+ *   ★ 原則 (#3570・ひさ 2026-09-21) は「必要なものは引数として見せる」なので、
+ *     **このままが正しい**。直したのは *コメントの側*。
+ *   ⇒ 隠したい人は擬似モジュール (#3555) で包む。
+ *   ⚠ コメントは前提と一緒には変わらない — 理由つきの説明ほど、前提が外れても疑われない。 */
+/* ★ #3462: プリミティブ。**末尾が dx (ボクセルサイズ)**。 */
 static const pigArgKind PRIM4_IN[]   = { AK_INLINE, AK_INLINE, AK_INLINE, AK_INLINE };  /* box(w,h,d,dx) */
 static const pigArgKind PRIM2_IN[]   = { AK_INLINE, AK_INLINE };             /* sphere(r,dx) / boxa([w,h,d],dx) */
 static const pigArgKind PRIM3_IN[]   = { AK_INLINE, AK_INLINE, AK_INLINE };   /* icosphere(r,subdiv,dx) */
@@ -66,6 +78,9 @@ static const pigArgKind XFORM1_IN[]  = { AK_CACHE, AK_INLINE };              /* 
 static const pigArgKind XFORM2_IN[]  = { AK_CACHE, AK_INLINE, AK_INLINE };   /* rotate(g, axis, deg) */
 static const pigArgKind GRIDISO_IN[] = { AK_CACHE, AK_INLINE };   /* isosurface(v, iso) */
 static const pigArgKind BINGRID_IN[] = { AK_CACHE, AK_CACHE };    /* 2 grid 入力 */
+/* ★ #3580: 点群 x 距離場。**幾何が 2 つ** = sig に 2 つ現れる (値引数 mode は sig に出ない)。 */
+static const pigArgKind PTSPLIT3_IN[] = { AK_CACHE, AK_CACHE, AK_INLINE };  /* intersection(A,M,mode) */
+static const pigArgKind PTSPLIT2_IN[] = { AK_CACHE, AK_CACHE };             /* difference(A,M) */
 /* ★ offset(v, d, subdiv)。パーサが offset を**常に 3 引数へ正規化する** (subdiv 既定 1 を補う・
  *   ns_sravaParser.y:669) ので、こちらも 3 で受ける。★subdiv は「近似球の細分化レベル」で、
  *   メッシュ系の 3D offset が **半径 d の球との Minkowski 和**で実装されているためのパラメータ。
@@ -95,17 +110,48 @@ static const pigOpEntry OPS[] = {
 	/* ★ #3474 続き (2026-09-05): prism / icosphere / import の歯抜けも埋める。 */
 	{ "prism",         PRIM4_IN, 4, AK_CACHE, OPWIRE(vdaPrism), 0, "->" VD_TYPE },  /* prism(n,h,r,dx) */
 	{ "icosphere",     PRIM3_IN, 3, AK_CACHE, OPWIRE(vdaIcosphere), 0, "->" VD_TYPE },  /* icosphere(r,subdiv,dx) */
-	{ "import",        PRIM2_IN, 2, AK_CACHE, OPWIRE(vdaImport), 0, "->" VD_TYPE },  /* import(path,dx): STL/OFF */
+	/* ★ #3554 最後の段 3/5 (2026-09-19): import の行は共通述語 @pig_match_import_ext@ が選ぶ
+	 *   (拡張子が産む型 = @d->import_exts@ の型付き CSV が、**この行の sig の出力型**か)。
+	 *   ⚠ 出力型が拡張子で決まるので、*sig だけでは行が決まらない* のが import の特徴。
+	 *   ★ このカーネルは import の出力型が 1 つなので **行を分ける必要は無い**。 */
+	/* ⚠ import(path, dx) の **第 2 引数 dx** はマッチ関数が argNo で読み飛ばす (path は第 1)。 */
+	{ "import",        PRIM2_IN, 2, AK_CACHE, OPWIRE(vdaImport), 0, "->" VD_TYPE, 0, 0, 0, &pig_match_import_ext },  /* import(path,dx): STL/OFF */
 	{ "empty3d",      PRIM1_IN,  1, AK_CACHE, OPWIRE(vdaEmpty3D), 0, "->" VD_TYPE },  /* empty3d(dx): 空でも「どの格子の上か」が要る */
-	{ "tube",         PRIM3_IN,  3, AK_CACHE, OPWIRE(vdaTube), 0, "->" VD_TYPE },  /* tube(path,segs,dx): 3D のみ */
+	{ "tube_ruled",         PRIM3_IN,  3, AK_CACHE, OPWIRE(vdaTube), 0, "->" VD_TYPE },  /* tube(path,segs,dx): 3D のみ */
 
 	/* ★ #3463 変換: 全て vdGrid::op_affine (resampleToMatch) に集約。**格子は不変**なので
 	 *   csgUnion の transform 一致の前提も voxel_size() の等方前提も破れない。 */
 	{ "translate",    XFORM1_IN,  2, AK_CACHE, OPWIRE(vdaTranslate, vdGeom),          0, "(" VD_TYPE ")->" VD_TYPE },
+	/* ★ #3514: **点との距離** — p から境界までの最短距離 (符号なし)。値返し。
+	 *   ⚠ 既存の distance(a,b) は **2 つの立体**の間の距離。問うているものが違うので別名にした
+	 *     (位置で指す _at は face_at と同じ流儀)。閉形式: 球 (半径 r) の中心から距離 d の点 → |d - r|。
+	 */
+	{ "distance_at",  XFORM1_IN,  2, AK_INLINE,OPWIRE(vdaDistanceAt, vdGeom),         0, "(" VD_TYPE ")->value" },
 	{ "rotate",       XFORM2_IN,  3, AK_CACHE, OPWIRE(vdaRotate, vdGeom),             0, "(" VD_TYPE ")->" VD_TYPE },
 	{ "scale",        XFORM1_IN,  2, AK_CACHE, OPWIRE(vdaScale, vdGeom),              0, "(" VD_TYPE ")->" VD_TYPE },
 	{ "mirror",       XFORM1_IN,  2, AK_CACHE, OPWIRE(vdaMirror, vdGeom),             0, "(" VD_TYPE ")->" VD_TYPE },
 	{ "transform",    XFORM1_IN,  2, AK_CACHE, OPWIRE(vdaTransform, vdGeom),          0, "(" VD_TYPE ")->" VD_TYPE },
+
+	/* ⚠⚠ **変種は無条件の行より前に置く** — 下の union/intersection/difference は
+	 *   [vd-grid3d](*) で *どんな並びでも受ける* ので、後ろに置くと変種が一度も選ばれない。
+	 *   ★ ロード時の検査が名指しで教えてくれる (2026-09-22 に踏んだ)。 */
+	/* ================= #3580: **点群と距離場の積と差** ==============================
+	 * ★★★ 境界ちょうどの点は **第 3 の集合**。mode 0/-1/+1 で選ぶ (#3575・section と同じ約束)。
+	 *   ⚠ 上の union/intersection/difference (grid 同士) とは **別の行**。引数の型が違うので
+	 *     routing が分ける (#3570 で引数の数も見るようになった)。
+	 * ★ 判定は **距離場の符号**。⚠ distance_at は使えない (符号なし + 帯の外で明示エラー) —
+	 *   理由の全文は vdGrid.h の op_classify_points。
+	 * ⚠⚠ **可換にしない ・ fold 形にしない** (型が非対称なので分解が引数を組み替えて壊す)
+	 *   ⇒ 固定形で書き commutative は 0。intersection(距離場, 点群) の順は sig に無い。
+	 * ★ openvdb に 2D 型は無いので行は **2 つ**だけ:
+	 *     (pt-cloud3d, vd-grid3d) / (pt-cloud2d, vd-grid3d)  ← 後者は z=0 とみなす
+	 *   ⇒ X > Y は openvdb では **起こりえない** (2D の型を持たないため)。 */
+#define VD_PTSPLIT	"(" PT_TYPE_3D "," VD_TYPE ")->" PT_TYPE_3D \
+			";(" PT_TYPE_2D "," VD_TYPE ")->" PT_TYPE_2D
+	{ "intersection#pt", PTSPLIT3_IN, 3, AK_CACHE, OPWIRE(vdaPtIntersection, ptCloud, vdGeom), 0,
+	  VD_PTSPLIT },
+	{ "difference#pt",   PTSPLIT2_IN, 2, AK_CACHE, OPWIRE(vdaPtDifference,   ptCloud, vdGeom), 0,
+	  VD_PTSPLIT },
 
 	{ "union",        BINGRID_IN, 2, AK_CACHE, OPWIRE(vdaUnion, vdGeom, vdGeom),        1, "[" VD_TYPE "](*)->" VD_TYPE, 1 /* ★可換 */ },
 	{ "intersection", BINGRID_IN, 2, AK_CACHE, OPWIRE(vdaIntersection, vdGeom, vdGeom), 1, "[" VD_TYPE "](*)->" VD_TYPE, 1 /* ★可換 */ },

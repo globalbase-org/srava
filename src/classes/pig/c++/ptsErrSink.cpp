@@ -35,6 +35,7 @@
 #include	"ts2/c++/stdString.h"
 #include	"_ts2/c++/ptsErrSink_.h"
 
+#include	<stdio.h>
 #include	<string.h>
 
 CLASS_TINYSTATE(pig/c++/ptsErrSink,ts2/c++/tinyState)
@@ -73,6 +74,13 @@ public:
 	 * パイプに残っている分は待たずに読める。read() は yield しない生読みなので同期で呼べる。 */
 	void	drain_now();
 
+	/** @brief ★ #3538: 読んだバイトを **そのまま親の stdout/stderr へ中継**する。
+	 * @param which 0 = 中継しない (既定・agent 用) / 1 = stdout へ / 2 = stderr へ
+	 * @details `system()` の子の出力をユーザに見せるために使う。⚠ 既定は 0 なので
+	 *   agent (ptsMediatorExternal) の挙動は変わらない。中継しても keep への蓄積は続ける
+	 *   (溜まったテキストから後で pigDataError を組み立てられるようにしておく)。 */
+	void	set_relay(int which);
+
 protected:
 	/** @brief read した n バイトを keep へ追加する (溢れたら先頭を捨てる)。 */
 	void	append(const uint8_t *p, int n);
@@ -85,6 +93,7 @@ protected:
 	int		le[ERRSINK_LINES];        /* text() の行末 index */
 	int		kept;                     /* keep に入っているバイト数 */
 	int		truncated;                /* 捨てた分があるか */
+	int		relay;                    /* ★ #3538: 0=溜めるだけ / 1=stdout / 2=stderr へ中継 */
 };
 
 TS_END_IMPLEMENT
@@ -106,6 +115,7 @@ ptsErrSink_::ptsErrSink_(TS_ARGS0)
     TS_CPARGS0
 	kept = 0;
 	truncated = 0;
+	relay = 0;
 	keep[0] = '\0';
 }
 
@@ -114,6 +124,13 @@ ptsErrSink_::ptsErrSink_(TS_ARGS0)
 	INSTANCE FUNCTIONS
 ********************************************/
 
+/* ★ #3538: 中継先を決める。0=しない / 1=stdout / 2=stderr。 */
+void
+ptsErrSink_::set_relay(int which)
+{
+	relay = which;
+}
+
 /* 読んだ n バイトを keep へ追加する。溢れたら **先頭を捨てて末尾を残す**。
  * ★ NUL を含みうる (ライブラリが何を書くかは分からない) ので、テキスト化のときに潰す。 */
 void
@@ -121,6 +138,15 @@ ptsErrSink_::append(const uint8_t *p, int n)
 {
 	if ( p == 0 || n <= 0 )
 		return;
+	/* ★ #3538: 中継は **append の中**で行う。ACT_START のループと drain_now() の
+	 * 両方がここを通るので、**子の最後の塊まで取りこぼさない**。
+	 * ⚠ 毎回 flush する: srava 自身の print() と同じ stdout に混ざるので、
+	 *   溜めると順序が崩れて「どの出力がどのコマンドのものか」が読めなくなる。 */
+	if ( relay ) {
+		FILE *o = ( relay == 2 ) ? stderr : stdout;
+		::fwrite(p, 1, (size_t)n, o);
+		::fflush(o);
+	}
 	if ( n >= ERRSINK_KEEP ) {          /* 1 回の read で上限を超えた: 末尾だけ残す */
 		::memcpy(keep, p + (n - ERRSINK_KEEP), ERRSINK_KEEP);
 		kept = ERRSINK_KEEP;

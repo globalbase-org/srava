@@ -15,12 +15,17 @@
  *   FIN: 派生は FIN_START → FIN_ptsApplication_START → FIN_ptsObject_START と畳む
  *
  * 全 agent(pigfAgent)の死活・エラー集約(プランナーが「全 agent クリーン」を知るための機構):
- *   - countAgent     : 生存中の pigfAgent 数。pigfAgent が INI で agent_enter()、FIN で agent_leave()。
+ *   - countAgent     : 生存中の計算の数。★ #3482 で **根の見えない try** の待ちリストへ移した。
+ *                      ⚠ 2026-09-20: 登録は **伝播させない** ので、根のリストは
+ *                      「どの利用者 try にも囲まれていない計算」だけ。入れ子は
+ *                      「try が自分の待ちリストを空にするまで終わらない」で閉じる。
  *   - agentError     : promise 解決後に agent が出したエラー(継続を既に返した後なので promise では
  *                      返せない)。set_agentError() で集約(先勝ち)。
+ *                      ★ #3482: **実体は根の見えない try** (rootTry) が持つ。ここは入口と
+ *                      *起こす役* (生存台帳への wake-all) だけ。
  *   pigfAgent は A_SAVE_BEGIN で継続を解決した時点で「結果はもう呼び元へ渡った」ので、その後は
  *   ptsApp に listen(TSE_UPDATED) し、set_agentError の invoke_listen で起こされて自分を撤収できる。
- *   agent_leave() は countAgent==0 で wakeup() → プランナーの WAITAGENTS を起こす。
+ *   待ちリストが動くと rootTry が waker (= この app) を起こす → プランナーの WAITAGENTS。
  */
 #include	"ts2/c++/tsApplication.h"
 #include	"ts2/c++/stdLimitSemaphore.h"   /* ワーカーゲートの入場制御セマフォ(gateSem) */
@@ -79,12 +84,23 @@ public:
 	 * INI gate で見て即 FIN し、main が終了コードに写す。 */
 	int			module_load_failed();
 
-	/* pigfAgent ライフサイクル集約(public: pigfAgent が ptsApp 経由で叩く)。 */
-	void			agent_enter(sPtr<tinyState> who);   /* INI: 生存数 ++ + 登録 */
-	void			agent_leave(sPtr<tinyState> who);   /* FIN: 生存数 --。0 で wakeup() */
-	int			agent_count();              /* 現在の生存数 */
+	/* pigfAgent ライフサイクル集約。
+	 * ⚠⚠ #3482 (2026-09-20): @agent_enter@ / @agent_leave@ は **撤去した**。計算が登録するのは
+	 *   自分を囲む最も内側の try **1 つだけ**で、根の台帳へ直に入れに行かない (ひさ)。
+	 *   ここに「根の try へ登録する入口」が残っていると、それが裏口になる (実際、pigfAgent が
+	 *   根へ二重登録していたのを 2026-09-20 に外したばかり)。⇒ 入口ごと消す。
+	 * ★ @agent_count@ は残る — planner が終了前に「根の直下にまだ居るか」を見るため。
+	 *   利用者の try の中の計算は、その try が空になるまで終わらないので数に出なくてよい。 */
+	int			agent_count();              /* 根の待ちリストの生存数 */
 	void			set_agentError(sPtr<pigData> e);  /* エラー集約(先勝ち)+ 全 agent を起こす */
 	sPtr<pigData>		get_agentError();           /* 集約済みエラー(無ければ thNULL) */
+	/* ★ #3417 (2026-09-06): 生存中の全 agent へ **destroy を撃つ**。
+	 *   set_agentError の wake-all と対になる操作で、あちらが「起こして自分で畳ませる」のに対し
+	 *   こちらは「畳めと要求する」。撤収が始まったのに countAgent が下がらないとき
+	 *   (planner の WAITAGENTS) に使う。
+	 *   ⚠ destroy() は冪等なので二度撃っても害は無いが、既に is_destroyed() のものは飛ばす
+	 *     (set_agentError の走査と同じ流儀)。 */
+	void			destroy_agents();
 	/* ★ agent のエラーを **記録だけ**する (2026-08-26・ひさ提案)。
 	 * set_agentError は「最初の 1 件」しか保たない (先勝ち) ので、**落ちた本人の理由が
 	 * 傍観者の汎用エラーに負けて消える**ことがあった。async の continue-and-collect と同じく
@@ -95,6 +111,8 @@ public:
 	void			record_agentError(sPtr<pigData> e);
 	int			agent_error_count();
 	sPtr<pigData>		agent_error_at(int i);
+	/* ★★ #3482: **根の見えない try**。planner が根の env に刺し、撤収の理由と診断台帳を持つ。 */
+	sPtr<pigDataTryCatch>	root_try();
 
 	/* 使用済みキャッシュの登録簿(= pigDataCache の同一チェックリスト/global dedup list)。
 	 * pigfAgent が cache を生成/ヒットするたび hash を登録。プランナー終了時、登録外の
@@ -140,6 +158,23 @@ public:
 	 * in-proc は planner に含まれるので pid=0 は無視する。 */
 	void			load_pid_add(uint32_t pid);
 	void			load_pid_del(uint32_t pid);
+
+	/* ★★ #3503 (ひさ設計 2026-09-07): **in-proc 居座りの panic は planner が撃つ**。
+	 *
+	 * in-proc の実行体が destroy に応じないと、その mediator は永久に TSE_RETURN を待つ。
+	 * 殺せる子プロセスが無いので抜ける道は abort しか無いが、⚠ **mediator が自分で
+	 * abort してはいけない** — in-proc と process は同居するので、そのとき生きている
+	 * agent プロセスが全部迷子になる (子は setpgid で別プロセスグループに居るので
+	 * 端末のシグナルも届かない = #3417 が潰した居残りに戻る)。
+	 *
+	 * ⇒ mediator は **PE_PANIC のエラーを set_agentError で上げるだけ** (撤収の指標を
+	 *   get_agentError() 1 本にした #3417 の流儀に乗る)。planner (WAITAGENTS) が
+	 *   その種別を見分け、**子プロセスを持つ agent が 0** になってから撃つ。
+	 * ⚠ 権威は load 制御の pid 表ではない (あちらは #3419 の集計用で、起動失敗や pid 登録前の
+	 *   窓を表していない)。pigfAgent が med->is_external() を見て数える。 */
+	void			ext_agent_add();
+	void			ext_agent_del();
+	int			ext_agent_count();
 	/* ★ #3419 §14.9: in-proc agent は planner と同一アドレス空間で RSS では区別できないので
 	 * **数える** (契機は ptsMediatorInternal の enable/teardown)。 */
 	void			load_inproc_add();
@@ -191,21 +226,19 @@ private:
 	void			apply_gate_order(int order);   /* ★★ #3508: 並べ方をセマフォへ反映 */
 	int			mem_ok();     /* 空きメモリが watermark 以上か(取得不能環境は常に真) */
 protected:
-	int			countAgent;
 	int			countHit;
 	int			countMiss;
 	int			cacheSwept;          /* 起動時 sweep の 1 回フラグ(旧グローバル g_cacheSwept・per-app) */
 	char			cacheFingerprint[512];   /* 版数指紋(srava が設定)。空=版ゲート無効 */
-	sPtr<pigData>		agentError;
-	/* ★ 記録した agent エラー全部 (先勝ちの agentError とは別・文言で重複排除)。 */
-	sArray<sPtr<pigData> >	agentErrors;
+	/* ★★ #3482: 撤収の理由 (先勝ち) と診断台帳は **根の見えない try** が持つ。
+	 * 本チケット §0「tree の根本に見えない try を置いて全体をそこへ集約する」の実体で、
+	 * ここは *起こす役* (根の待ちリストへの wake-all) だけを担う。
+	 * ⚠ 生成は INI。**すべての app** (planner / agent / テスト) が 1 つ持つので、
+	 *   「planner のときだけ在る」という条件分岐は要らない。 */
+	sPtr<pigDataTryCatch>	rootTry;
 	sArray<INTEGER64>	usedCaches;   /* 使用済み cache hash(append-only, 重複なし) */
 	sArray<INTEGER64>	inflightKeys;     /* in-flight キャッシュ hash(dedup 用) */
 	sArray<sPtr<pigData> >	inflightPromises; /* 対応する最初の pigfAgent の promise */
-	/* 起動した pigfAgent の登録簿(append-only)。set_agentError 時にここ全員を wakeup して
-	 * SHOULD_ABORT 撤収させる(継続解決前で listen していない=イベント待ちで詰まった agent にも届く)。
-	 * FIN 済みは is_destroyed() でスキップ。要素削除はしない(寿命中の総 agent 数だけ・小さい)。 */
-	sArray<sPtr<tinyState> >	liveAgents;
 	/* ワーカーゲート状態(同時 fork 数の制御はセマフォに集約)。 */
 	int			gateCap;       /* **初期**上限(= ランプ開始値。サマリ/プログレッシブ閾値 T=cap/2)。 */
 	sPtr<pigEnvironment>	rootEnv;       /* ★ #3419 §17.3: planner の根 env (設定の上書き元) */
@@ -226,6 +259,7 @@ protected:
 	int			gateLifo;      /* ★ ゲート待ち行列を priority 順にしたか (fifo 以外なら 1) */
 	int			gateOrder;     /* ★★ #3508: PIG_GATE_ORDER_* (fifo / lifo / delta) */
 	sArray<uint32_t>	loadPids;     /* ★ #3419: 稼働中の agent プロセス pid */
+	int			extAgentN;    /* ★ #3503: 子プロセスを持つ agent の数 */
 	unsigned		loadN;        /* 稼働中 agent 数 (§12.8: 種別で分けない) */
 	unsigned		loadPeak;     /* ★ その走行での同時 agent 数の最大 (サマリ用) */
 	unsigned		loadInproc;   /* ★ #3419 §14.9: うち in-proc で走っている数 */
@@ -250,6 +284,7 @@ class tinyState;
 class pigData;
 class stdString;
 class stdLimitSemaphore;
+class pigDataTryCatch;     /* ★ #3482: 根の見えない try (撤収の指標と診断台帳の持ち主) */
 class pigModuleRegistry;   /* ★ #3427 ③: module_registry(sPtr メンバ)。消費側が完全型を include する */
 class ptsLoadControl;      /* ★ #3419 §2.4: 負荷コントロール (app 所有) */
 TS_END_INTERFACE
@@ -265,7 +300,6 @@ ptsApplication_::ptsApplication_(TS_ARGS0)
     moduleMode = _moduleMode;
     moduleFile = ( _moduleFile != 0 ) ? thNEW(stdString,(_moduleFile)) : sPtr<stdString>(thNULL);
     moduleLoadFailed = 0;
-    countAgent = 0;
     countHit   = 0;
     countMiss  = 0;
     cacheSwept = 0;
@@ -292,6 +326,7 @@ ptsApplication_::ptsApplication_(TS_ARGS0)
     loadN = 0;
     loadPeak = 0;
     loadInproc = 0;
+    extAgentN  = 0;   /* ★ #3503 */
     gateSem = thNEW(stdLimitSemaphore,(cap));   /* limit=cap(固定)・count=生存 agent 数。待ち行列内蔵。 */
     /* ---- ★ #3419 (2026-08-23): ゲートの**入場順序**。既定は従来どおり先着順(FIFO)。
      *   SRAVA_GATE_ORDER=lifo で待ち行列を priority() 順にする(tinyState #3449 の enablePriority)。
@@ -520,37 +555,23 @@ ptsApplication_::gate_backoff()
 	INSTANCE FUNCTIONS
 ********************************************/
 
-void
-ptsApplication_::agent_enter(sPtr<tinyState> who)
-{
-	countAgent++;
-	liveAgents.push(who);
-}
-
-void
-ptsApplication_::agent_leave(sPtr<tinyState> who)
-{
-	/* ★ #3450 (ひさ整理 2026-08-29): **登録簿の参照をここで手放す**。以前は要素を消さず
-	 * (「寿命中の総 agent 数だけ・小さい」)、ZOM 済み agent ~200 個が planner 終了まで生き、
-	 * teardown で一斉に refList へ流れ込んでいた。gc が tinyState を畳む途中で状態遷移が動き、
-	 * タイマ経由で fwIO が配送オブジェクトを生成・破棄して is_stable() を false に戻すため、
-	 * FIN_STABLE_WAIT が自分の churn の切れ目を待つレースになっていた (teardown が時折長く伸びる裾)。
-	 * 問題は個数ではなく「生かし続けること」。
-	 * agent_leave は FIN 確定後 (med 回収・gate 返却済み) にしか呼ばれず、撤収 wakeup
-	 * (set_agentError の走査) が要る窓はもう無い。走査側は is_notNull() を見ているので
-	 * 穴が空いても安全・詰め直し不要。 */
-	for ( int i = 0 ; i < liveAgents.length() ; ++i )
-		if ( liveAgents[i] == who ) { liveAgents[i] = thNULL; break; }
-	if ( --countAgent <= 0 ) {
-		countAgent = 0;
-		wakeup();              /* 全 agent クリーン → プランナーの WAITAGENTS を起こす */
-	}
-}
-
+/* ★★ #3482 (2026-09-20): 待ちリストの持ち主は **それぞれの try**。計算が入るのは自分を囲む
+ * 最も内側の try 1 つだけで、**根へ直に登録しに行かない**。
+ * ⇒ ここが返すのは「**根の待ちリスト**に居る数」= どの利用者 try にも囲まれていない計算の数。
+ * ★ それで足りる理由: 利用者の try は @ACT_pigfTryCatch_WAIT@ で自分の待ちリストが空に
+ *   なるまで終わらないので、その try の評価が終わった時点で中の計算はもう居ない。
+ *   ⇒ 評価が終わった後に planner が見る数としては、根の分だけ数えれば過不足ない。 */
 int
 ptsApplication_::agent_count()
 {
-	return countAgent;
+	return rootTry.is_notNull() ? rootTry->agent_live() : 0;
+}
+
+/* ★ #3417: 生存中の全 agent へ **destroy を撃つ**。実体は根の try の待ちリスト。 */
+void
+ptsApplication_::destroy_agents()
+{
+	if ( rootTry.is_notNull() ) rootTry->destroy_agents();
 }
 
 void
@@ -559,56 +580,49 @@ ptsApplication_::set_agentError(sPtr<pigData> e)
 	/* ⚠ ここでは record しない (2026-08-26)。set_agentError は planner の**撤収トリガ**でも
 	 * 呼ばれる ("aborted: fatal error" / "interrupted by SIGINT") ので、記録すると列挙に
 	 * **内部マーカが混ざる**。記録するのは pigfAgent が自分の理由を作ったときだけ。 */
-	int first = ( agentError == thNULL );
-	if ( first )                   /* 先勝ち(最初のエラーを保持) */
-		agentError = e;
+	int first = rootTry.is_notNull() ? rootTry->set_teardown_reason(e) : 0;
+	/* ⚠ 先勝ち ・ PE_PANIC だけ先勝ちを覆す、の規則は **根の try 側** (set_teardown_reason) へ
+	 * 移した (#3482)。理由の文言も含めてそちらに書いてある。ここは *起こす役* だけを担う。 */
 	wakeup();                      /* プランナー(=自分)を起こす */
-	if ( first ) {
+	if ( first && rootTry.is_notNull() ) {
 		/* 生存中の全 agent を起こす。各 agent は待ち状態頭の SHOULD_ABORT で撤収(agent kill+FIN)。
-		 * イベント待ちで詰まっている agent(継続解決前で listen していない)にも届かせるのが要点。 */
-		for ( int i = 0 ; i < liveAgents.length() ; ++i )
-			if ( liveAgents[i].is_notNull() && ! liveAgents[i]->is_destroyed() )
-				liveAgents[i]->wakeup();
+		 * イベント待ちで詰まっている agent(継続解決前で listen していない)にも届かせるのが要点。
+		 * ★ #3482: 走査するのは **根の try の待ちリスト** (= プログラム全体の台帳)。 */
+		rootTry->wake_agents();
 	}
 }
 
-/* agent のエラーを記録だけする (起こさない・撤収トリガにしない)。
- * ★ 同一文言は畳む: 撤収で多数の agent が同じ "aborted" を出すので、そのまま溜めると
- *   末尾の列挙が同じ行で埋まる。★ 上限も置く (壊れ方が「大量出力」にならないように)。 */
+/* ★★ #3482: 実体は **根の見えない try** が持つ (pigDataTryCatch::record_reason)。
+ * 文言での重複排除・上限 16・PE_DERIVED を外す、の規則はそちらに移した。
+ * ここは呼び手 (pigfAgent / planner) の入口を変えないための委譲。 */
 void
 ptsApplication_::record_agentError(sPtr<pigData> e)
 {
-	if ( ! e.is_notNull() || ! e->is_error() )
-		return;
-	if ( agentErrors.length() >= 16 )
-		return;
-	sPtr<stdString> m = e->get_str();
-	if ( ! m.is_notNull() )
-		return;
-	for ( int i = 0 ; i < agentErrors.length() ; ++i ) {
-		sPtr<stdString> o = agentErrors[i]->get_str();
-		if ( o.is_notNull() && ::strcmp(o->get_str(), m->get_str()) == 0 )
-			return;                /* 同じ文言は 1 度だけ */
-	}
-	agentErrors.push(e);
+	if ( rootTry.is_notNull() ) rootTry->record_reason(e);
 }
 
 int
 ptsApplication_::agent_error_count()
 {
-	return agentErrors.length();
+	return rootTry.is_notNull() ? rootTry->reason_count() : 0;
 }
 
 sPtr<pigData>
 ptsApplication_::agent_error_at(int i)
 {
-	return ( i >= 0 && i < agentErrors.length() ) ? agentErrors[i] : sPtr<pigData>();
+	return rootTry.is_notNull() ? rootTry->reason_at(i) : sPtr<pigData>();
+}
+
+sPtr<pigDataTryCatch>
+ptsApplication_::root_try()
+{
+	return rootTry;
 }
 
 sPtr<pigData>
 ptsApplication_::get_agentError()
 {
-	return agentError;
+	return rootTry.is_notNull() ? rootTry->teardown_reason() : sPtr<pigData>();
 }
 
 void
@@ -728,6 +742,17 @@ pig_current_registry()
 	return app->module_registry;
 }
 
+/* ★★ #3570 段3.5: いまの評価地点の env。pigfOps の varref と同じ辿り方。
+ *   ⇒ pigData 層 (pigDataOperatorCallResolve) が「その名前は変数か」を訊ける。 */
+sPtr<pigEnvironment>
+pig_current_env()
+{
+	sPtr<ptsObject> f = sPtr<ptsObject>::d_cast(sCallSection::key->caller());
+	if ( ! f.is_notNull() )
+		return sPtr<pigEnvironment>(thNULL);
+	return f->get_env();
+}
+
 /*******************************************
 	STATE MACHINE
 ********************************************/
@@ -739,6 +764,12 @@ TS_STATE(INI_ptsObject_START)   // ptsObject の gate を上書き: 自分が pi
 	/* ★ #3427 ③: レジストリ (モジュール/型/agent/codec/backend/値パーサのハブ) は app が
 	 *   ここで生成し所有する。プロセス全体の可変 static を全廃 = 同一プロセス複数 app でも
 	 *   レジストリが混ざらない (リエントラント)。 */
+	/* ★★ #3482 段 3: **根の見えない try** を立てる。プログラム全体を囲む try で、
+	 * 利用者には見えない (構文に現れない)。撤収の理由と診断台帳、そしてトップレベルで
+	 * 起動した計算の待ちリストがここに集まる。 */
+	rootTry = thNEW(pigDataTryCatch,());
+	rootTry->set_root(1);
+	rootTry->set_waker(ifThis);   /* 台帳が動いたら自分を起こす (旧 agent_leave の wakeup) */
 	module_registry = thNEW(pigModuleRegistry,());
 	/* ★ #3419 §2.4: 負荷コントロール。ptsApplication の起動冒頭で作り、以後ここから使う。 */
 	/* ★ §13.7: gateSem を渡す (ランプが直接 limit を書く)。gateSem は ctor で生成済み。 */
@@ -835,6 +866,29 @@ ptsApplication_::load_inproc_del()
 {
 	if ( loadInproc > 0 ) loadInproc--;
 	if ( load_control != thNULL ) load_control->set_inproc(loadInproc);
+}
+
+
+/* ★ #3503: **子プロセスを持つ** agent の生死 (pigfAgent が med->is_external() を見て呼ぶ)。
+ * planner の in-proc panic はこれが 0 になってから撃つ。 */
+void
+ptsApplication_::ext_agent_add()
+{
+	extAgentN++;
+}
+
+void
+ptsApplication_::ext_agent_del()
+{
+	if ( extAgentN > 0 ) extAgentN--;
+	/* 最後の 1 つが畳まれたら planner を起こす — panic 待ちの WAITAGENTS がそれで進む。 */
+	if ( extAgentN == 0 ) wakeup();
+}
+
+int
+ptsApplication_::ext_agent_count()
+{
+	return extAgentN;
 }
 
 void

@@ -79,7 +79,11 @@ cgaCombine_::compute()
 	}
 	mesh = ma->op_combine(mb);   /* 多態: 3D=copy_face_graph / 2D=Pwh 連結。次元を知らない */
 	if ( ! mesh.is_notNull() )
-		result = cga_err(thNEW(stdString,("combine: incompatible operands (mixed dimension?)")));
+		/* ★ #3526 + #3479: **理由を言い分ける** (平面が違うのか次元が違うのか)。 */
+		result = cga_err(thNEW(stdString,( cg_2d_planes_differ(ma, mb)
+		    ? "combine: the 2D regions are on different planes, so they cannot be put into one "
+		      "2D value; move them onto one plane first"
+		    : "combine: incompatible operands (mixed dimension?)" )));
 }
 
 /* この演算の結果 (#3406, 2026-07-30 メモ: get_body/get_result を統一)。エラー時は

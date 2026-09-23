@@ -33,6 +33,7 @@
 #include	"cg/c++/cgptsLemonParser.h" /* ソース文字列 → pigData ツリー(lemonc++) */
 #include	"ts2/c++/tsSignal.h"         /* SIGINT を TSE_SIGNAL イベント化 */
 #include	"ts2/c++/stdEvent.h"         /* filter() の stdEvent / TSE_SIGNAL、parser の TSE_RETURN */
+#include	"ts2/c++/stdFrameWork.h"    /* #3556: 撤収の居残りを吐かせる trace_all / trace_bit */
 #include	"_ts2/c++/cgptsPlanner_.h"
 
 #include	<stdio.h>
@@ -131,13 +132,12 @@ public:
 	 * ptsApplication ではなく srava アプリ層のこの planner が所有する。app 所有 = gc_thread 管理下に置く
 	 * ことで、かつて file-static グローバルだった頃の終了時 use-after-free SEGV を構造的に根絶する。
 	 * async 文(統一プリミティブ)。syncTail=直前 async の done 信号(sync 発行順チェーン)。
-	 * asyncList=全 async helper front(末尾 drain でエラー集積)。docs/srava_async_design.md。
+	 * ★ #3482: 待ちとエラーの台帳は **根の見えない try** へ移した。ここは発行順チェーンだけ。
 	 * print_async / export_async はここへ desugar される(専用レジストリは撤去)。 */
 	sPtr<pigData>		sync_tail();                        /* 現在のチェーン末尾(初回は解決済み null) */
 	void			set_sync_tail(sPtr<pigData> t);     /* 末尾を更新 */
-	void			register_async(sPtr<pigData> front);/* async helper を drain 対象に登録 */
-	int			flush_async();                      /* flush(): 全 async をその地点で待ちエラー報告・チェーン reset */
-	int			drain_async();                      /* 末尾(全 agent 完了後): 全 async を待ちエラー報告 */
+	void			reset_sync_chain();                 /* flush(): 発行順チェーンを張り直す */
+	int			drain_async();                      /* 末尾: 根の try に溜まったエラーを報告 */
 	int			async_error_total();                /* async の累積エラー数(終了コード判定用) */
 	/* ★ agent が出した理由を **末尾でまとめて列挙**する (2026-08-26・ひさ提案。async の
 	 * continue-and-collect と同じ考え方)。
@@ -149,13 +149,20 @@ public:
 	void			show_other_agent_errors();
 protected:
 	sPtr<pigEnvironment>	env;
+	/* ★★ #3482 段 3: **根の見えない try**。プログラム全体を囲む try で、利用者には見えない
+	 * (構文に現れない)。これで **すべての agent がどれかの try に属する**という不変条件が立ち、
+	 * 「try の中か外か」で振る舞いが変わる場所が無くなる。
+	 *   ・トップレベルで起動した agent の待ちリストはここ
+	 *   ・トップレベルの destroy() の送り先もここ
+	 * ⚠ 文 (args) を持たず compact もされないので helper は付かない。待ちリストとエラー列
+	 *   だけを持つ入れ物として使う (error() は catch 専用なので根では呼べない)。 */
+	sPtr<pigDataTryCatch>	rootTry;
 	sPtr<stdString>		cacheDir;
 	sPtr<cgptsLemonParser>	parser;   /* 1.2.2 パーサ(ソース → tree) */
 	sPtr<pigData>		tree;     /* パーズ結果のプログラムツリー(root=export 等) */
 	sPtr<tsSignal>		sig_int;   /* SIGINT  ハンドラ(self-pipe → TSE_SIGNAL) */
 	sPtr<tsSignal>		sig_term;  /* SIGTERM ハンドラ(素の kill) */
 	sPtr<tsSignal>		sig_hup;   /* SIGHUP  ハンドラ(端末切断) */
-	sArray<sPtr<pigData> >	asyncList;        /* async helper front(末尾 drain でエラー集積) */
 	sPtr<pigData>		syncTail;         /* async の sync 発行順チェーン末尾(初回は解決済み null) */
 	int			asyncErrors;      /* async の累積エラー数 */
 	/* ★ **表示済みの文言を全部**覚える (列挙で二重に出さないため)。
@@ -165,9 +172,17 @@ protected:
 	 *   (モジュール側の lint と同じ方針・ひさ指示 2026-08-26)。 */
 	sArray<sPtr<stdString> >	shownErrors;
 	void			show_error_m(sPtr<stdString> m);   /* 表示 + 記録 */
-	unsigned		sig_abort_flag : 1;   /* INT/TERM/HUP のいずれかを受けた */
+	/* ★ #3417 (2026-09-06): 旧 sig_abort_flag / sig_abort_num を **廃止**した。
+	 *   「撤収すべきか」を agentError と 2 重に持っていたのが混乱の元で、
+	 *   実際 WAITAGENTS の `sig_abort_flag && get_agentError()==NULL` は
+	 *   「2 つの真理値がズレている瞬間」を扱うためだけの分岐になっていた
+	 *   (そのせいで 2 回目以降の Ctrl+C が無視されていた)。
+	 *   ⇒ 撤収の唯一の指標は **get_agentError() != thNULL**。
+	 *      シグナル番号は filter() がその場で exitCodeOut へ畳むので保持不要。
+	 *   下の 2 つは「同じ手を二度打たない」ための記憶で、撤収の判定には使わない。 */
 	unsigned		eval_error : 1;       /* 評価結果がエラー値だった(キャッシュ掃除を抑止) */
-	int			sig_abort_num;        /* 最初に受けたシグナル番号(exit code/メッセージ用) */
+	unsigned		treeDestroyed : 1;    /* EVAL で tree->destroy() を撃った */
+	unsigned		agentsDestroyed : 1;  /* WAITAGENTS で全 agent へ destroy を撃った */
 	const char *		srcText;      /* 実行するソース(ctor 引数。NULL=env/既定にフォールバック) */
 	sPtr<stdString>		srcName;      /* エラー表示用ファイル名(parser へ渡す) */
 	int *			exitCodeOut;  /* 終了コードの書き込み先(ctor 引数。NULL なら下の local を指す) */
@@ -188,6 +203,7 @@ class tinyState;
 class tsApplication;
 class pigEnvironment;
 class pigData;
+class pigDataTryCatch;   /* ★ #3482 段 3: 根の見えない try */
 class stdString;
 class cgptsLemonParser;
 class tsSignal;
@@ -202,9 +218,9 @@ cgptsPlanner_::cgptsPlanner_(TS_ARGS0)
 	  parent(tinyState_::parent)
 {
     TS_CPARGS0
-    sig_abort_flag = 0;
+    treeDestroyed   = 0;
+    agentsDestroyed = 0;
     eval_error     = 0;
-    sig_abort_num  = 0;
     asyncErrors    = 0;
     syncTail       = thNEW(pigDataNull,());   /* 初回 async の prev=解決済み null(即発火可) */
     srcText       = _src;
@@ -231,9 +247,25 @@ cgptsPlanner_::filter(sPtr<stdEvent> ev)
 		return ev;
 	if ( ev->type == TSE_SIGNAL &&
 	     ( ev->msg_int == SIGINT || ev->msg_int == SIGTERM || ev->msg_int == SIGHUP ) ) {
-		if ( ! sig_abort_flag )
-			sig_abort_num = ev->msg_int;   /* 先勝ち */
-		sig_abort_flag = 1;
+		/* ★ #3417 (2026-09-06): フラグではなく **撤収エラーそのもの**をここで作る。
+		 *   ・撤収の指標を agentError 1 本に寄せる (旧 sig_abort_flag / sig_abort_num は廃止)
+		 *   ・set_agentError が **全 agent の wake-all** を連れてくるので、イベント待ちで
+		 *     詰まった agent にも届く (フラグ代入だけにすると届かない)
+		 *   ・PE_FATAL = 「待つ意味がない」。既存の「fatal は in-flight agent を即撤収」に乗る
+		 *   ・終了コード 128+signum はここで畳む (signum を後まで持ち回らずに済む)
+		 *   ⚠ tsSignal は self-pipe → TSE_SIGNAL なので、ここは **シグナルハンドラ文脈ではない**。
+		 *     thNEW してよい。
+		 *   ⚠ 先勝ち: 2 回目以降のシグナルでは何も起きない (連打で段階を上げる設計は採らない。
+		 *     is_destroyed() は冪等で 2 度目の destroy が伝わらないうえ、キーボードの
+		 *     チャッタリングで graceful のつもりが kill になる — ひさ判断 2026-09-06)。 */
+		if ( get_agentError() == thNULL ) {
+			const int sn = (int)ev->msg_int;
+			const char *nm = ( sn == SIGTERM ) ? "SIGTERM" : ( sn == SIGHUP ) ? "SIGHUP" : "SIGINT";
+			char msg[64];
+			::snprintf(msg, sizeof msg, "interrupted by %s", nm);
+			(*exitCodeOut) = 128 + sn;
+			set_agentError(thNEW(pigDataError,(msg, thNULL, PE_FATAL)));
+		}
 	}
 	return TS_BASECLASS::filter(ev);
 }
@@ -279,32 +311,16 @@ void pigcgOperatorExport::_start() {
 /* ---- async 文: 統一プリミティブ(sync 発行順チェーン + drain) ---- */
 sPtr<pigData> cgptsPlanner_::sync_tail()                     { return syncTail; }
 void          cgptsPlanner_::set_sync_tail(sPtr<pigData> t)  { syncTail = t; }
-void          cgptsPlanner_::register_async(sPtr<pigData> f) { asyncList.push(f); }
 int           cgptsPlanner_::async_error_total()            { return asyncErrors; }
 
-/* flush(): その地点で全 async を待つ明示バリア(export_async の完了を後続 system()/import() が観測
- * できるように)。mid-program なので compact が yield しうる → pass を分けて二重出力を防ぐ:
- *   pass1 全 compact(解決まで・print は冪等再走で無害)/ pass2 エラーを 1 度報告。
- * 待ち終えたらリストを空にしチェーン末尾を reset(以降の async は新チェーン)。
- * ⚠ かつて pass0 で全 trigger していたが、**登録される f は生成時 (pigcgOperatorAsync::_start) に
- *   既に起動済み**なので何もしていなかった (外して ctest 289/289・async は 1 波のまま)。撤去 (#3419)。 */
-int cgptsPlanner_::flush_async() {
-  for ( int i = 0 ; i < asyncList.length() ; ++i )
-    (void) asyncList[i]->compact()->is_error();   /* pass1: 全解決(未解決なら yield→先頭から再走) */
-  int errs = 0;
-  for ( int i = 0 ; i < asyncList.length() ; ++i ) {
-    sPtr<pigData> r = asyncList[i]->compact();     /* pass2: 全解決済み→エラーを 1 度だけ報告 */
-    if ( r->is_error() ) { show_error_m(r->get_str()); ++errs; }
-  }
-  asyncList.length(0);
-  syncTail = thNEW(pigDataNull,());          /* チェーン reset(flush 後の async は独立した発行順) */
-  asyncErrors += errs;
-  return errs;
+/* ★★ #3482: 旧 @flush_async@ (planner が asyncList を掃き出す) は撤去した。
+ * @flush()@ は **その地点を囲む try の待ちリスト**が空になるまで待つバリアになり、待ちの台帳は
+ * 根の見えない try が持つ。ここに残るのは **発行順チェーンの reset** だけ
+ * (flush 後の async は独立した発行順になる)。 */
+void cgptsPlanner_::reset_sync_chain() {
+  syncTail = thNEW(pigDataNull,());
 }
 
-/* 末尾(全 agent 完了後): 登録済み async helper を compact し、結果に載ったエラー
- * (continue-and-collect)を 1 度だけ報告する。全 agent 完了後に呼ぶので yield しない。
- * ⚠ かつて先頭で全 trigger していたが、f は生成時に既に起動済みなので無意味だった。撤去 (#3419)。 */
 /* 主エラー以外に agent が出した理由を列挙する (宣言側にねらいを記載)。 */
 /* 表示して「表示済み」に積む。列挙 (show_other_agent_errors) がこれを見て重複を避ける。 */
 void cgptsPlanner_::show_error_m(sPtr<stdString> m) {
@@ -333,13 +349,22 @@ void cgptsPlanner_::show_other_agent_errors() {
   if ( shown > 0 ) ::fprintf(stderr, "\n");
 }
 
+/* 末尾 (全 agent 完了後): **根の見えない try に溜まったエラー**を 1 度だけ報告する
+ * (continue-and-collect)。★ #3482: 以前は planner の asyncList を compact して集めていたが、
+ * async も agent も根の try の待ちリストに入るようになったので、**待つのは WAITAGENTS が済ませ**、
+ * ここは溜まった列を読むだけになった。
+ * ⚠ 利用者が書いた try の中の async は **その try が持つ** (catch が拾う) のでここには来ない。 */
 int cgptsPlanner_::drain_async() {
   int errs = 0;
-  for ( int i = 0 ; i < asyncList.length() ; ++i ) {
-    sPtr<pigData> r = asyncList[i]->compact();
-    if ( r->is_error() ) { show_error_m(r->get_str()); ++errs; }
+  sPtr<pigDataTryCatch> rt = root_try();
+  if ( rt.is_notNull() ) {
+    int n = rt->error_count();
+    for ( int i = 0 ; i < n ; ++i ) {
+      sPtr<pigData> r = rt->error_at(i);
+      /* ★ 畳まれた跡 (PE_DERIVED) は新しい失敗ではないので報告しない (終了コードにも出さない)。 */
+      if ( r.is_notNull() && r->is_error() && ! r->is_derived() ) { show_error_m(r->get_str()); ++errs; }
+    }
   }
-  asyncList.length(0);
   asyncErrors += errs;
   return errs;
 }
@@ -363,7 +388,10 @@ void pigcgOperatorAsync::_start() {
     /* ★ 0 = ここでは報告しない。直後の register_async で drain 対象に入れ、
      * **末尾の drain_async が continue-and-collect で報告する** (二重報告を避ける)。 */
     (void) thNEW(ptsFireAndForget,(sPtr<ptsObject>::d_cast(sCallSection::key->caller()), f, 0));
-    pl->register_async(f);                        /* drain 対象に登録(エラー集積) */
+    /* ★★ #3482: **async の待ちとエラーの行き先は try**。ptsFireAndForget が待ちリストへ入り、
+     * エラーもそこへ渡す ⇒ planner 側の登録簿は要らなくなった (根の下の分は末尾で
+     * drain_async が根の try から読んで報告する)。
+     * ⚠ 発行順チェーン (syncTail) は待ちや報告とは別の話なので従来どおり繋ぐ。 */
     pl->set_sync_tail(f);                         /* 次の prev = この front */
   }
   result = thNEW(pigDataNull, ());
@@ -373,15 +401,129 @@ void pigcgOperatorAsync::_start() {
   clean();
 }
 
-/* flush(): planner のレジストリを掃き出して未完了 async(export_async 含む)を全部待つ。詳細は flush_async。 */
+/* ★★ #3482: @flush()@ は **その地点を囲む try の待ちリストが空になるまで**待つバリア。
+ * ★ statement1 の中でも catch 本体の中でも意味は同じ — 「この try で起動した計算 (agent も
+ *   async も) が全部終わってから先へ進む」。根の見えない try の下 (= トップレベル) で呼べば
+ *   従来どおり「全部」を待つことになる。
+ * ⚠ **エラーの報告はしない**。エラーは try の列に残って catch の error() が読む
+ *   (根の下の分は末尾で drain_async が報告する)。報告点を 2 つ持たないための決まり。
+ * ⚠ 発行順チェーン (syncTail) の reset は従来どおり行う (flush 後の async は独立した発行順)。 */
 void pigcgOperatorFlush::_start() {
   sPtr<cgptsPlanner> pl = caller_planner();
-  if (pl.is_notNull())
-    (void) pl->flush_async();
-  result = thNEW(pigDataNull, ());
-  clean();   /* ★ #3450 (ひさ規則): helper を呼ばない同期 op は _start 末尾で clean */
+  if ( pl.is_notNull() )
+    pl->reset_sync_chain();
+  sPtr<ptsObject> f = sPtr<ptsObject>::d_cast(sCallSection::key->caller());
+  sPtr<pigEnvironment> e = f.is_notNull() ? f->get_env() : sPtr<pigEnvironment>(thNULL);
+  /* ★★ #3564: **sPtr で受ける**。生ポインタだった間、下の null 検査が拾えるのは
+   *   「一度も入っていない」だけで、**「入ったが畳まれた」は素通り**していた。 */
+  sPtr<pigDataTryCatch> t = e.is_notNull() ? e->get_try() : sPtr<pigDataTryCatch>();
+  /* ★ #3562: 性質の違う 2 つを同じ袋に入れない。
+   *   t が無い          … 根の見えない try が必ず在るので、**引けないのは配線の異常**。
+   *                       ⇒ 黙って「完了」に化けさせず落とす (#3482 の「黙って根へ落とさない」)。
+   *                       ★ #3564: sPtr になったので「畳まれた try」もここで捕まる。
+   *   agent_live() == 0 … **正常**。待つものが無いので即 null を返す。 */
+  if ( ! t.is_notNull() )
+    stdObject::panic("flush(): no enclosing try (env relay is broken)");
+  if ( t->agent_live() == 0 ) {
+    result = thNEW(pigDataNull, ());
+    clean();   /* ★ #3450 (ひさ規則): helper を呼ばない同期 op は _start 末尾で clean */
+    return;
+  }
+  /* まだ走っている ⇒ **待ちに入る** (error() と同じ作法: result を立てず helper を持つと
+   * preprocess が呼び手を listener にして yield し、空になった時点で set_result が起こす)。 */
+  sPtr<tinyState> th = t->try_helper();
+  /* ★ #3562: 預け先が無いのは **配線の異常** (待ちリストは生きているのに listen 先が無い)。
+   * 黙って「完了」を返すと flush がバリアにならないまま素通りする — 今回それが
+   * 「テストが間欠的に赤い」以外の痕跡を残さなかった。⇒ 落として core を残す。 */
+  if ( ! th.is_notNull() )
+    stdObject::panic("flush(): try_helper() is NULL (try helper not published)");
+  t->register_drain_waiter(sPtr<pigDataDelay>::d_cast(thThis));
+  helper = th;
 }
 
+
+/* ═══ #3556: 撤収の座り込みを名指しする trace (既定 OFF) ═══════════════════
+ *
+ * tinyState の反応器 fwIO::loop は
+ *     read の登録 0 ・ write の登録 0 ・ interval 無し ・ refio 0
+ * の **4 つ全部** が揃って初めて返る。1 つでも残れば INFINITE で眠る。MinGW は IOCP なので
+ * 「相手が消えた」を誰も post しない = 永久に何も来ない (POSIX の select は EOF を読める側で
+ * 教えるので露見しない)。box のフル ctest で毎回別のテストが TIMEOUT し、番犬の撮ったスタックが
+ * どれも fwIO::loop → FIN_THREAD_ROOT_LOOP なのがこれ。
+ *
+ * gdb からは refio / refio_pins が読めない (tinyState は -g 無しの .a を静的リンク)。そこで
+ * **ライブラリが既に持っている trace を、こちらから点ける** (ひさ提案 2026-09-19):
+ *     stdFrameWork::trace_all   非 0 なら fwIO::loop が毎周 dump(trace_all) を呼ぶ
+ *     stdFrameWork::trace_bit   dump が出す節の選択 (READ / WRITE / INTERVAL / ACTIVE)
+ *     tinyState::trace_all      全オブジェクトの状態遷移を出す (誰がまだ動いているか)
+ * dump は登録ごとに fd と **親の連鎖** を出すので、ptsErrSink / ptsWirePipe のような居残りは
+ * クラス名と持ち主で名指しできる。
+ *
+ *   SRAVA_FIN_TRACE=1            撤収に入った時点から毎周 read/write/interval の登録を出す
+ *                  =2            + 配送したイベント (FWTR_ACTIVE)
+ *                  =3            + 全状態遷移 (量は多い)
+ *   SRAVA_FIN_TRACE_FROM_START=1 撤収を待たず INI から点ける (撤収に入る前に止まる場合)
+ *   SRAVA_FIN_TRACE_DIR=<dir>    トレースを <dir>/fwtr-<pid>.txt へ**追い出す** (ctest 用・下記)
+ *   SRAVA_FIN_TRACE_STDOUT=1     出力先を stdout のままにする (dir 指定が無いときの既定は stderr)
+ *
+ * ★★ **ctest のスイートに点けるときは SRAVA_FIN_TRACE_DIR を必ず使う**。
+ *   テストの出力にトレースを 1 バイトでも混ぜると、
+ *       PASS_REGULAR_EXPRESSION "IVOL 2(\n|.)*DVOL 6"    (CMakeLists.txt に多数ある形)
+ *   の `(\n|.)*` が KWSys の後戻り型エンジンで **破滅的バックトラック**を起こし、
+ *   **ctest 自身が 100% CPU で空回りする**。2026-09-19 に実際に踏んだ:
+ *   末尾に 2051 バイト足しただけで ctest が 85 分進まず、テスト側は 0.1 秒で正常終了して
+ *   zombie になっていた (= 固まっているのは srava ではなく ctest)。量ではなく**後続バイト**が効く。
+ *   → [[ctest-pass-regex-backtracks]]
+ *
+ * ★ dir 指定が無いときは **stderr へ逃がす** (点けた時点で dup2(2,1))。dump は ::printf = stdout に
+ *   書くので、そのままだと stdout を比較しているテストが落ちる。逃がすのは点けた後だけで、
+ *   srava 本来の出力 (結果・サマリ) は撤収より前に出し終えている。
+ *   ⚠ FROM_START のときは **起動時から** 逃がすので、srava 自身の stdout も丸ごと道連れになる。
+ *     こちらは 1 本を狙い撃ちするときのモード。
+ *
+ * ⚠⚠ **planner でしか点けない**。dump の出力先は ::printf = stdout だが、agent プロセスの
+ *    stdout (fd1) は **pigwire のワイヤそのもの** (ptsAgentApplication が fd0=rio/fd1=wio に
+ *    する)。agent 側で点けるとトレース文がレコード列に混ざり、planner が
+ *    「agent closed unexpectedly」で落ちる (2026-09-19 に実際に踏んだ)。agent の中を見たければ
+ *    ワイヤを畳んでからでないと触れないので、別の道具が要る。
+ * ⚠ dump は stdout なので、行バッファのままだと**肝心の最後の 1 周がバッファに残って見えない**
+ *   (返ってこないのが症状 = 誰も flush しない)。点けると同時に無バッファにする
+ *   (setvbuf は先に fflush してバッファを空にしてから呼ぶ。Linux/MinGW とも効くことを確認済み)。
+ * ⚠ 4 つのうち **refio だけは fwIO の private で dump に出ない**。他の 3 つが空なのに抜けないなら
+ *   残りは refio、と**引き算で**読む。
+ */
+static void
+cg_fin_trace_arm(const char *where)
+{
+	int lv = osglue_env_int("SRAVA_FIN_TRACE", 0);
+	if ( lv <= 0 || stdFrameWork::trace_all != 0 )
+		return;                        /* OFF / もう点いている */
+	static char tag[64];               /* trace_all は const char* を持ち回るので静的寿命が要る */
+	::snprintf(tag, sizeof tag, "[fwtr %u %s]", (unsigned)osglue_getpid(), where);
+	::fflush(stdout);                  /* ★ setvbuf / dup2 の前にバッファを空にしておく */
+	const char *tdir = ::getenv("SRAVA_FIN_TRACE_DIR");
+	if ( tdir != 0 && tdir[0] != '\0' ) {
+		/* ★ テストの出力に 1 バイトも混ぜない = ctest の PASS 正規表現を踏まない。
+		 *   ハングを追う道具なので、殺されても残るファイルに置くのが本来正しい。 */
+		char path[4096];
+		::snprintf(path, sizeof path, "%s/fwtr-%u.txt", tdir, (unsigned)osglue_getpid());
+		if ( ::freopen(path, "w", stdout) == 0 ) {
+			::fprintf(stderr, "[fwtr] cannot open %s — トレースは出しません\n", path);
+			return;
+		}
+	} else if ( ! osglue_env_int("SRAVA_FIN_TRACE_STDOUT", 0) ) {
+		::fflush(stderr);
+		::dup2(2, 1);              /* 以降の stdout = stderr。テストの出力比較を汚さない */
+	}
+	::setvbuf(stdout, 0, _IONBF, 0);   /* ⚠ 眠ったまま返らないので溜めない */
+	stdFrameWork::trace_bit = (int8_t)( ( lv >= 2 ) ? FWTR_ALL : FWTR_RWI );
+	stdFrameWork::trace_all = tag;     /* ← これで fwIO::loop が毎周 dump する */
+	if ( lv >= 3 )
+		tinyState::trace_all = tag;
+	::printf("%s ON level=%d — 以降 fwIO の登録を毎周出す。"
+	         "READ/WRITE/INTERVAL が全部空でも抜けないなら、残っているのは refio。\n",
+	         tag, lv);
+}
 
 /*******************************************
 	STATE MACHINE
@@ -389,6 +531,10 @@ void pigcgOperatorFlush::_start() {
 
 TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の後にここで初期化 */
 {
+	/* ★ #3556: SRAVA_FIN_TRACE_FROM_START=1 のときだけ、撤収を待たずここで点ける。 */
+	if ( osglue_env_int("SRAVA_FIN_TRACE_FROM_START", 0) )
+		cg_fin_trace_arm("INI");
+
 	/* ★ #3427 ③: srava 言語の VALUE パーサを app 所有レジストリへ登録 (旧: cgptsLemonParser.cpp の
 	 *   静的初期化がグローバルスロットへ自己登録)。この planner を持つ実行体 = 言語パーサを持つ実行体。 */
 	if ( module_registry != thNULL )
@@ -406,6 +552,13 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 	cacheDir = thNEW(stdString,(cd));
 
 	env = thNEW(pigEnvironment,(thNULL));
+	/* ★★ #3482 段 3: 根の見えない try を立て、**根の env に刺す**。以降、env を作る側
+	 * (pigfSequence / pigfAsync / pigfApply) が引き継ぐので、プログラム中のどの地点でも
+	 * 「囲む try」が必ず在る。⚠ ここより前に env を作る経路は無い (planner の INI が最初)。 */
+	/* ★★ #3482: 根の見えない try は **ptsApplication が INI で作る** (撤収の理由と診断台帳の
+	 * 持ち主でもあるため)。planner はそれを **根の env に刺す**役だけ。 */
+	rootTry = root_try();
+	env->set_try(rootTry);
 	env->def_var(thNEW(stdString,("CACHE_DIR")), thNEW(pigDataString,(cd)));
 	/* CACHE_RETAIN: 終了時キャッシュ掃除の保持方針。CACHE_DIR 同様 env(SRAVA_CACHE_RETAIN)を初期値に
 	 * 事前定義し、プログラムから `CACHE_RETAIN = "14d";` で上書きできる(代入が env より優先)。
@@ -418,6 +571,42 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 	 * 即時終了したい場合は組込 exit(n) を使う。既定 0 = 成功 (POSIX 慣行)。
 	 * 反映は CLEANUP。**エラー終了時はエラーコード (1 / 128+signum) が優先** する。 */
 	env->def_var(thNEW(stdString,("EXIT_CODE")), thNEW(pigDataInteger,((INTEGER64)0)));
+
+	/* ★★ #3555 段2: USE_MODULES — `module::` を **省略したとき**の候補列 (= <変数>::op と同じ意味)。
+	 * CACHE_DIR / CACHE_RETAIN と同じ流儀で「環境変数を初期値に事前定義」する。狙いは 3 つとも
+	 * この idiom で既に満たされている:
+	 *   - 事前定義  ⇒ 未定義変数エラーが起きない
+	 *   - 使用地点で env->get_var ⇒ routing (decide_out_module) からそのまま引ける
+	 *   - 親チェーンで引ける ⇒ **ブロック / lambda の中だけ差し替えて、抜ければ戻る**
+	 * ⚠ 環境変数は配列を持てないので **',' 区切り**を配列として読む (SRAVA_USE_MODULES=occt,cgal)。
+	 *   未設定 / 空文字は "" = **指名なし** = 従来どおり priority 順 ⇒ 既存の式は 1 つも変わらない。
+	 *   ★ 空配列 [] は「候補ゼロ」= エラーなので、ここで [] を作らないこと。 */
+	{
+		const char *um = ::getenv("SRAVA_USE_MODULES");
+		sPtr<pigData> umv;
+		if ( um != 0 && um[0] != '\0' ) {
+			sPtr<pigDataArray> a = thNEW(pigDataArray,());
+			const char *p = um;
+			while ( *p != '\0' ) {
+				while ( *p == ' ' || *p == '\t' ) ++p;
+				const char *q = p;
+				while ( *q != '\0' && *q != ',' ) ++q;
+				const char *e = q;
+				while ( e > p && ( e[-1] == ' ' || e[-1] == '\t' ) ) --e;
+				if ( e > p ) {
+					char tb[256];
+					size_t tn = (size_t)(e - p);
+					if ( tn >= sizeof tb ) tn = sizeof tb - 1;
+					::memcpy(tb, p, tn); tb[tn] = '\0';
+					a->push_nocheck(thNEW(pigDataString,(tb)));
+				}
+				p = ( *q == ',' ) ? q + 1 : q;
+			}
+			if ( a->length() > 0 ) umv = a;
+		}
+		env->def_var(thNEW(stdString,("USE_MODULES")),
+		             umv.is_notNull() ? umv : sPtr<pigData>(thNEW(pigDataString,(""))));
+	}
 
 	/* ★ #3419 §17.3 (ひさ案 2026-08-24): **負荷コントロール / ゲート / 実験用の口を srava 変数にする**。
 	 * CACHE_DIR / CACHE_RETAIN と同じ流儀: **環境変数を初期値に事前定義**し、プログラムからの
@@ -465,7 +654,7 @@ TS_STATE(INI_ptsApplication_START)   /* ptsApplication 派生: ptsApp=自分 の
 
 	/* 終了系シグナル(SIGINT=Ctrl+C / SIGTERM=素の kill / SIGHUP=端末切断)を TSE_SIGNAL イベント化
 	 * (self-pipe)。filter() がフラグを立て、各状態が見て撤収する。tsSignal がハンドラを差し替えるので、
-	 * これより前に raise すると既定動作で即死する点に注意。3 つとも同じ撤収経路(INTERRUPT)に合流する。 */
+	 * これより前に raise すると既定動作で即死する点に注意。3 つとも filter() で同じ撤収経路へ合流する。 */
 	sig_int  = thNEW(tsSignal,(ifThis, SIGINT));
 	sig_term = thNEW(tsSignal,(ifThis, SIGTERM));
 	sig_hup  = thNEW(tsSignal,(ifThis, SIGHUP));
@@ -560,8 +749,19 @@ TS_STATE(ACT_cgptsPlanner_VALUE)
  * 放置する(関数型: 欲しいものが得られればよい)。 */
 TS_STATE(ACT_cgptsPlanner_EVAL)
 {
-	if ( sig_abort_flag )                     /* 終了系シグナル: 評価を打ち切り、自ら set_agentError して撤収 */
-		return rDO|ACT_cgptsPlanner_INTERRUPT;
+	/* ★ #3417 (2026-09-06): 撤収が始まっていたら **評価ツリーへ destroy を撃つ**。
+	 *   ⚠ 打ってから `tree->is_error()` の解決を待つ (この順序が本質)。is_error() の答えが
+	 *     出た後に destroy しても pigDataError は pigDataError のままで何も起きない。
+	 *   ★ なぜ要るか: 正常終了 (exit(msg)) の経路には既に tree->destroy() が在り、そのコメントが
+	 *     「**agent 以外の helper (pigfSystem 等) はこの経路でしか止まらない**」と書いている。
+	 *     撤収経路に無いのは非対称で、Ctrl+C では system() の子プロセスが止まらなかった。
+	 *   ★ 撤収の契機はシグナルに限らない。agent が 1 つ落ちても set_agentError が立つので、
+	 *     「1 つ落ちたら全部畳んで planner も終わる」という既存の流れとここで合流する。
+	 *   ⚠ 一度だけ打つ (destroy は冪等だが、EVAL は yield で何度も再入する)。 */
+	if ( get_agentError() != thNULL && ! treeDestroyed ) {
+		treeDestroyed = 1;
+		if ( tree != thNULL ) tree->destroy();
+	}
 	if ( tree->is_error() ) {
 		sPtr<pigData> tv = tree->compact();
 		if ( tv->control_kind() == CTRL_EXIT ) {   /* exit(msg): 正常終了。メッセージがあれば表示し exit 0。
@@ -583,7 +783,12 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 			return rDO|ACT_cgptsPlanner_WAITAGENTS;
 		}
 		show_error_m(tree->get_str());
-		(*exitCodeOut) = 1;
+		/* ★ #3417 (2026-09-06): **既に立っている終了コードを上書きしない**。
+		 *   シグナル撤収では filter() が 128+signum を置いてから tree->destroy() で
+		 *   評価がエラーに落ちるので、無条件に 1 を書くと 130 が 1 に化ける (実測で踏んだ)。
+		 *   CLEANUP の `if ( (*exitCodeOut) == 0 ) (*exitCodeOut) = 1;` と同じ流儀に揃える。 */
+		if ( (*exitCodeOut) == 0 )
+			(*exitCodeOut) = 1;
 		eval_error = 1;   /* キャッシュ掃除を抑止(評価が途中で失敗 → usedCaches 不完全の恐れ) */
 		/* 確定的な型/プログラムエラー(fatal: mesh+mesh・未定義変数・引数不一致等)は待つ意味がないので、
 		 * SIGINT と同様に set_agentError で **in-flight agent を即撤収**して終了する。幾何の失敗等
@@ -595,8 +800,25 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 		/* ★ 2026-08-11 修正: ここで **スクリプトの結果値を終了コードにしていた** のは不具合。
 		 * 数値結果は値がそのまま漏れ (300 → exit 44 / 256 → exit 0)、文字列など非数値では
 		 * get_int() が不定値を返し **同一入力で毎回変わる**。旧 7/24 版は 0 を返していたので退行だった。
-		 * 成功 = 0 (POSIX 慣行) に戻す。明示指定は予約変数 EXIT_CODE (CLEANUP で反映)。 */
-		(*exitCodeOut) = 0;
+		 * 成功 = 0 (POSIX 慣行) に戻す。明示指定は予約変数 EXIT_CODE (CLEANUP で反映)。
+		 *
+		 * ★★ #3541① (2026-09-15): ⚠ **撤収中はここを通っても 0 を書かない**。
+		 *   @c system() を待っている間に SIGINT が来ると、撤収は届くのに *式の評価そのものは
+		 *   成功して終わる* (子を殺した status が値として返るだけ)。⇒ この枝に入り、
+		 *   filter() が置いた 128+signum を **0 で上書き**していた。CLEANUP はその 0 を見て
+		 *   「エラーなら 1」の規則で 1 を書く ⇒ **130 が 1 に化ける**。
+		 *   実測 (macMINI 2026-09-15・PIG_DBG_TD):
+		 *       system 経路  filter: exitCode=130 → **CLEANUP 入口: exitCode=0** → 終了 1
+		 *       agent 経路   filter: exitCode=130 → CLEANUP 入口: exitCode=130 → 終了 130
+		 *     ⇒ agent 経路で正しかったのは *評価がエラーに落ちて* 上の guard つきの枝を
+		 *       通っていたからで、①が直っていたからではない。
+		 *   ★ 指標は agentError 1 本 (#3417 の方針)。撤収 = agentError が立っている、なので
+		 *     そこを見れば signum を持ち回らずに済む。⚠ agent 由来のエラーでも 0 は書かない
+		 *     方が正しい (CLEANUP の `ae != thNULL` 枝が 1 を立てる)。
+		 *   ⚠ 「評価は成功したが中断された」という **両方成り立つ状態**が在ることが要点。
+		 *     *成功* を *中断されなかった* の代理にしない。 */
+		if ( get_agentError() == thNULL )
+			(*exitCodeOut) = 0;
 	}
 	return rDO|ACT_cgptsPlanner_WAITAGENTS;
 }
@@ -608,27 +830,57 @@ TS_STATE(ACT_cgptsPlanner_EVAL)
 TS_STATE(ACT_cgptsPlanner_WAITAGENTS)
 {
 	if ( osglue_env_int("PIG_DBG_TD", 0) ) ::fprintf(stderr, "[td] planner WAITAGENTS count=%d\n", agent_count());
-	/* 待機中に終了系シグナル → まだ未集約なら set_agentError して in-flight agent を撤収させる。 */
-	if ( sig_abort_flag && get_agentError() == thNULL )
-		return rDO|ACT_cgptsPlanner_INTERRUPT;
+	/* ★ #3417 (2026-09-06): 撤収中なら **生存中の全 agent へ destroy を撃つ**。
+	 *   旧実装は `sig_abort_flag && get_agentError()==NULL` を見て INTERRUPT へ戻るだけで、
+	 *   agent には何も送っていなかった (set_agentError の wake-all 頼み)。しかも
+	 *   agentError が既に立っていれば何も起きないので、**2 回目以降の Ctrl+C が無効**だった。
+	 *   ⇒ 指標が 1 本になったので、条件は「撤収中か」だけ。一度だけ撃つ。 */
+	if ( get_agentError() != thNULL && ! agentsDestroyed ) {
+		agentsDestroyed = 1;
+		destroy_agents();
+	}
+	/* ★★ #3503 (ひさ設計 2026-09-07): **in-proc 居座りの panic はここで撃つ**。
+	 *
+	 * in-proc の実行体が destroy に応じないと、その agent は永久に畳まれず agent_count() は
+	 * 0 にならない = ここで止まる。ptsMediatorInternal が猶予切れで要求を上げてくるので、
+	 * **生きている MediatorExternal が 0 になったことを確認してから** abort する。
+	 *
+	 * ⚠ mediator に撃たせてはいけない — in-proc と process は同居するので、そのとき生きている
+	 *   agent プロセスが全部迷子になる (子は setpgid で別プロセスグループに居るので端末の
+	 *   シグナルも届かず、#3417 が潰した居残りに戻る)。撃つ前に子が居ないことを確かめられるのは
+	 *   全体を見ている planner だけ。
+	 * ★ abort にするのは core が残るため — 固まったスレッドのスタックが見えないと直しようがない。
+	 * ⚠ 既定では要求そのものが上がらない (SRAVA_INPROC_PANIC_MS 未設定 = panic 無効)。 */
+	{
+		sPtr<pigData> ae = get_agentError();
+		if ( ae != thNULL && ae->is_panic() ) {
+			const int nx = ( ptsApp != thNULL ) ? ptsApp->ext_agent_count() : 0;
+			if ( nx == 0 ) {
+				sPtr<stdString> m = ae->get_str();
+				::fprintf(stderr,
+				    "\n*** srava: %s. No agent processes remain (nothing will be orphaned), "
+				    "so the planner is aborting. "
+				    "(SRAVA_INPROC_PANIC_MS sets the wait; exec_default:\"process\" avoids this) ***\n",
+				    ( m.is_notNull() ) ? m->get_str() : "in-proc module did not fold");
+				::fflush(stderr);
+				::abort();
+			}
+			if ( osglue_env_int("PIG_DBG_TD", 0) )
+				::fprintf(stderr, "[td] planner: PE_PANIC pending; %d agent process(es) left\n", nx);
+			return 0;   /* 子が畳まれるのを待つ (ext_agent_del が最後の 1 つで wakeup) */
+		}
+	}
 	if ( agent_count() == 0 )
 		return rDO|ACT_cgptsPlanner_CLEANUP;
 	return 0;   /* wakeup 待ち(最後の agent の agent_leave、または set_agentError) */
 }
 
-/* 終了系シグナル受信: 自ら set_agentError(全 agent の撤収トリガ)。以後は WAITAGENTS で countAgent==0 を
- * 待ってから(in-flight agent が A_SAVE_BEGIN 後 ABORT して FIN するのを待つ)cleanup する。
- * exit code = 128 + signum(INT=130 / TERM=143 / HUP=129)。 */
-TS_STATE(ACT_cgptsPlanner_INTERRUPT)
-{
-	int sn = ( sig_abort_num != 0 ) ? sig_abort_num : SIGINT;
-	const char *nm = ( sn == SIGTERM ) ? "SIGTERM" : ( sn == SIGHUP ) ? "SIGHUP" : "SIGINT";
-	char msg[64];
-	::snprintf(msg, sizeof msg, "interrupted by %s", nm);
-	set_agentError(thNEW(pigDataError,(msg)));
-	(*exitCodeOut) = 128 + sn;
-	return rDO|ACT_cgptsPlanner_WAITAGENTS;
-}
+/* ★ #3417 (2026-09-06): ACT_cgptsPlanner_INTERRUPT は **廃止**した。
+ *   やっていたのは set_agentError と exitCodeOut への代入の 2 行だけで、状態を 1 つ使う
+ *   価値が無く、しかも「フラグは立っているがエラーは未集約」という中間状態を作るために
+ *   WAITAGENTS に専用の分岐が要っていた (それが 2 回目以降の Ctrl+C を無効にしていた)。
+ *   ⇒ どちらの仕事も filter() がシグナルを受けたその場で済ませる。
+ *      exit code = 128 + signum (INT=130 / TERM=143 / HUP=129) も filter() が畳む。 */
 
 /* SRAVA_CACHE_RETAIN を (mode, cutoff) に解釈する。終了時クリーンアップの方針を決める。
  *   返り = retain_mode: 0=即削除(未使用の完了キャッシュを全削除・既定) / 1=期日保持(cutoff より古い完了のみ削除) /
@@ -696,7 +948,7 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 	int had_error = ( ae != thNULL ) || eval_error || ( async_err > 0 );
 
 	/* ★ 予約変数 EXIT_CODE の反映 (2026-08-11)。プログラムが `EXIT_CODE = n;` で明示した値を
-	 * 終了コードにする。エラー終了時は下の分岐が 1 / INTERRUPT の 128+signum を立てるので、
+	 * 終了コードにする。エラー終了時は下の分岐が 1 / filter() が 128+signum を立てるので、
 	 * **エラーコードが優先** (成功時の明示指定という位置づけ)。
 	 * 範囲外は **警告して 0-255 にクランプ** する。無言で切り詰めるのは、まさにこの修正で潰した
 	 * 「結果値が黙って exit に漏れる」不具合と同じ轍なので避ける。 */
@@ -842,12 +1094,13 @@ TS_STATE(ACT_cgptsPlanner_CLEANUP)
 
 TS_STATE(FIN_START)
 {
-	/* ★ #3366: planner teardown(=フレームワーク稼働中・gc_thread 生存の正規コンテキスト)で
-	 * async(export_async/print_async 含む)の未解決 front を明示的に手放す。中断(SIGINT)で drain を
-	 * スキップした場合に未解決 front を抱えたまま残る。リストは planner メンバ(gc 管理下)なので放置しても
-	 * planner の gc 解放で片付くが、ここで先に空にしておくと「全 agent 撤収後・正規コンテキスト」での
-	 * 解放を保証でき、終了パスのいかなる順序でも main スレッドでの use-after-free を起こさない。 */
-	asyncList.length(0);
+	/* ★ #3556: 撤収の入口で点ける (既定 OFF)。ここから先に残る登録が座り込みの犯人。 */
+	cg_fin_trace_arm("FIN");
+
+	/* ★ #3482: 旧 asyncList (async の未解決 front) は撤去した。待ちの台帳は根の見えない try が
+	 * 持ち、そこは app (gc 管理下) の持ち物なので、planner の FIN で明示的に空にする必要が無い。
+	 * (#3366 の「中断で drain を飛ばしたとき未解決 front を抱えたまま残る」は、台帳が app 側に
+	 *  移ったことで planner の終了順とは無関係になった。) */
 
 	/* tsSignal は tsSignalCore の fwIO をイベントループに登録したまま生かす。明示的に destroy しないと
 	 * 全状態が終わってもループが終了せずプロセスが残り続ける。3 ハンドラとも閉じる。 */
