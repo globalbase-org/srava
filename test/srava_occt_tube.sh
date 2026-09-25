@@ -70,5 +70,88 @@ case "$(msg "print(volume(\"occt\"::tube([[[5,0,0],0.5],[[0,5,0],0.8],[[-5,0,0],
 	*) echo "TUBE_FAIL: closed + 可変半径が明示エラーにならない"; NG=1 ;;
 esac
 
+# ================================================================================
+# ★★★ #3593: tube_ruled (折れ線の背骨 + 厳密な円の断面)。
+#   掃引系は「なめらか / 線織」の対で揃える — loft / loft_ruled は対だったのに tube だけ
+#   occt が線織版を持たなかった。⇒ 足した。分かれ目は **背骨だけ**で断面は厳密な円のまま。
+# ================================================================================
+
+RULED_L='[[[0,0,0],1],[[10,0,0],1],[[10,10,0],1]]'
+
+# ⑨ 直管は背骨が折れていないので **tube と同じ閉形式**に一致する (pi r^2 L)。
+ck "tube_ruled 直管 = pi r^2 L" \
+   "$(val "print(\"VAL\", volume(\"occt\"::tube_ruled($STRAIGHT)));")" 7.853981633974483 1e-9
+
+# ⑩ 可変半径の直管 → 円錐台の閉形式。★ 断面が厳密な円なので **9 桁**で合う。
+ck "tube_ruled 円錐台の閉形式" \
+   "$(val "print(\"VAL\", volume(\"occt\"::tube_ruled([[[0,0,0],0.5],[[10,0,0],1.0]])));")" \
+   18.325957145940461 1e-9
+
+# ⑪ ★★ **本命**: 角のあるパスでは tube と tube_ruled が *別の形* になる。
+#    スプラインの背骨は角を丸めるので体積が膨らむ。
+#    ⇒ 代用が効かないことをここで固定する (これが #3593 を起票した理由そのもの)。
+VT=$(val "print(\"VAL\", volume(\"occt\"::tube($RULED_L)));")
+VR=$(val "print(\"VAL\", volume(\"occt\"::tube_ruled($RULED_L)));")
+if [ -n "$VT" ] && [ -n "$VR" ]; then
+	R=$(awk -v a="$VT" -v b="$VR" 'BEGIN{ if(b<=0){print 1; exit} d=(a-b)/b; print (d>0.1)?0:1 }')
+	if [ "$R" = "0" ]; then echo "  ok 角では tube と tube_ruled が別の形 ($VT 対 $VR)"
+	else echo "TUBE_FAIL: 角で tube と tube_ruled の差が出ない ($VT 対 $VR)"; NG=1; fi
+else echo "TUBE_FAIL: L 字の tube / tube_ruled が値を出さない"; NG=1; fi
+
+# ⑫ ★★★ **cgal の tube_ruled は segs を上げると occt の tube_ruled へ収束する**。
+#    これが「同じ構成 (折れ線の背骨 + リング間を線織) で、断面が n 角形か円かだけが違う」
+#    ことの示し方。⚠ 逆に言うと **値は一致しない**ので kernel_agree には入れない。
+#    ★ 実装の要: occt 側は MakePipeShell ではなく **ThruSections(ruled)** で組む。
+#      MakePipeShell は角の処理を自分で持っていて、こちらが置いた断面と二重に効き、
+#      遷移モードをどれに変えても cgal の極限からは外れる。
+if [ -n "$VR" ]; then
+	G8=$(val "print(\"VAL\", volume(\"cgal\"::tube_ruled($RULED_L, 8)));")
+	G512=$(val "print(\"VAL\", volume(\"cgal\"::tube_ruled($RULED_L, 512)));")
+	if [ -n "$G8" ] && [ -n "$G512" ]; then
+		R=$(awk -v a="$G8" -v b="$G512" -v x="$VR" \
+		    'BEGIN{ da=(x-a); db=(x-b); if(da<0)da=-da; if(db<0)db=-db; print (db<da/10)?0:1 }')
+		if [ "$R" = "0" ]; then echo "  ok cgal tube_ruled は segs を上げると occt tube_ruled へ収束 ($G8 → $G512 / occt $VR)"
+		else echo "TUBE_FAIL: cgal tube_ruled が occt tube_ruled へ収束しない ($G8 → $G512 / occt $VR)"; NG=1; fi
+	else echo "TUBE_FAIL: cgal tube_ruled が値を出さない"; NG=1; fi
+fi
+
+# ⑬ ★ **能力差を固定する**: closed + 可変半径は tube では明示エラー (⑧) だが、
+#    tube_ruled では **通る**。実装機構が違うため (MakePipeShell は閉背骨 + 複数断面で
+#    落ちるが、ThruSections は断面を順に並べるだけなので閉じた輪でも半径を変えられる)。
+CV=$(val "print(\"VAL\", volume(\"occt\"::tube_ruled([[[5,0,0],0.5],[[0,5,0],0.8],[[-5,0,0],0.5],[[0,-5,0],0.8]], {closed:1})));")
+if [ -n "$CV" ]; then
+	R=$(awk -v a="$CV" 'BEGIN{ print (a>0)?0:1 }')
+	if [ "$R" = "0" ]; then echo "  ok closed + 可変半径は tube_ruled では通る ($CV)"
+	else echo "TUBE_FAIL: closed + 可変半径の tube_ruled が正の体積を返さない ($CV)"; NG=1; fi
+else echo "TUBE_FAIL: closed + 可変半径の tube_ruled が値を出さない"; NG=1; fi
+
+# ⑮ ★★★ #3594: **2D のパスは tube_ruled では明示エラー**。
+#    tube_ruled(path) の意味は 8 カーネルで確定していて、位置が [x,y] なら結果は **2D の領域**。
+#    occt は常に 3D の立体を名乗るので、[x,y] を z=0 と読んで掃くと *同じ式がカーネルによって
+#    「帯」と「平たい立体」に化ける* = #3588 で直したのと同じ「黙って別のものが返る」形になる。
+#    ⇒ 新しい意味を作らず明示エラーにする。
+#    ⚠ 文言は「occt には作れない」ではなく「**この op がまだ 3D 専用**」— occt 自体は 2D の
+#      領域を持てる (rect / circle / polygon / 2D の offset)。能力の限界と読ませない。
+#    ⚠ 測るのは **実値** (volume)。type_of は宣言型を返すので、この種の食い違いは見えない。
+case "$(msg "print(volume(\"occt\"::tube_ruled([[[0,0],1],[[10,0],1],[[10,10],1]])));")" in
+	*"3D-only"*) echo "  ok tube_ruled の 2D パスは明示エラー" ;;
+	*) echo "TUBE_FAIL: tube_ruled が 2D パスを黙って 3D の立体にしている"; NG=1 ;;
+esac
+
+# ⑯ ★ 対照: **occt 単独の op である tube は従来どおり [x,y] を z=0 として受ける**。
+#    あちらは他カーネルに相手が居ないので突き合わせる規約が無い。⇒ ⑮ は tube には及ばない。
+CT=$(val "print(\"VAL\", volume(\"occt\"::tube([[[0,0],1],[[10,0],1],[[10,10],1]])));")
+if [ -n "$CT" ]; then
+	R=$(awk -v a="$CT" 'BEGIN{ print (a>0)?0:1 }')
+	if [ "$R" = "0" ]; then echo "  ok tube は 2D 位置を z=0 として受ける ($CT)"
+	else echo "TUBE_FAIL: tube が 2D 位置で正の体積を返さない ($CT)"; NG=1; fi
+else echo "TUBE_FAIL: tube が 2D 位置で値を出さない"; NG=1; fi
+
+# ⑭ 半径 0 は tube_ruled でも明示エラー (B-rep の円断面は半径 0 を作れない)
+case "$(msg "print(volume(\"occt\"::tube_ruled([[[0,0,0],0],[[5,0,0],0.5]])));")" in
+	*"radius > 0"*) echo "  ok tube_ruled でも半径 0 は明示エラー" ;;
+	*) echo "TUBE_FAIL: tube_ruled で半径 0 が明示エラーにならない"; NG=1 ;;
+esac
+
 [ "$NG" -eq 0 ] && echo "OCCT-TUBE-OK"
 exit "$NG"

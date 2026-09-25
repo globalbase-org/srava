@@ -89,8 +89,15 @@ for tbl in modules/*/c++/*tsAgent.cpp; do
 		#   意味を持たないので segs 自体が無い。⇒ 検査する対象が存在しない。
 		#   ⚠ 例外は **理由つきでここに 1 行**。理由の無い除外を足すと、この検査が
 		#     「歯抜けを数える」ものから「歯抜けを隠す」ものに変わる。
+		#   ★ #3593: occt の tube_ruled は第 2 引数が **オプションのハッシュ** ({closed:1}) で、
+		#     分割数ではない (断面が厳密な円なので segs という量が無い — occt の他の生成 op と同じ)。
+		#     ⚠ 上の nin による自動除外では抜けない: 引数の **個数** は届いてしまい、
+		#       違うのは *意味* だから。⇒ vdaSphere と同型の「同じ op 名で引数の意味が違う」例外。
+		#     ★ 根拠は申告だけではない — srava_segs_occt が tube_ruled を HONORS=none で回し、
+		#       **渡すとエラー・省略すると値**であることを実地に見ている (CMakeLists の同名の行)。
 		case "$f/$op" in
-			*/vdaSphere.cpp/sphere) continue;;
+			*/vdaSphere.cpp/sphere)      continue;;
+			*/ocaTubeRuled.cpp/tube_ruled) continue;;
 		esac
 		grep -q 'srava_geo::check_segs\|srava_geo::check_sides' "$f" || {
 			echo "FAIL: $f ($op) が共通検査を呼んでいない"

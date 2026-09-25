@@ -63,6 +63,64 @@ pig_val_array_len(sPtr<pigData> arg)
 	return ar.is_notNull() ? ar->length() : 0;
 }
 
+/* ★★ #3588 (2026-09-23): @tube_ruled@ の **path 引数の次元** — 3 = [x,y,z] ・ 2 = [x,y] ・
+ *   0 = 読めない (配列でない / 要素が [pos,r] でない / 位置が 1 要素以下)。
+ *
+ *   ---- なぜ要るのか ----
+ *   @tube_ruled(path, segs)@ は path 頂点の位置の長さで **3D 掃引立体 / 2D 帯**を作り分ける。
+ *   作り分け自体は op が正しくやっていたが、結果が名乗る型は @sig_dispatch@ が
+ *   *入力型で先に当たった sigline* から採る。この op は **幾何入力を持たない** (path も segs も
+ *   AK_INLINE の値) ので、"->cg-mesh3d;->cg-cross2d" と並べると照合すべき入力型が無く
+ *   **必ず先頭が勝つ** ⇒ 2D の結果まで cg-mesh3d を名乗り、@extrude@ と 2D ブールが拒んだ (#3588)。
+ *   ⇒ 行を出力型ごとに分け、この述語で振り分ける (import と同じ形)。
+ *
+ *   ⚠⚠ **判定規則は op 本体と同じでなければならない** — 「**先頭頂点の位置の長さ**で確定・
+ *     3 以上なら 3D」。片方だけ変えると *routing と計算で次元が食い違い*、型スタンプだけが
+ *     嘘になる = #3588 と同じ形の再発になる。変えるときは必ず両方:
+ *       @modules/cgal/c++/cgaTube.cpp@ / @modules/manifold/c++/mfaTube.cpp@ の「先頭頂点で次元を確定」
+ *   ⚠ 純粋 — 値を読むだけ。⚠ **配列の要素は eager に解決されない**ので、要素ごとに口を通す
+ *     (@obt_array@ はゲートウェイなので、通せば待つ)。 */
+inline int
+pig_val_path_dim(sPtr<pigData> arg)
+{
+	if ( arg == thNULL || arg->is_error() ) return 0;
+	sPtr<pigDataArray> path = arg->obt_array();
+	if ( ! path.is_notNull() || path->length() < 1 ) return 0;
+	sPtr<pigDataArray> pr = path->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
+	if ( ! pr.is_notNull() || pr->length() < 2 ) return 0;     /* 要素が [pos, r] でない */
+	sPtr<pigDataArray> pos = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
+	if ( ! pos.is_notNull() ) return 0;
+	int pl = pos->length();
+	return ( pl >= 3 ) ? 3 : ( ( pl >= 2 ) ? 2 : 0 );
+}
+
+/* ★ @tube_ruled@ の行を **path の次元**で選ぶ (第 1 引数を見る)。
+ *
+ *   ⚠⚠ **3D 側が catch-all** である (「2D でない」で受ける) のは意図的:
+ *     壊れた path を *どの行も受けない* ようにすると、利用者に出るのは
+ *     「この op を実行できるモジュールが無い」という **routing の文言**になり、
+ *     op が持っている具体的な診断 ("each vertex must be [pos, r]" ・
+ *     "vertex position must be [x,y]" 等) に **届かなくなる**。
+ *     ⇒ 絞るのは 2D 側だけにして、残りは 3D 側が引き受け、診断は op に任せる。
+ *   ⚠ したがって記述子では **2D の行を先に置く** — 逆にすると catch-all が先勝ちして
+ *     2D の行が永久に選ばれない (#3554 段1 と同じ罠)。ロード時検査はこの順序までは見ない
+ *     (マッチ関数どうしの重なりは静的に判定できない)。 */
+inline int
+pig_match_path_is_2d(const srava_module_descriptor *d, const pigOpEntry *e, int argNo, sPtr<pigData> arg)
+{
+	(void)d; (void)e;
+	if ( argNo != 0 ) return 1;                 /* path は第 1 引数 */
+	return ( pig_val_path_dim(arg) == 2 ) ? 1 : 0;
+}
+
+inline int
+pig_match_path_is_3d(const srava_module_descriptor *d, const pigOpEntry *e, int argNo, sPtr<pigData> arg)
+{
+	(void)d; (void)e;
+	if ( argNo != 0 ) return 1;
+	return ( pig_val_path_dim(arg) == 2 ) ? 0 : 1;   /* 2D 以外 = 3D と「読めない」を受ける */
+}
+
 /* ★ 値 (3x4 / 4x4 の行列) が **z=0 平面を平面へ写すか**。
  *   1 = 平面に留まる (2D のまま扱える) / 0 = 面外へ出る・読めない・特異。
  *

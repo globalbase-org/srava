@@ -43,6 +43,11 @@ title: srava ドキュメント
   各擬似モジュールが**定義している op の一覧**。狙いは 2 つ —
   **粒度の既定値**（`seg` / `dx`）を呼び出しの手前で埋めること（`cast` にはできない）と、
   **引数の少ない呼び方を足す**こと（`pm_points` の 2 引数 `intersection`）。
+- [**インクルードライブラリ**](srava_include_reference.html) — `include "std/…";` で取り込む
+  **srava 自身で書かれたライブラリ**(`math` / `curve` / `layout` / `guide` / `inspect` / `roll`)の一覧。
+  ★ ここに載るのは **op ではない**ので `--module-info` には出てこない。要るのは `module()` ではなく
+  **`include`**。各ライブラリの **必須モジュール**(ライブラリ自身が宣言する)と
+  **使えるモジュール**(利用側が選ぶ)を表で対照できる。
 - [**モジュール設計**](srava_module_design.html) — 自作モジュール（`.so`）を書くための設計ガイド。
   記述子 ABI・op 申告・型/4CC 登録・実行方式・cross-module 型変換・ビルド/配置。
 - [**言語リファレンス**](srava_language_reference.html) — 文法・lambda/クロージャ・評価モデル・

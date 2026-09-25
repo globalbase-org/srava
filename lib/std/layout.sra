@@ -4,6 +4,14 @@
 //   2D/3D 両対応(bbox の隅の次元 length(bb[0]) で 2/3 を判定し、移動ベクトルを合わせる)。
 //   返り値は **配列**(reduce しない)。1 つにまとめたいなら union(...) を呼ぶ。
 
+//
+// ★ 幾何 op を使う関数は、先頭で **自分の候補列を宣言する**:
+//     var sup = [<この関数が対応するカーネル>];   use mod_only(sup);
+//   意味は 3 つ — 呼び手が選んでいればそれを尊重 / 何も言っていなければ載っているものから /
+//   交差しなければその場でエラー (黙って別のカーネルで解かない)。
+//   ⇒ 詳細は docs 言語リファレンス §ライブラリ関数の宣言 (#lib-use-decl)。
+//   ★ sup は which(op) から **機械的に**起こしてある (2026-09-24)。各関数のコメントはその根拠。
+
 // 次元に応じたゼロベクトル([0,0] or [0,0,0])を作る内部ヘルパ。
 var _zero = \(dim) {
     if ( dim == 2 ) { [0,0]; } else { [0,0,0]; }
@@ -12,6 +20,11 @@ var _zero = \(dim) {
 // stack(arr, axis, gap): 指定軸(0=x,1=y,2=z)に、各 mesh の bbox 幅 + gap で隙間なく並べる。
 //   各 mesh をその軸の min が連続位置に来るよう移動 → 重ならない。
 var stack = \(arr, axis, gap) {
+    // 使う op = bbox と transform(>>>)。★ 2 つは **値を受け渡さない** (bbox→値 / transform→同じ型)
+    //   ので、sup は両者の提供者の **和** を priority 順に並べる (which・2026-09-24)。
+    //   例: geogram のメッシュなら transform=geogram / bbox=geomutils と別々に当たる。
+    var sup = ["cgal", "manifold", "geomutils", "geogram", "nef_hybrid", "cherchi", "occt", "openvdb", "points"];
+    use mod_only(sup);
     var n = length(arr);
     var off = [];
     var cur = 0;
@@ -49,6 +62,8 @@ var _gapvec = \(gap, ndim) {
 //   例: grid(m, 2, 1) → m[0]>>>[0,0], m[1]>>>[1,0], m[2]>>>[0,1], m[3]>>>[1,1]。
 //   col = i - (i/cols)*cols(行内位置, x) / row = i/cols(行, y)(整数除算)。3D も可(z 不変)。
 var grid = \(arr, cols, gap) {
+    var sup = ["cgal", "manifold", "geogram", "nef_hybrid", "cherchi", "occt", "openvdb", "points"];  // transform のみ
+    use mod_only(sup);
     var g = _gapvec(gap, 2);                  // [gx, gy] = 格子ピッチ(原点間隔)
     return map(arr, \(m, i) {
         var c = i - (i / cols) * cols;  var r = i / cols;
@@ -62,6 +77,8 @@ var grid = \(arr, cols, gap) {
 //   **gap はスカラ(全軸同一)または [gx, gy, gz](軸別)**。
 //   **要素 0 が原点(0,0,0)、x(行内)→ y(行)→ z(層)の順に、いずれも正方向へ伸びる**。
 var grid3 = \(arr, cols, rows, gap) {
+    var sup = ["cgal", "manifold", "geogram", "nef_hybrid", "cherchi", "occt", "openvdb", "points"];  // transform のみ
+    use mod_only(sup);
     var g = _gapvec(gap, 3);                  // [gx, gy, gz] = 格子ピッチ(原点間隔)
     var per = cols * rows;                    // 1 層あたりの要素数
     return map(arr, \(m, i) {
@@ -74,6 +91,8 @@ var grid3 = \(arr, cols, rows, gap) {
 // align(arr, axis, mode): 指定軸で全 mesh を一直線に揃える(位置の他成分は保つ)。
 //   mode = "min" / "center" / "max"。基準は先頭要素のアンカー。
 var align = \(arr, axis, mode) {
+    var sup = ["cgal", "manifold", "geomutils", "geogram", "nef_hybrid", "cherchi", "occt", "openvdb", "points"];  // bbox + transform
+    use mod_only(sup);
     var n = length(arr);
     if ( n == 0 ) { return arr; }
     var bb0 = bbox(arr[0]);

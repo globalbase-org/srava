@@ -182,6 +182,24 @@ public:
 	static sPtr<ocShape> loft_from_args(sArray<sPtr<pigData> > *args, bool ruled,
 	                                    const char **errmsg, char *errbuf, int errbufsz);
 
+	/* ★★★ #3593: @tube@ / @tube_ruled@ の **共有実体**。path = [[[x,y,z], r], …]。
+	 *
+	 *   ruled: false = 点を通る **C2 の B-spline** を背骨にする (@tube@)
+	 *          true  = 点を直線で結んだ **折れ線**を背骨にする (@tube_ruled@)
+	 *
+	 *   ★★ 分かれ目は **背骨の性質だけ**で、断面はどちらも **厳密な円**のまま。
+	 *     @loft@ / @loft_ruled@ とまったく同じ対の作り方である (あちらも断面は厳密な平面の
+	 *     まま、断面「間」をなめらかに通すか直線で結ぶかだけが違う)。
+	 *   ⚠⚠ したがって @tube_ruled@ も **cgal / manifold の @tube_ruled@ とは一致しない** —
+	 *     向こうは断面が segs 角形の近似で、こちらは厳密な円。背骨は同じ折れ線になるので
+	 *     *形は近い*が、体積は構造的に違う (occt の sphere / cylinder / circle と同じ理由)。
+	 *     ⇒ カーネル一致の表には入れない。
+	 *   ⚠ 折れ線の背骨は角で接線が跳ぶので、掃引は **RightCorner** (留め継ぎ) で行う。
+	 *     これが cgal / manifold が角で 1 枚のリングを共有するのと同じ意味になる。
+	 *   失敗は null + *errmsg (呼び手が明示エラーにする)。 */
+	static sPtr<ocShape> tube_from_args(sArray<sPtr<pigData> > *args, bool ruled,
+	                                    const char **errmsg, char *errbuf, int errbufsz);
+
 	static sPtr<ocShape> bool_from_args(sArray<sPtr<pigData> > *args, const char *kind,
 	                                    const char **errmsg, char *errbuf = 0, int errbufsz = 0,
 	                                    const pigBreak *brk = 0);
@@ -277,7 +295,7 @@ public:
 	/* ★★ 判定は @BRepClass3d_SolidClassifier@ — **解析曲面のまま**解くので、球や円柱では
 	 *   メッシュ近似の誤差が無い。⇒ 3 モジュールの中で **一番正確**。
 	 *   ★ 境界の厚みは @Precision::Confusion@ (geomutils の相対 1e-12 / openvdb の
-	 *     0.75 ボクセルに相当するもの。モジュールごとに違ってよい = #3575)。
+	 *     0.75 ボクセルに相当するもの。モジュールごとに違ってよい = #3575)。 */
 	/* ---- #3581: 点群を **3 つに分ける** ------------------------------------------
 	 * @cls[i]@ = **0 境界ちょうど / -1 内側 (開) / +1 外側**。@pts@ は @dim@ 成分 x @npt@
 	 * (@dim@ = 2 なら **z=0 とみなす**)。返り 1 = 分けた / 0 = 断った (+ @why@)。

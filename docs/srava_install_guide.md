@@ -220,6 +220,8 @@ xcode-select --install
 
 # CMake と CGAL(cgal が boost/gmp/mpfr を連れてくる)・TBB・OpenCASCADE
 brew install cmake cgal tbb opencascade
+# ctest を回すなら: timeout(1) 相当 (gtimeout) が要る ← §8
+brew install coreutils
 # 任意: export_vox を使うなら
 brew install hdf5
 
@@ -232,6 +234,9 @@ cmake --build build -j
 sudo cmake --install build
 ```
 
+- ⚠ **`coreutils` は「テストを回すなら必須」**(製品の実行には不要)。macOS には `timeout(1)` が
+  無いため、時間で打ち切る道具を要求するテストが走れない。無い状態では **Skipped** になり
+  (緑でも赤でもない)、入れるものが出力に出る。→ §8
 - **CGAL が無い状態**では `cgal.so` モジュールがビルドできない(`find_package(CGAL)` 失敗)。
   `brew install cgal` で解決するか、`-DSRAVA_MODULE_CGAL=OFF` で当モジュールを除外する。
 - HDF5 を入れない場合、configure は「HDF5 not found → export_vox 無効」と表示して**本体は通常ビルド**
@@ -288,6 +293,9 @@ cmake --install build --prefix /usr/local
   **上流 OCCT の欠陥**で、srava 側の回帰ではない — MinGW の OCCT では
   「差の和で組んだ xor 立体」がからむブールで agent が落ちる
   (`EXCEPTION_ACCESS_VIOLATION`・stderr には何も出ない)。
+  ★ これに加えて `srava_agent_eof_before_end` は MinGW では **Skipped** になる(緑でも赤でもない)。
+  shell が作ったパイプ経由の親→子 stdin が MinGW では未対応で、この検定の前提が成立しないため。
+  同じ性質は Linux / macOS では実走して確かめている → §8
   ★ **走行中の中断**(Ctrl+C / `grace` / `panic`)は、シグナル・IOCP・`select` という
   **プラットフォームごとに実装が分かれる**層に触るが、**Windows でも検定済み**
   (Ctrl+C の入口・`SIGINT`・in-proc の panic を、それぞれ別のテストで撃っている)。
@@ -344,6 +352,8 @@ Boost 差し替え・`-DSRAVA_ENABLE_HDF5` の扱い)。要点:
 | `-DSRAVA_ALLOCATOR=auto` | **auto** | 実行体 2 本(`srava` / `srava_agent`)が使う malloc 実装。`auto` は **Linux で jemalloc**・他 OS で system malloc。`jemalloc` / `system` で明示指定できる。⚠ モジュールには付けない(プロセスに 1 つ) |
 | `-DSRAVA_MANIFOLD_PAR=ON` | **ON** | Manifold を op 内並列(TBB)で建てる。**system の TBB が要る**。`OFF` でシリアル。**Cygwin では自動 OFF**。切替には Manifold の全再コンパイルが要る |
 | `-DSRAVA_SLOW_TESTS=ON` | **OFF** | 時間のかかる回帰テスト(`std/roll.sra` 等)も ctest に登録する |
+| `-DSRAVA_TIMEOUT_SCALE=<n>` | **Windows / Cygwin は 10**・他は 1 | ctest の `TIMEOUT` に掛ける倍率。Windows 系は同じテストの所要が**大きく**なる(プロセス起動が高く、並列走行でさらに膨らむ)ため、**個々の値は触らず最後に一括で掛ける**。⚠ 下げると「遅いだけ」のテストが赤くなる |
+| `-DSRAVA_HANG_SCALE=<n>` | **Windows / Cygwin は 10**・他は 1 | ハング番犬の予算(`SRAVA_HANG_SECS`)に掛ける倍率。`TIMEOUT` と**揃えておくこと** — 片方だけ大きいと「ctest は殺さないが番犬は鳴く」帯ができ、**緑のまま捕獲だけが溜まる**。⚠ 大きくすると本物のハングを捕まえるのも遅くなる |
 | `-DSRAVA_ENABLE_HDF5=ON` | Cygwin で OFF | `export_vox`(HDF5)を有効化。**Cygwin 専用の分岐**でのみ参照(非 Cygwin では HDF5 は無条件に auto 検出=このオプションは無視) |
 | `-DFETCHCONTENT_SOURCE_DIR_MANIFOLD=<dir>` | — | git を使わず取得済み Manifold ソースを指す |
 | `-DFETCHCONTENT_SOURCE_DIR_CLIPPER2=<dir>` | — | 同 clipper2 |
@@ -355,6 +365,11 @@ Boost 差し替え・`-DSRAVA_ENABLE_HDF5` の扱い)。要点:
 
 - 旧名 `-DSRAVA_KERNEL_CGAL` / `-DSRAVA_KERNEL_MANIFOLD` / `-DSRAVA_PLUGIN_PIPEPROX` は `set()` で
   現行の `SRAVA_MODULE_*` へ転送され受理されるが **deprecated**(kernel/plugin → module リネーム)。新規は現行名を使う。
+
+- ⚠⚠ **既存の build tree は倍率を上書きしない。** `SRAVA_TIMEOUT_SCALE` / `SRAVA_HANG_SCALE` は
+  キャッシュ変数なので、**既に configure 済みの木では前の値が残る**(既定を変えても効かない)。
+  ⇒ 拾わせるには `cmake -U SRAVA_TIMEOUT_SCALE -U SRAVA_HANG_SCALE -S . -B <build dir>`。
+  ⚠ 片方だけ新設された場合、**新しい方だけ既定が効いて食い違う**ので、2 つまとめて外すこと。
 
 ## 8. 動作確認
 
@@ -368,12 +383,21 @@ srava model.sra
 ctest --test-dir build -j
 ```
 
+- ⚠ **テストを回すには `timeout(1)`(macOS は `coreutils` の `gtimeout`)が要る。**
+  無い機では `srava_agent_eof_before_end` が **Skipped** になる — 緑でも赤でもなく、
+  「何を入れればこの検定が走るか」が出力に出る。⇒ 全数を確かめたいなら入れること。
+- ⚠ **Windows(MinGW)では `srava_agent_eof_before_end` は Skipped になる。**
+  shell が作ったパイプ経由の親→子 stdin が MinGW では未対応(overlapped でないハンドルを
+  スレッドプール I/O が受け付けない)ため、この検定の前提が成立しない。**製品の欠陥ではなく
+  経路の制約**で、同じ性質は Linux と macOS では実走して確かめている。
+
 - **モジュールの優先度切替はソース内で行う**。特定のモジュールを優先させるには:
 
   ```
   module("manifold.so", {priority:1});
-  // ★ **使うモジュールは module() で名指す** (または include "module/all.sra"; /
-  //   SRAVA_MODULE_ALL=1 で一括ロード)
+  // ★ **使うモジュールだけを module() で名指す** — これが原則。
+  //   一括ロード (include "module/all.sra"; / SRAVA_MODULE_ALL=1) は移行中・探索中の便宜品で、
+  //   どの .so が答えるかがロード順と priority 任せになる。
   export("box.stl", box(20,20,20));
   ```
 

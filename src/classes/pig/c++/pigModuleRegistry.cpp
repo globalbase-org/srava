@@ -13,6 +13,8 @@
 
 #include <cstring>
 #include <climits>
+#include <vector>       /* ★ #3588: 1 行の sigline を並べて入力側を突き合わせる */
+#include <string>
 #include <cstdio>       /* ★ #3466: ソルトの組み立て (snprintf) */
 
 /* pigRefCacheCodec.cpp: 組込モジュール "pig" の記述子 (D_REF codec・カーネル非依存・pig 層)。 */
@@ -673,7 +675,7 @@ pig_descriptor_violation(const srava_module_descriptor *d)
     if (pig_op_row_is(d->ops[i].op, "import")) hasImport = true;
   }
   const char *nm = (d->name != 0) ? d->name : "(null)";
-  char buf[224];
+  char buf[384];   /* ★ #3588: 「行を分けて match で選べ」まで言うと 224 では切れた */
 
   /* ★★ #3554 段1: **`op` (無条件の行) を `op#変種` より前に置いてはいけない**。
    *   routing は頭から先勝ちで照合するので、無条件の行が前に在ると **変種が永久に選ばれない**
@@ -730,6 +732,59 @@ pig_descriptor_violation(const srava_module_descriptor *d)
                      base, outs.c_str(), base, L.out.c_str());
           return std::string(buf);
         }
+      }
+      if (sc == std::string::npos) break;
+      sp = sc + 1;
+    }
+  }
+
+  /* ★★★ #3588 (2026-09-23 ・ ひさ指示): **1 行の中に、入力型で区別のつかない sigline を
+   *   2 本以上書いてはいけない**。
+   *
+   *   機序: @sig_dispatch@ は 1 行の sigline を **上から見て最初に成立したもので確定**し、
+   *     名乗る出力型もそこから採る (`break` する)。⇒ 入力側が同じ sigline が 2 本並ぶと
+   *     **2 本目は到達不能**。しかも *動いてしまう* ので気づけない — #3588 では
+   *     @tube_ruled@ の "->cg-mesh3d;->cg-cross2d" (どちらも幾何入力なし) で、
+   *     **2D の帯が cg-mesh3d を名乗り** @extrude@ と 2D ブールに拒まれていた
+   *     (キャッシュの D_META は 'PLY2' = op は正しく 2D を作っていた)。
+   *
+   *   ⚠⚠ **マッチ関数の有無にかかわらず**検査する (ひさ指示)。マッチ関数が選ぶのは *行*で
+   *     あって sigline ではないので、**マッチ関数では 2 本目を救えない**。救う道は
+   *     「行を出力型ごとに分け、行をマッチ関数で選ぶ」= import / cast と同じ形しかない。
+   *   ★ 上の cast / import の検査とは **別の規則**:
+   *       上 … 「行が *出力型で* 選ばれる op (cast/import) は、1 行で 1 出力型しか名乗れない」
+   *             (入力型が違っていても駄目)
+   *       下 … 「入力型で区別がつかない sigline は 2 本目が死ぬ」(op を問わない)
+   *   ⚠ これは **完全な到達可能性検査ではない** — 包含 ("(a)" の後の "([a,b])") は見ない。
+   *     「先勝ち・順序が意味を持つ」は規約として残る。見るのは *入力側が完全に同じ* 場合だけ
+   *     = 誤検出の出ない範囲 (判定は @sigline_same_inputs@)。 */
+  for (int i = 0; i < d->n_ops; ++i) {
+    const pigOpEntry &e = d->ops[i];
+    if (e.op == 0 || e.sig == 0) continue;
+    std::vector<pigSigLine>  seen;             /* ここまでに見た sigline (入力側の照合用) */
+    std::vector<std::string> seenTxt;          /* 文言に出す元の綴り */
+    std::string all = e.sig; size_t sp = 0;
+    while (sp <= all.size()) {
+      size_t sc = all.find(';', sp);
+      std::string one = all.substr(sp, (sc == std::string::npos ? all.size() : sc) - sp);
+      pigSigLine L; parse_sigline(one, L);
+      if (!L.bad) {
+        for (size_t k = 0; k < seen.size(); ++k) {
+          if (!sigline_same_inputs(seen[k], L)) continue;
+          /* ★ 入力型を 1 つも持たない形 (leaf 生成 op) は #3588 そのものなので名指しする。 */
+          bool noIn = (L.kind == SK_FIXED && L.fixed.empty() && L.set.empty());
+          ::snprintf(buf, sizeof buf,
+                     "module '%s': op '%s' has two siglines that %s ('%s' and '%s') "
+                     "(a row is matched sigline-by-sigline from the top, so the second can "
+                     "never be chosen; split the row per output type and pick it with a "
+                     "match function, as import/cast do)",
+                     nm, e.op,
+                     noIn ? "declare no input types" : "declare the same input types",
+                     seenTxt[k].c_str(), one.c_str());
+          return std::string(buf);
+        }
+        seen.push_back(L);
+        seenTxt.push_back(one);
       }
       if (sc == std::string::npos) break;
       sp = sc + 1;

@@ -1404,10 +1404,184 @@ pigDataOperatorModuleLoaded::_start()
  *   「module() を書いたのに別物が動いている」になる。同じ実体の再指定は従来どおり冪等。
  *
  * ★ 引数 1 個の `module(so)` は **`module(so,"on")` の糖衣**。 */
+/* ★ #3595: opts (hash) を **1 モジュールへ適用する**。空文字列 = 成功 / 非空 = エラー文言。
+ * 以前は pigDataOperatorModule::_start に直書きだったが、@module(配列, opts)@ が
+ * 「opts 1 つを列の全部に適用」するので、**適用の実体は 1 本**でなければならない
+ * (二重帳簿にすると、片方にキーを足したときにもう片方が黙って無視する)。 */
+static std::string
+module_apply_opts(sPtr<pigModuleRegistry> reg, int id, const srava_module_descriptor* d,
+                  sPtr<pigDataHash> opts) {
+  /* exec_default: "thread" / "process" */
+  sPtr<pigData> ed = opts->get_ix(thNEW(pigDataString, ("exec_default")));
+  if (ed.is_notNull() && !ed->is_error()) {
+    const char* s = ed->get_str()->get_str();
+    if      (::strcmp(s, "thread")  == 0) reg->set_exec_default(id, EXEC_THREAD);
+    else if (::strcmp(s, "process") == 0) reg->set_exec_default(id, EXEC_PROCESS);
+    else return "module: exec_default must be \"thread\" or \"process\"";
+  }
+  /* priority: 整数 (大きいほど優先)。★同点になった場合の勝敗は **不定** —
+   *   ロード順で決まり、ロード順はディレクトリ走査順だから。確実に切り替えたいなら
+   *   同点でなく大きい値を指定する。 */
+  sPtr<pigData> pr = opts->get_ix(thNEW(pigDataString, ("priority")));
+  if (pr.is_notNull() && !pr->is_error())
+    reg->set_priority(id, (int)pr->get_int());
+  /* ★ #3436 P4: arity = N' (このモジュールが 1 ノードあたり受け取りたい最大項数・policy)。
+   *   2 以上の**有限整数**のみ (「上限なし」は取らない。できるだけ多くやりたければ大きい整数を書く)。
+   *   実際の項数は k = min(N', op の sig が申告する N, 群の執行者が許す最大)。 */
+  /* ★ #3503: grace = 撤収の猶予 (ミリ秒)。0=即 kill / >0=猶予つき / -1=graceful のみ。
+   *   ⚠ -1 は「**全 op・全経路が中断要求を見る**」と宣言すること。止まらない経路が
+   *     1 つでもあると Ctrl+C で永久ハングする (process なら居残り・in-proc なら planner ごと)。
+   *     迷ったら >0 — 申告が間違っていても代償は遅延だけで済む。 */
+  sPtr<pigData> gr = opts->get_ix(thNEW(pigDataString, ("grace")));
+  if (gr.is_notNull() && !gr->is_error()) {
+    int g = (int)gr->get_int();
+    if (g < -1)
+      return "module: grace must be -1 (graceful only), 0 (kill at once) or a positive number of milliseconds";
+    reg->set_grace_ms(id, g);
+  }
+  /* ★ #3503: panic = in-proc で居座ったときに planner を abort するまでの猶予 (ミリ秒)。
+   *   <=0 = 無効 (既定) / >0 = その時間。grace と対だが **同じ値にしない**のが普通 —
+   *   process の猶予切れは agent 1 つ、in-proc の abort は **セッション全体**を失う。 */
+  sPtr<pigData> pn = opts->get_ix(thNEW(pigDataString, ("panic")));
+  if (pn.is_notNull() && !pn->is_error())
+    reg->set_panic_ms(id, (int)pn->get_int());
+  sPtr<pigData> ar = opts->get_ix(thNEW(pigDataString, ("arity")));
+  if (ar.is_notNull() && !ar->is_error()) {
+    int k = (int)ar->get_int();
+    if (k < 2) return "module: arity must be an integer >= 2";
+    reg->set_arity(id, k);
+  }
+  /* ★ #3441 (ひさ設計 2026-08-26): 個別キー(exec_default/priority/arity)を読むのとは別に、
+   * ハッシュ**全体**を保持しておき、各モジュールの configure() へ渡す(geogram のスレッド数
+   * 制御が最初の用途)。apply_opts はここ(planner/in-proc)で直接 configure を呼ぶ ——
+   * in-proc は planner と同一プロセス・同一 descriptor なのでこれで完結する。
+   * process 実行のモジュールへは、次にその agent を起動するとき (pigfAgent LAUNCH) に
+   * opts_for(id) を C_ENV で渡す (稼働中の agent への再配線はしない)。 */
+  reg->set_opts(id, opts);
+  reg->apply_opts(d->name);
+  return std::string();
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ *  ★★ #3595 (ひさ確定仕様 2026-09-24): @module(配列, opts)@ — **列をまとめてロードする**
+ *
+ *   要素は **記述子 (モジュール名)** であって、ファイル名ではない。列は `use` と
+ *   **同じ構造規則**で読む (入れ子は平坦化 / 穴は null・0・"" / ハッシュは擬似モジュール)
+ *   ⇒ 読み方の実体は @pig_flatten_cand_array@ ただ 1 本 (pigfModuleAgent.cpp)。
+ *
+ *   ★★★ 不変式: **`use module(L, {})` の候補列は `use L` と完全に同一。違いはロードの副作用だけ。**
+ *     ⇒ 出力は平坦化後の列と **1:1**。穴と擬似モジュールは **そのまま同じ位置へ**流す
+ *       (落とすと位置がずれ、`use` から見た列が変わってしまう)。
+ *
+ *   ★★ 推測生成 (`<名前>` + @OSGLUE_MODULE_SUFFIX@) は **探索路だけ**を見る
+ *     (@resolve_module_in_search_path@)。@resolve_module_file@ の *パス枝* へ渡してはいけない:
+ *     あちらは '/' を見るとパス指定に倒すので、@module(["/opt/x/mymod"],{})@ が実在すれば
+ *     **黙って読めてしまい**、返るのは記述子名 ("mymod") ⇒ `use ["/opt/x/mymod"]` は解決しないのに
+ *     `use module(["/opt/x/mymod"],{})` だけ通る = **不変式が破れる**。
+ *     ★ 区切りを含む要素は *記述子名ではありえない* ので、ファイル名を組む前に不在にする
+ *       (「探索路の下に偶然同じ相対パスの .so が在った」で裏口が開かないようにするため)。
+ *
+ *   逃げ道: 検索パス外 / 記述子名とファイル名が違うものは、あらかじめ @module(文字列)@ で
+ *   明示的にロードしておく (ロード済みならこの口は何もしない)。
+ * ═════════════════════════════════════════════════════════════════════ */
+static sPtr<pigData>
+module_load_list(sPtr<pigDataArray> lst, sPtr<pigData> ov, sPtr<pigInfo> info) {
+  sPtr<pigModuleRegistry> reg = pig_current_registry();
+  if (reg == thNULL) return thNEW(pigDataError, ("module: no module registry (no app)", info));
+
+  /* ★ 文字列 opts は列に対しては取らない。"off" (アンロード) は **1 本ずつ** —
+   *   候補列は優先順位表であって、そこにアンロードという用途は乗っていない
+   *   (不変式も「ロードの副作用だけが違う」なので、落とす側には当てはまらない)。 */
+  sPtr<pigDataString> sv = ov.is_notNull() ? sPtr<pigDataString>::d_cast(ov) : sPtr<pigDataString>();
+  if (sv.is_notNull()) {
+    if (::strcmp(sv->get_str()->get_str(), "off") == 0)
+      return thNEW(pigDataError,
+          ("module: the list form cannot unload; call module(\"<name>.so\", \"off\") one at a time", info));
+    return thNEW(pigDataError,
+        ("module: the only string option is \"off\" (to unload). "
+         "To load or reload, call module(path) or module(path, {...}).", info));
+  }
+  /* ★ opts は **1 つを全部に適用**する (確定仕様・案 a)。 */
+  sPtr<pigDataHash> opts = ov.is_notNull() ? ov->obt_hash() : sPtr<pigDataHash>(thNULL);
+  bool optional = false;
+  if (opts.is_notNull()) {
+    sPtr<pigData> o = opts->get_ix(thNEW(pigDataString, ("optional")));
+    if (o.is_notNull() && !o->is_error()) optional = (o->get_bool() != 0);
+  }
+
+  std::vector<pigCandItem> items;
+  sPtr<pigData> cerr;
+  if (!pig_flatten_cand_array(lst, &items, &cerr)) return cerr;
+
+  sPtr<pigDataArray> out = thNEW(pigDataArray, ());
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (items[i].hole)   { out->push(thNEW(pigDataNull, ()));  continue; }   /* 穴はその位置へ */
+    if (items[i].pseudo) { out->push(items[i].val);            continue; }   /* 擬似モジュール */
+    const std::string &nm = items[i].name;
+    int id = reg->id_of_name(nm.c_str());
+    const srava_module_descriptor* d = (id > 0) ? reg->descriptor(id) : 0;
+    char buf[1024];
+    if (d == 0) {                              /* 未ロード → 探索路から推測してロードする */
+      /* ★ 記述子名に区切りは無い ⇒ ファイル名を組む前に **不在**で片付ける (上の ★★ 参照)。 */
+      bool sep = (nm.find('/') != std::string::npos || nm.find('\\') != std::string::npos);
+      std::string file = nm + OSGLUE_MODULE_SUFFIX;
+      std::string resolved = sep ? std::string() : reg->resolve_module_in_search_path(file.c_str());
+      if (resolved.empty()) {
+        /* ★ {optional:1} の不在は **その位置に穴** — `use` から見て「書かなかった」と等価に
+         *   なるので、optional でも不変式が崩れない。 */
+        if (optional) { out->push(thNEW(pigDataNull, ())); continue; }
+        if (sep)
+          ::snprintf(buf, sizeof buf,
+              "module: no module named '%s' (the list form takes descriptor names, and a descriptor "
+              "name cannot contain a path separator; load a file by path with module(\"%s\", {}))",
+              nm.c_str(), nm.c_str());
+        else
+          ::snprintf(buf, sizeof buf,
+              "module: no module named '%s' (looked for \"%s\" on the module search path; see "
+              "`srava --modules` for the path, or load it by file name with module(\"<path>\", {}))",
+              nm.c_str(), file.c_str());
+        return thNEW(pigDataError, (buf, info));
+      }
+      std::string err;
+      bool conflict = false, refused = false;
+      d = reg->load_file(resolved.c_str(), &err, /*lazy=*/true, &conflict, &refused);
+      if (d == 0) {
+        /* ★ #3558 と同じ分け方: optional が飲み込んでよいのは「入っていない」だけ。
+         *   ここへ来た時点でファイルは在るので、飲み込まずに必ず落とす。 */
+        if (optional)
+          ::snprintf(buf, sizeof buf,
+              "module: %s: %s -- the file is present but unusable; {optional:1} only skips "
+              "modules that are not installed", resolved.c_str(), err.c_str());
+        else
+          ::snprintf(buf, sizeof buf, "module: %s: %s", resolved.c_str(), err.c_str());
+        return thNEW(pigDataError, (buf, info));
+      }
+      id = reg->id_of_name(d->name);
+    }
+    if (opts.is_notNull()) {
+      std::string oe = module_apply_opts(reg, id, d, opts);
+      if (!oe.empty()) return thNEW(pigDataError, (oe.c_str(), info));
+    }
+    out->push(thNEW(pigDataString, (d->name ? d->name : "")));
+  }
+  return out;
+}
+
 void pigDataOperatorModule::_start() {
   if (args.length() < 1) { result = thNEW(pigDataError, ("module needs a .so path", info)); return; }
   sPtr<pigData> pv = args[0]->compact();
   if (pv->is_error()) { result = pv; return; }
+  /* ★★ #3595: **配列形** — 要素は記述子名。列をまとめてロードし、1:1 の配列を返す
+   *   (文字列形は従来どおり *ファイル名* として解く。2 つの口は混ざらない)。 */
+  {
+    sPtr<pigDataArray> lst = pv->obt_array();
+    if (lst.is_notNull()) {
+      sPtr<pigData> ov = (args.length() >= 2) ? args[1]->compact() : sPtr<pigData>(thNULL);
+      if (ov.is_notNull() && ov->is_error()) { result = ov; return; }
+      result = module_load_list(lst, ov, info);
+      return;
+    }
+  }
   std::string npath = normalize_module_path(pv->get_str()->get_str());
   const char* path = npath.c_str();
   sPtr<pigModuleRegistry> reg = pig_current_registry();   /* ★ #3427 ③: app 所有レジストリ (TLS) */
@@ -1512,54 +1686,8 @@ void pigDataOperatorModule::_start() {
     }
     sPtr<pigDataHash> opts = ov->obt_hash();
     if (opts.is_notNull()) {
-      /* exec_default: "thread" / "process" */
-      sPtr<pigData> ed = opts->get_ix(thNEW(pigDataString, ("exec_default")));
-      if (ed.is_notNull() && !ed->is_error()) {
-        const char* s = ed->get_str()->get_str();
-        if      (::strcmp(s, "thread")  == 0) reg->set_exec_default(id, EXEC_THREAD);
-        else if (::strcmp(s, "process") == 0) reg->set_exec_default(id, EXEC_PROCESS);
-        else { result = thNEW(pigDataError, ("module: exec_default must be \"thread\" or \"process\"", info)); return; }
-      }
-      /* priority: 整数 (大きいほど優先)。★同点になった場合の勝敗は **不定** —
-       *   ロード順で決まり、ロード順はディレクトリ走査順だから。確実に切り替えたいなら
-       *   同点でなく大きい値を指定する。 */
-      sPtr<pigData> pr = opts->get_ix(thNEW(pigDataString, ("priority")));
-      if (pr.is_notNull() && !pr->is_error())
-        reg->set_priority(id, (int)pr->get_int());
-      /* ★ #3436 P4: arity = N' (このモジュールが 1 ノードあたり受け取りたい最大項数・policy)。
-       *   2 以上の**有限整数**のみ (「上限なし」は取らない。できるだけ多くやりたければ大きい整数を書く)。
-       *   実際の項数は k = min(N', op の sig が申告する N, 群の執行者が許す最大)。 */
-      /* ★ #3503: grace = 撤収の猶予 (ミリ秒)。0=即 kill / >0=猶予つき / -1=graceful のみ。
-       *   ⚠ -1 は「**全 op・全経路が中断要求を見る**」と宣言すること。止まらない経路が
-       *     1 つでもあると Ctrl+C で永久ハングする (process なら居残り・in-proc なら planner ごと)。
-       *     迷ったら >0 — 申告が間違っていても代償は遅延だけで済む。 */
-      sPtr<pigData> gr = opts->get_ix(thNEW(pigDataString, ("grace")));
-      if (gr.is_notNull() && !gr->is_error()) {
-        int g = (int)gr->get_int();
-        if (g < -1) { result = thNEW(pigDataError,
-            ("module: grace must be -1 (graceful only), 0 (kill at once) or a positive number of milliseconds", info)); return; }
-        reg->set_grace_ms(id, g);
-      }
-      /* ★ #3503: panic = in-proc で居座ったときに planner を abort するまでの猶予 (ミリ秒)。
-       *   <=0 = 無効 (既定) / >0 = その時間。grace と対だが **同じ値にしない**のが普通 —
-       *   process の猶予切れは agent 1 つ、in-proc の abort は **セッション全体**を失う。 */
-      sPtr<pigData> pn = opts->get_ix(thNEW(pigDataString, ("panic")));
-      if (pn.is_notNull() && !pn->is_error())
-        reg->set_panic_ms(id, (int)pn->get_int());
-      sPtr<pigData> ar = opts->get_ix(thNEW(pigDataString, ("arity")));
-      if (ar.is_notNull() && !ar->is_error()) {
-        int k = (int)ar->get_int();
-        if (k < 2) { result = thNEW(pigDataError, ("module: arity must be an integer >= 2", info)); return; }
-        reg->set_arity(id, k);
-      }
-      /* ★ #3441 (ひさ設計 2026-08-26): 個別キー(exec_default/priority/arity)を読むのとは別に、
-       * ハッシュ**全体**を保持しておき、各モジュールの configure() へ渡す(geogram のスレッド数
-       * 制御が最初の用途)。apply_opts はここ(planner/in-proc)で直接 configure を呼ぶ ——
-       * in-proc は planner と同一プロセス・同一 descriptor なのでこれで完結する。
-       * process 実行のモジュールへは、次にその agent を起動するとき (pigfAgent LAUNCH) に
-       * opts_for(id) を C_ENV で渡す (稼働中の agent への再配線はしない)。 */
-      reg->set_opts(id, opts);
-      reg->apply_opts(d->name);
+      std::string oe = module_apply_opts(reg, id, d, opts);
+      if (!oe.empty()) { result = thNEW(pigDataError, (oe.c_str(), info)); return; }
     }
   }
   result = thNEW(pigDataString, (d->name ? d->name : ""));

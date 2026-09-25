@@ -1169,6 +1169,48 @@ TS_STATE(ACT_pigfAgent_SEND)   /* イベント検出のみ(write なし)。par �
 		if ( cachePath == thNULL ) {   /* 遅延引数ケース: 全引数が揃った今ハッシュ確定 */
 			hashVal   = compute_arg_hash();
 			cachePath = make_cache_path(hashVal);
+			/* ★★ 存在判定を **claim の前** に置く (非遅延経路 ACT_START:647-652 と同じ 2 段構え)。
+			 *   ⚠ ここが無いと「完成済みのキャッシュを無視して計算し直し、O_TRUNC で書き直す」が起きる。
+			 *   台帳と存在判定は**担当区間が違う**:
+			 *     in-flight 台帳 … 「まだファイルが無いが、いま作っている最中」を止める
+			 *     存在判定       … 「もう在る」を止める (メタ書込済 = attach して読める時点から有効)
+			 *   台帳は A_SAVE_BEGIN (= 生産者の「メタ書込済」宣言) で外れる。**そこで役目は存在判定へ
+			 *   引き継がれる**。遅延引数経路にはその引き継ぎ先が無かったので、撤去後に来た者が
+			 *   素通りして 2 人目の writer になり、**読み手のストリームを先頭から切り詰めていた**
+			 *   ("the cache stream ended or could not be read while decoding" の真因)。
+			 *   ★ 非遅延経路と違い hashVal は ACT_START では決まらない (引数のハッシュを畳むため)。
+			 *     決まるのはここ = 全引数が解決した今なので、判定できる最初の地点がここになる。
+			 *   ⚠ HIT でも `_front` は既に継続 ("delayed" . beginPromise) で解決済みなので
+			 *     `ACT_pigfAgent_CACHEREAD` へは飛ばせない (あちらは agent 起動前・_front 未解決が前提)。
+			 *     **piggyback と同じ撤収経路**に乗せ、promise 側を outCache で解決する。
+			 *     撤収は FIN_START → med->destroy() で wfd を閉じ、agent は EOF で畳まれる。
+			 *     この時点は **C_ARG_END 送信前 = 計算開始前**なので、捨てるのは fork だけで済む。
+			 *   ⚠ 値返し op (out_cache==0) は **CACHEREAD に委ねる**。本文を取るには get_body() が要り、
+			 *     未ロードだと yield して状態関数を先頭から再走させるが、CACHEREAD の中でなら
+			 *     再走しても冪等に閉じる (ここで呼ぶと再走時 cachePath != thNULL でブロックごと
+			 *     飛ばされ、HIT を取りこぼす)。値返しは _front を未解決のまま残す約束なので
+			 *     CACHEREAD の `_front->set_result(v)` がそのまま成立する。 */
+			if ( outCache == thNULL ) {
+				outCache = thNEW(pigDataCache,(hashVal, cachePath, _front->get_info()));
+				stamp_out_cache();
+			}
+			if ( outCache->is_valid() ) {
+				if ( ptsApp.is_notNull() ) ptsApp->cache_hit();
+				if ( ! _front->get_out_cache() )
+					return rDO|ACT_pigfAgent_CACHEREAD;   /* 値返し: 本文読みごと任せる(cache_use も向こう) */
+				if ( ptsApp.is_notNull() ) ptsApp->cache_use(hashVal);
+				/* 正常完了と同じ形に揃える: beginPromise=("begin" . promise) / promise=outCache
+				 * (SENDEND と A_SAVE_BEGIN がそれぞれ立てているのと同じ) */
+				if ( beginPromise.is_notNull() && ! beginResolved ) {
+					beginPromise->set_result(thNEW(pigDataPair,(thNEW(pigDataString,("begin")), promise)));
+					beginResolved = 1;
+				}
+				if ( promise.is_notNull() && ! promiseResolved ) {
+					promise->set_result(sPtr<pigData>(outCache));
+					promiseResolved = 1;
+				}
+				return rDO|FIN_START;   /* 自分の agent を閉じて(EOF)撤収 */
+			}
 			/* ★ in-flight dedup(hasDelay 経路): hashVal は **今初めて**確定する(全引数解決後)。
 			 * 同一キャッシュを計算中/済みの先行 pigfAgent があれば受け売りして撤収。agent は起動済みだが
 			 * C_ARG_END をまだ送っていない=計算は始まっていないので、FIN(wfd close→agent EOF→グレースフル

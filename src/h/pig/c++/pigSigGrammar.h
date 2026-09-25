@@ -214,6 +214,27 @@ sigline_matches(const pigSigLine& L, const std::vector<std::string>& A)
 	return false;
 }
 
+/* ★★ #3588 (2026-09-23): 2 本の sigline が **入力側で区別がつかない** か。
+ *   true = どんな引数型の並びに対しても @sigline_matches@ が同じ可否を返す
+ *        ⇒ 1 行の中では上から先勝ちなので、**後ろの 1 本は到達不能**。
+ *
+ *   ⚠ 見るのは @sigline_matches@ が実際に見るものだけ (kind / fixed / set / fold の arity)。
+ *     @out@ は照合に使われないので見ない — *出力型が違っても*到達不能であることは変わらず、
+ *     むしろそれが #3588 の形そのもの ("->cg-mesh3d;->cg-cross2d")。
+ *     @nosplit@ / @array_ok@ も可否には効かない (分解と展開の話) ので見ない。
+ *   ⚠ 「同じ」は **完全一致**に限る。包含関係 ("(a)" ⊂ "([a,b])") までは見ない —
+ *     そこまで見ると誤検出が出るし、「先勝ち・順序が意味を持つ」は規約として残すため。 */
+inline bool
+sigline_same_inputs(const pigSigLine& A, const pigSigLine& B)
+{
+	if ( A.bad || B.bad ) return false;         /* 記法エラーは別の検査が名指しする */
+	if ( A.kind != B.kind ) return false;
+	if ( A.fixed != B.fixed ) return false;
+	if ( A.set != B.set ) return false;
+	if ( A.kind == SK_FOLD && A.arity != B.arity ) return false;   /* N が違えば可否が違う */
+	return true;
+}
+
 /* 幾何入力 nin 個をこの行が受けうるか (個数だけの判定・エラー文の候補列挙で使う)。 */
 inline bool
 sigline_arity_ok(const pigSigLine& L, int nin)

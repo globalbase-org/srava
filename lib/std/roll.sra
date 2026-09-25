@@ -3,9 +3,14 @@
 //   リファレンス: docs/srava_roll_reference.md。
 //
 // ★必須モジュール: pipe_proximity
-//   **本ライブラリは std で唯一、モジュールに依存する**(他の std は幾何カーネルだけで動く)。
+//   pipe_sample / pipe_scene_adjust を持つのは pipe_proximity だけ。
+//   下で宣言するので利用側が書く必要はない。既にロード済みでも安全で、
+//   **利用側が先に付けた priority 指定を壊さない**(素の module() は priority を上書きしない)。
 //   ロードされているかは `srava --modules` の loaded に pipe_proximity が出るかで確認できる。
 //   無い場合は -DSRAVA_MODULE_PIPEPROX=ON でビルドし直す(既定 ON)。
+//   ⚠ 幾何カーネルは要らない(pipe_proximity だけで respace 等は動く。2026-09-23 実測)。
+//   ⚠ 旧コメントの「std で唯一モジュールに依存する」は誤り — std/inspect.sra も cgal を要する。
+module("pipe_proximity.so", {});
 //
 // ★推奨 params(知らないと事故る 2 つ):
 //   parallel: 1   … 事実上必須。0 だと 1 solve が桁違いに遅く、実用サイズでは現実的な時間で終わらない。
@@ -53,6 +58,7 @@ var resample_n = \(dense, npts){
     out;
 };
 var respace = \(ctrl, radius, npts){
+    use ["pipe_proximity"];   // pipe_sample は pipe_proximity だけが持つ (ファイル先頭でロード済み)
     if ( length(ctrl) < 3 ) { return ctrl; }
     var dense = map(pipe_sample(ctrl, radius, 0), \(p){ p[0]; });
     resample_n(dense, npts);
@@ -65,6 +71,7 @@ var respace_range = \(ctrl, radius, lo, hi){   // [lo..hi] だけ等弧長化(�
 
 // ---- solve: 強制パラメータをその場でセットして緩和。fz/fax は呼び出し側が渡す ----
 var solve = \(core, ctrl, radius, d, params, fz, fax){
+    use ["pipe_proximity"];   // pipe_scene_adjust は pipe_proximity だけが持つ (ファイル先頭でロード済み)
     params.fixEnds = 1;
     params.dMin    = d;
     params.solver  = "cd";

@@ -3,6 +3,14 @@
 //   実装方針: 媒介変数を linspace で作り、各座標を **vectorized**(cos(t)*r 等)で列計算 → transpose で点列化。
 //   数値積分は cumsum。すべて「配列を左に」書く(scalar op array は未対応のため)。
 
+//
+// ★ 幾何 op を使う関数は、先頭で **自分の候補列を宣言する**:
+//     var sup = [<この関数が対応するカーネル>];   use mod_only(sup);
+//   意味は 3 つ — 呼び手が選んでいればそれを尊重 / 何も言っていなければ載っているものから /
+//   交差しなければその場でエラー (黙って別のカーネルで解かない)。
+//   ⇒ 詳細は docs 言語リファレンス §ライブラリ関数の宣言 (#lib-use-decl)。
+//   ★ sup は which(op) から **機械的に**起こしてある (2026-09-24)。各関数のコメントはその根拠。
+
 include "std/math.sra";
 
 // arc(cx, cy, r, a0, a1, segs): 中心(cx,cy)・半径 r・角 a0→a1(ラジアン)の円弧。segs+1 点(2D)。
@@ -127,11 +135,43 @@ var clothoid = \(k0, rate, L, segs) {
     transpose([ cumsum(cos(theta)*ds), cumsum(sin(theta)*ds) ]);
 };
 
-// ribbon2d(pts, w): 2D 折れ線 pts=[[x,y],…] を **一定幅 w** で太らせた帯領域(丸ジョイント/丸キャップ)。
-//   ビルトイン tube の 2D 版に半幅 w/2 を渡す薄いラッパ(tube は r=半径=半幅・可変幅)。
-//   幅を頂点ごとに変えたいときは tube を直接: tube_ruled([[[x,y], r], …])(r が可変半幅)。
-//   返りは 2D 塗り領域 → export(".svg"/".dxf") / extrude で 3D 化 / |||/&&&/--- でブール可。
-var ribbon2d = \(pts, w) { tube_ruled(map(pts, \(p){ [p, w / 2]; })); };
+// tube_fw_ruled(pts, w): 折れ線 pts を **一定幅 w** (fw = fixed width) で太らせる。
+//   `tube_ruled` に半幅 w/2 を付けて渡すだけの薄いラッパ(tube_ruled は頂点ごとに半径を取る)。
+//   幅を頂点ごとに変えたいときは tube_ruled を直接: tube_ruled([[pos, r], …])(r が可変半幅)。
+//   ★ **次元は pts の位置の次元に従う** — 2D 点列 [[x,y],…] なら帯、3D 点列 [[x,y,z],…] なら管。
+//     関数名は 2D を含まない(旧名 ribbon2d は 2D 専用に見えるが、実装は最初から次元非依存)。
+//   ⚠ **w は「幅」であって半径ではない**。半径は w/2。
+//   ⚠ w は **実数で渡すこと**。整数どうしの割り算は切り捨てなので、w=1 だと半径が 0 になる。
+//     (この関数自体は w * 0.5 で計算するので w=1 でも 0.5 になる。呼び出し側で w/2 を
+//      自前計算するときの注意として残す)
+//   ★ 対になる名前は tube_fw (すぐ下)。
+var tube_fw_ruled = \(pts, w) {
+    // 使う op = tube_ruled のみ。sup = その **提供者ぜんぶ** を priority 順に並べたもの
+    // (which("tube_ruled") から機械的に起こした・2026-09-24)。必須は無い。
+    var sup = ["cgal", "manifold", "geogram", "nef_hybrid", "cherchi", "occt", "openvdb"];
+    use mod_only(sup);
+    tube_ruled(map(pts, \(p){ [p, w * 0.5]; }));
+};
+
+// tube_fw(pts, w): 折れ線 pts を **一定幅 w** で太らせる、tube_fw_ruled の **なめらか版**。
+//   `tube` に半幅 w/2 を付けて渡すだけの薄いラッパ。op の対 (tube / tube_ruled) を
+//   そのまま stdlib へ写した名前で、分かれ目は **背骨** — tube は点を **通る** C2 の
+//   B-spline、tube_ruled は点を直線で結ぶ折れ線。
+//   ⚠ **`tube` は occt だけが持つ op**。⇒ この関数は列の末尾で occt を **必須** として宣言して
+//     あるので、呼んだ時点で occt が**自動でロードされる**。入っていないビルドでは
+//     「no module named 'occt'」で落ちる (黙って折れ線版に化けることは無い)。
+//   ⚠⚠ **次元の扱いが tube_fw_ruled と違う**。tube は occt 単独の op で突き合わせる相手が
+//     居ないため、2D の点列 [[x,y],…] を **z=0 の 3D として**受ける ⇒ 返るのは
+//     *帯ではなく平たい立体*。帯が欲しいなら tube_fw_ruled を使うこと
+//     (そちらは 2D 点列で 2D の領域を返す。なお occt の tube_ruled は 3D 専用で、
+//      2D 点列は明示エラー)。
+//   ⚠ w は「幅」であって半径ではない (半径は w/2)。実数で渡すこと。
+var tube_fw = \(pts, w) {
+    // 使う op = tube のみ。**occt しか提供しない** ⇒ 列は 1 本に絞り、必須として末尾に置く
+    // (which("tube") = occt だけ・2026-09-24)。呼んだ時点でロードされる。
+    use [ module(["occt"], {}) ];
+    tube(map(pts, \(p){ [p, w * 0.5]; }));
+};
 
 // arclen(pts): 点列 pts=[[x,y(,z)],…] の **頭からの累積弧長** を返す。
 //   返り = [0, |p1-p0|, |p1-p0|+|p2-p1|, …, 全長 L]（length は pts と同じ・先頭 0・末尾 L）。

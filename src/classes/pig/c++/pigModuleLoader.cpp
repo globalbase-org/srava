@@ -171,18 +171,38 @@ pigModuleRegistry::resolve_module_file(const char *path) const
 		return std::string();
 	if ( ::strchr(path, '/') != 0 || ::strchr(path, '\\') != 0 )
 		return std::string(path);        /* パス指定はそのまま (相対も呼び手の意図どおり) */
+	std::string found = resolve_module_in_search_path(path);
+	if ( ! found.empty() )
+		return found;
+	return std::string(path);            /* 見つからない → 従来どおり dlopen に投げてエラーを出させる */
+}
 
+/* ★★ #3595: **探索路だけ**を見る解決。見つからなければ **空文字列** を返す。
+ *
+ *   resolve_module_file との違いは 2 つで、どちらも @module(配列, opts)@ (記述子名の列) に要る:
+ *     ① パス枝を持たない — 呼び手は *記述子名* を渡しており、パス指定は受け付けない
+ *     ② 見つからなければ **空** を返す (入力をそのまま返さない) ⇒ 呼び手が「在った / 無かった」を
+ *        区別できる。resolve_module_file は見つからない場合も入力を返すので、後段の dlopen に
+ *        判定を委ねる形になっており、「探索路に無い」を *そこで* 言えない。
+ *
+ *   ⚠ 探索路の走査規則 (後勝ち) は resolve_module_file と **同じ実体**でなければならない
+ *     ⇒ 向こうがこちらを呼ぶ形にしてある (二重帳簿にしない)。 */
+std::string
+pigModuleRegistry::resolve_module_in_search_path(const char *name) const
+{
+	if ( name == 0 || name[0] == '\0' )
+		return std::string();
 	/* dirs_v は走査順 (弱→強)。後勝ちなので **後ろから**見て最初に在ったものが勝者。 */
 	for ( size_t i = dirs_v.size() ; i > 0 ; --i ) {
 		const std::string &dir = dirs_v[i-1].dir;
 		if ( dir.empty() )
 			continue;
-		std::string cand = dir + "/" + path;
+		std::string cand = dir + "/" + name;
 		struct stat st;
 		if ( ::stat(cand.c_str(), &st) == 0 )
 			return cand;
 	}
-	return std::string(path);            /* 見つからない → 従来どおり dlopen に投げてエラーを出させる */
+	return std::string();
 }
 
 /* パスの末尾成分 (ファイル名)。区切りは '/' と '\\' の両方を見る (Windows)。 */

@@ -993,6 +993,14 @@ pig_arity_phrase(int lo, int hi)
  *
  *   ★ 同じモジュールの中で行を OPS 順に先勝ちする規則は **どちらでも変わらない**。
  *
+ *   ★★ **どちらが正常な形か** (ひさ 2026-09-23): **候補列を書くのが原則**である。
+ *     「候補列なし = priority 最大」は *従来どおり* であって *あるべき姿ではない* —
+ *     モジュールは増え続けているので、絞らなければ **その op がどの .so に当たるかは
+ *     ロード順と priority 任せ**になり、書いていないモジュールへ黙って配線されたまま
+ *     値が返る。⇒ 「列に無いモジュールは呼ばれない」は**強すぎる制限ではなく狙い**である。
+ *     絞った結果 op が見つからず落ちるのは、絞り込みが効いている証拠として扱う
+ *     (エラー文は候補を全部並べ、`srava --module-info <name>` を案内する)。
+ *
  *   指名式の型:
  *       テキスト "cgal"   候補列 = [cgal]  (= 従来の onlyModule)。"" は **指名なし**と同一 (#3467)
  *       配列 ["a","b"]    候補列 = その並びそのもの
@@ -1073,14 +1081,21 @@ cand_is_hole(sPtr<pigData> v)
 	return v->get_bool() ? 0 : 1;
 }
 
-/* 1 要素ぶんを積む。★ 段3: ハッシュなら **擬似モジュール**なので名前を引かない。 */
+/* 1 要素の **表示名**。★ 段3: ハッシュなら **擬似モジュール**なので名前を引かない。 */
+static std::string
+cand_elem_name(sPtr<pigData> ev)
+{
+	if ( ev.is_notNull() && ev->obt_hash().is_notNull() ) return std::string("{pseudo}");
+	sPtr<stdString> es = ev.is_notNull() ? ev->get_str() : sPtr<stdString>(thNULL);
+	return es.is_notNull() ? std::string(es->get_str()) : std::string();
+}
+
+/* 1 要素ぶんを積む (列そのものがスカラだった場合に使う)。 */
 static void
 cand_push_elem(pigModCands &o, sPtr<pigData> ev)
 {
 	o.vals.push_back(ev);
-	if ( ev.is_notNull() && ev->obt_hash().is_notNull() ) { o.names.push_back("{pseudo}"); return; }
-	sPtr<stdString> es = ev.is_notNull() ? ev->get_str() : sPtr<stdString>(thNULL);
-	o.names.push_back(es.is_notNull() ? es->get_str() : "");
+	o.names.push_back(cand_elem_name(ev));
 }
 
 /* ★★ #3573 (2026-09-22): 候補列の **入れ子は平坦化**する。
@@ -1104,10 +1119,16 @@ cand_push_elem(pigModCands &o, sPtr<pigData> ev)
  *     エラーにする (捨てると「書いた候補が消える」= 穴と同じ顔になり、追えなくなる)。 */
 #define CAND_MAX_DEPTH 8
 
-static int cand_read_array(sPtr<pigDataArray> ar, pigModCands &out, sPtr<pigData> *errv, int depth);
+static int flatten_cand_array(sPtr<pigDataArray> ar, std::vector<pigCandItem> *out,
+                              sPtr<pigData> *errv, int depth);
 
+/* ★★ #3595: 平坦化の **実体はここ 1 本**。`use` / 指名 / @module(配列)@ が同じ規則で読む
+ *   (理由と分担は pigData.h の @pigCandItem@ を見よ)。
+ *   ⚠ **穴も積む** (hole=1) — 落とすか位置を保つかは *呼び手* が決める。ここで落とすと
+ *     @module(配列)@ が出力を入力と 1:1 にできない。 */
 static int
-cand_read_array(sPtr<pigDataArray> ar, pigModCands &out, sPtr<pigData> *errv, int depth)
+flatten_cand_array(sPtr<pigDataArray> ar, std::vector<pigCandItem> *out,
+                   sPtr<pigData> *errv, int depth)
 {
 	if ( depth > CAND_MAX_DEPTH ) {
 		if ( errv != 0 ) {
@@ -1132,14 +1153,38 @@ cand_read_array(sPtr<pigDataArray> ar, pigModCands &out, sPtr<pigData> *errv, in
 		 *   平坦化した空配列は「要素 0 個」であって穴ではない。 */
 		sPtr<pigDataArray> sub = ev.is_notNull() ? ev->obt_array() : sPtr<pigDataArray>(thNULL);
 		if ( sub.is_notNull() ) {
-			if ( ! cand_read_array(sub, out, errv, depth + 1) ) return 0;
+			if ( ! flatten_cand_array(sub, out, errv, depth + 1) ) return 0;
 			continue;
 		}
-		/* ★ 段5: 穴は **積まない**。⇒ 名前も診断に出ない = 書かなかったのと同じ顔になる。
-		 *   ⚠ 「未ロードだから飛ばす」とは別の枝。未ロード名は names に残って
-		 *     「どれも解決できなかった」の文言に出るが、穴は最初から候補ではない。 */
-		if ( cand_is_hole(ev) ) { ++out.nholes; continue; }
-		cand_push_elem(out, ev);
+		pigCandItem it;
+		it.val    = ev;
+		it.hole   = cand_is_hole(ev);
+		it.pseudo = ( ev.is_notNull() && ev->obt_hash().is_notNull() ) ? 1 : 0;
+		if ( ! it.hole ) it.name = cand_elem_name(ev);
+		out->push_back(it);
+	}
+	return 1;
+}
+
+/* 平坦化の公開口 (pigData.cpp の @module(配列)@ から呼ぶ)。 */
+int
+pig_flatten_cand_array(sPtr<pigDataArray> ar, std::vector<pigCandItem> *out, sPtr<pigData> *errv)
+{
+	return flatten_cand_array(ar, out, errv, 0);
+}
+
+/* 候補列として読む側 — ★ 段5: 穴は **積まない**。⇒ 名前も診断に出ない = 書かなかったのと同じ顔になる。
+ *   ⚠ 「未ロードだから飛ばす」とは別の枝。未ロード名は names に残って「どれも解決できなかった」の
+ *     文言に出るが、穴は最初から候補ではない。 */
+static int
+cand_read_array(sPtr<pigDataArray> ar, pigModCands &out, sPtr<pigData> *errv)
+{
+	std::vector<pigCandItem> items;
+	if ( ! flatten_cand_array(ar, &items, errv, 0) ) return 0;
+	for ( size_t i = 0 ; i < items.size() ; ++i ) {
+		if ( items[i].hole ) { ++out.nholes; continue; }
+		out.vals.push_back(items[i].val);
+		out.names.push_back(items[i].name);
 	}
 	return 1;
 }
@@ -1160,7 +1205,7 @@ read_cand_list(sPtr<pigData> v, pigModCands &out, sPtr<pigData> *errv)
 	sPtr<pigDataArray> ar = mv->obt_array();
 	if ( ar.is_notNull() ) {
 		out.given = 1;
-		if ( ! cand_read_array(ar, out, errv, 0) ) return 0;
+		if ( ! cand_read_array(ar, out, errv) ) return 0;
 		out.nelem = (int)out.vals.size();      /* ★ 段5: 穴を除いた数 (全部穴なら 0 = 空配列と同じ) */
 		return 1;
 	}
@@ -2285,6 +2330,9 @@ pigfModuleAgent_::decide_out_module()
 				}
 				m += "); ";
 			}
+			/* ★ 候補列を絞ると暗黙のキャストも止まる。これは**狙いどおり** — 絞らなければ
+			 *   この値は列に無いモジュールへ黙って渡り、そこでキャストされて値を返す
+			 *   (値が返るので気づく手掛かりが無い)。明示して落とす方を採る。 */
 			m += "qualification narrows the candidates, it does not insert a cast — "
 			     "convert explicitly with cast(<target type>, ...))";
 			err = thNEW(pigDataError,(m.c_str(), _front->get_info(), 1));
@@ -2342,6 +2390,227 @@ pig_modules_by_priority(const sPtr<pigModuleRegistry> &reg, std::vector<int> &ou
  *   ⚠ 2 つの顔は *同じ並びの別表現ではない*。文字列版は **番兵 `delayed` と組込 `pig` も
  *     隠さずに出す** (#3477 の決め) が、配列版は **op 行を持つもの** だけを返す。
  *     ⇒ 「載っているものを全部見せる」道具と「候補列へ渡す値」を分けた。 */
+/* 1 つの値を「候補列として」読む (配列は平坦化 / スカラは 1 要素)。0 = エラー。
+ * ★ @mod_only@ 用。@read_cand_list@ と違い **穴も擬似も落とさずに積む** (落とすのは呼び手)。 */
+static int
+modonly_read(sPtr<pigData> v, std::vector<pigCandItem> *out, sPtr<pigData> *errv)
+{
+	if ( ! v.is_notNull() ) return 1;
+	sPtr<pigData> mv = v->compact();
+	if ( ! mv.is_notNull() ) return 1;
+	if ( mv->is_error() ) { if ( errv != 0 ) *errv = mv; return 0; }
+	sPtr<pigDataArray> ar = mv->obt_array();
+	if ( ar.is_notNull() ) return pig_flatten_cand_array(ar, out, errv);
+	pigCandItem it;
+	it.val    = mv;
+	it.hole   = cand_is_hole(mv);
+	it.pseudo = ( mv->obt_hash().is_notNull() ) ? 1 : 0;
+	if ( ! it.hole ) it.name = cand_elem_name(mv);
+	out->push_back(it);
+	return 1;
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ *  ★★ #3595 の続き (ひさ 2026-09-24): `mod_only(a, b)` — **候補列の積**
+ *
+ *   a のうち b に在る名前だけを **a の順のまま** 返す (= 優先順位を変えずに絞る)。
+ *   ⚠ 穴 (null / 0 / "") は **両辺とも落とす** — 名前で比較できないため。
+ *     a の重複は残す (列は集合ではなく優先順位表)。
+ *   ★★ **a の擬似モジュール (ハッシュ) は a の位置のまま通す** (ひさ 2026-09-25)。
+ *     b 側の擬似は従来どおり落とす (名前が無いので「許す名前」になれない)。
+ *     ⇒ 返るのは「文字列 + 擬似」の配列。
+ *     ⚠ これが無いと **粒度の既定値がライブラリ関数の境界で消える**。実測 (改訂前):
+ *         use [ pm_cgal({seg:64}) ];      op 直呼び          nfaces 384   ← 64 が効く
+ *                                          lib 関数経由       nfaces 192   ← 32 に戻る
+ *                                          擬似なしの対照     nfaces 192   ← 上と同じ
+ *       関数の内側で候補列が置き換わり擬似が居なくなるため。**落ちずに値が返る**ので、
+ *       擬似モジュールリファレンスが警告している「書き漏らしは静かに既定値で通る」と同じ形
+ *       になっていた (spiral の指摘・#3595)。
+ *     ★ 擬似を「対の実モジュールが b に残ったときだけ通す」とはしない — 擬似は
+ *       *呼び手が選んだ粒度* であって、どの実モジュールが生き残るかとは別の軸だから。
+ *   ★ 読み方は候補列と同じ 1 本 (@pig_flatten_cand_array@) を通す ⇒ use / module(配列) と
+ *     入れ子・穴の扱いがずれない。
+ * ═════════════════════════════════════════════════════════════════════ */
+/* 積の本体。a の順のまま、b に在る名前だけを積む。 */
+static sPtr<pigData>
+modonly_apply(const std::vector<pigCandItem> &ai, const std::vector<pigCandItem> &bi, int keepPseudo)
+{
+	sPtr<pigDataArray> out = thNEW(pigDataArray,());
+	for ( size_t i = 0 ; i < ai.size() ; ++i ) {
+		if ( ai[i].hole ) continue;                         /* 穴は書かなかったのと同じ */
+		if ( ai[i].pseudo ) {                               /* ★ 擬似は **位置のまま通す** */
+			if ( keepPseudo ) out->push(ai[i].val);         /* mod_only_names は落とす */
+			continue;
+		}
+		for ( size_t j = 0 ; j < bi.size() ; ++j ) {
+			if ( bi[j].hole || bi[j].pseudo ) continue;
+			if ( ai[i].name == bi[j].name ) { out->push(thNEW(pigDataString,(ai[i].name.c_str()))); break; }
+		}
+	}
+	return out;
+}
+
+/* 比較できる名前 (穴でも擬似でもないもの) が 1 つでもあるか。 */
+static int
+modonly_has_name(const std::vector<pigCandItem> &v)
+{
+	for ( size_t i = 0 ; i < v.size() ; ++i )
+		if ( ! v[i].hole && ! v[i].pseudo ) return 1;
+	return 0;
+}
+
+void
+pigDataOperatorModOnly::_start()
+{
+	if ( args.length() < 2 ) {
+		result = thNEW(pigDataError,("mod_only needs two lists: mod_only(<candidates>, <allowed>)",
+		                             info, PE_FATAL));
+		return;
+	}
+	std::vector<pigCandItem> ai, bi;
+	sPtr<pigData> err;
+	if ( ! modonly_read(args[0], &ai, &err) ) { result = err; return; }
+	if ( ! modonly_read(args[1], &bi, &err) ) { result = err; return; }
+	result = modonly_apply(ai, bi, keep_pseudo());
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ *  ★★ 1 引数形 `mod_only(sup)` (ひさ 2026-09-24) — 左辺を **補う**だけの違い
+ *
+ *      呼び手が `use` で宣言している   → その列 (USE_MODULES) ∩ sup
+ *      呼び手が何も宣言していない      → **modules()** ∩ sup (載っているもの・dispatch 順)
+ *
+ *   ⇒ ライブラリ関数は `use mod_only(sup);` の 1 行で「呼び手の選択を尊重し、交差しなければ
+ *     エラー、何も言われていなければ載っているものから選ぶ」を宣言できる。
+ *   ⚠ 「宣言していない」の判定は **比較できる名前が 1 つも無いこと**。`""` / `null` / `0` /
+ *     `[]` / 全部穴 が全部ここへ落ちる (*未定義* を別扱いしない — 既定値が "" である以上、
+ *     「未定義」と「空」を区別しても読み手に意味がないため)。
+ *   ⚠ 第 1 引数はパーサが埋めた USE_MODULES の **変数参照**。
+ * ═════════════════════════════════════════════════════════════════════ */
+void
+pigDataOperatorModOnlyUse::_start()
+{
+	if ( args.length() < 2 ) {
+		result = thNEW(pigDataError,("mod_only needs a list: mod_only(<supported>)", info, PE_FATAL));
+		return;
+	}
+	std::vector<pigCandItem> ai, bi;
+	sPtr<pigData> err;
+	if ( ! modonly_read(args[0], &ai, &err) ) { result = err; return; }
+	if ( ! modonly_read(args[1], &bi, &err) ) { result = err; return; }
+
+	if ( ! modonly_has_name(ai) ) {
+		/* 宣言なし ⇒ **載っているもの** (modules() と同じ並び = dispatch 順) を左辺にする。 */
+		ai.clear();
+		sPtr<pigModuleRegistry> reg = pig_current_registry();
+		if ( reg == thNULL ) {
+			result = thNEW(pigDataError,("mod_only: no module registry (no app)", info, PE_FATAL));
+			return;
+		}
+		std::vector<int> ids;
+		pig_modules_by_priority(reg, ids);
+		for ( size_t i = 0 ; i < ids.size() ; ++i ) {
+			const char *nm = reg->name_of_id(ids[i]);
+			if ( nm == 0 || nm[0] == '\0' ) continue;
+			pigCandItem it;
+			it.val  = thNEW(pigDataString,(nm));
+			it.name = nm;
+			ai.push_back(it);
+		}
+	}
+	result = modonly_apply(ai, bi, keep_pseudo());
+}
+
+/* ═════════════════════════════════════════════════════════════════════
+ *  ★★ #3595 (ひさ確定仕様 2026-09-24): `use 式;` の **検査**
+ *
+ *   従来 use は純粋なパーサの糖衣 (`var USE_MODULES = 式;`) で、列が正しいかは
+ *   **候補列を実際に引くとき** = 最初の幾何 op の振り分けでしか見られなかった。
+ *   ⇒ その回に幾何 op が 1 つも走らないと、列が丸ごと空振りしていても黙って通る。
+ *
+ *   ここでは **use の行**で同じことを見る。★ op 実行時点の検査は **そのまま残す** (二重)。
+ *
+ *   ⚠⚠ 見るのは「**1 本も解決しない**」ことだけ。`use ["cgal","nosush"]` は cgal が居れば通る
+ *     (「未ロード名は飛ばす」は既存規則・変えない) ⇒ *綴り間違いの検出器ではない*。
+ *   ★ 値は **そのまま返す** (恒等)。束縛は従来どおり pigfAssign が DEF で行うので、
+ *     「ブロック / lambda を抜けると外の値へ戻る」という use の肝は変わらない。
+ *   ★ 判定は @read_cand_list@ + 解決の規則を **振り分けと共有**している。別に書くと、
+ *     use が通したのに op で落ちる (またはその逆) という二重帳簿になる。
+ * ═════════════════════════════════════════════════════════════════════ */
+void
+pigDataOperatorUse::_start()
+{
+	if ( args.length() < 1 ) {
+		result = thNEW(pigDataError,("use needs a module candidate list", info, PE_FATAL));
+		return;
+	}
+	sPtr<pigData> v = args[0]->compact();
+	if ( v->is_error() ) { result = v; return; }
+
+	pigModCands c;
+	sPtr<pigData> cerr;
+	if ( ! read_cand_list(v, c, &cerr) ) { result = cerr; return; }
+	/* ★ `use ""` / `use null` / `use 0` は **指名なしへ戻す**の意 ⇒ 検査するものが無い。
+	 *   ⚠ 列そのものが穴の場合の話で、*要素* の穴 (["", "cgal"]) とは別の枝 (read_cand_list)。 */
+	if ( ! c.given ) { result = v; return; }
+
+	sPtr<pigModuleRegistry> reg = pig_current_registry();
+	if ( reg == thNULL ) {
+		result = thNEW(pigDataError,("use: no module registry (no app)", info, PE_FATAL));
+		return;
+	}
+	/* ★ 解決は振り分けと同じ規則: 擬似モジュール (ハッシュ) は常に解決できた側 /
+	 *   実名は **ロード済み** (id > 0 かつ記述子あり) だけ。op 名は見ない (まだ op が無い)。 */
+	int nres = 0;
+	for ( size_t i = 0 ; i < c.vals.size() ; ++i ) {
+		if ( c.vals[i].is_notNull() && c.vals[i]->obt_hash().is_notNull() ) { ++nres; continue; }
+		int id = reg->id_of_name(c.names[i].c_str());
+		if ( id > 0 && reg->descriptor(id) != 0 ) ++nres;
+	}
+	if ( nres > 0 ) { result = v; return; }
+
+	/* ⓪ 要素が 1 つも無い (空配列 / 全部穴)。文言は振り分け側と揃える。
+	 *   ★★ ただし **列が @mod_only@ から来た**ときは、原因も直し方も別物なので言い分ける:
+	 *     「空の列を書いた」のではなく「**いま効いている列と、この場所が対応する集合が交差しない**」。
+	 *     `""` を書け、という助言はここでは的外れになる (ライブラリ関数の宣言でこの形が普通に出る)。
+	 *   ⚠ 判定は *値* ではなく **引数ノードの種類**で行う — 値 (空配列) からは出どころが分からない。 */
+	{
+		sPtr<pigDataOperatorModOnlyUse> m1 = sPtr<pigDataOperatorModOnlyUse>::d_cast(args[0]);
+		sPtr<pigDataOperatorModOnly>    m2 = sPtr<pigDataOperatorModOnly>::d_cast(args[0]);
+		if ( c.nelem == 0 && ( m1.is_notNull() || m2.is_notNull() ) ) {
+			/* ★ 札は **実際に書かれた op 名**にする。@mod_only_names@ は上の 2 つの派生なので
+			 *   d_cast は両方に当たる ⇒ 先に派生を見ないと文言が `mod_only` に化ける。 */
+			int names = ( sPtr<pigDataOperatorModOnlyNames>::d_cast(args[0]).is_notNull() ||
+			              sPtr<pigDataOperatorModOnlyNamesUse>::d_cast(args[0]).is_notNull() );
+			std::string m = std::string("use ") + ( names ? "mod_only_names" : "mod_only" )
+			    + "(...): none of the modules in effect is supported here "
+			      "(the candidate list in effect and the supported set do not overlap). "
+			      "Either widen the `use` list at the call site, or load a module this code supports "
+			      "(`srava --modules` shows what is loaded)";
+			result = thNEW(pigDataError,(m.c_str(), info, PE_FATAL));
+			return;
+		}
+	}
+	if ( c.nelem == 0 ) {
+		std::string m = "use: the module candidate list is empty (";
+		if ( c.nholes > 0 ) {
+			char nb[96];
+			::snprintf(nb, sizeof nb, "all %d element(s) are holes (null / \"\" / 0) "
+			                          "and were skipped; ", c.nholes);
+			m += nb;
+		}
+		m += "an empty list selects no module; write \"\" to let the planner choose)";
+		result = thNEW(pigDataError,(m.c_str(), info, PE_FATAL));
+		return;
+	}
+	/* ① 書いてはあるが **どれもロードされていない**。 */
+	std::string m = "use (" + cand_names_str(c) + "): no such module is loaded "
+	                "(names that are not loaded are skipped, but here none of them resolved; "
+	                "check them against `srava --modules`, or load them with "
+	                "module([\"<name>\", ...], {}))";
+	result = thNEW(pigDataError,(m.c_str(), info, PE_FATAL));
+}
+
 void
 pigDataOperatorModules::_start()
 {

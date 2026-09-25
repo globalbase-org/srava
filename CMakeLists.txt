@@ -2425,6 +2425,18 @@ set_tests_properties(srava_identity PROPERTIES
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|ERROR|parse error"
   TIMEOUT 30)
 
+# ★★ #3594: stdlib の対 tube_fw / tube_fw_ruled が **別の形**を作ること (背骨が違う)。
+#   ⚠ tube_fw は occt の tube を呼ぶので occt が要る。
+if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_CGAL)
+  add_test(NAME srava_tube_fw
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> tubefw)
+  set_tests_properties(srava_tube_fw PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-tube-fw"
+    PASS_REGULAR_EXPRESSION "TUBEFW_OK"
+    FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+    TIMEOUT 60)
+endif()
+
 # std/curve.sra(arc/bezier/spline/clothoid)。指数表記座標の round-trip も検証。
 add_test(NAME srava_curvelib
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> curvelib)
@@ -3458,6 +3470,16 @@ set_tests_properties(srava_tube2d PROPERTIES
   FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
   TIMEOUT 25)
 
+# ★★★ #3588: tube_ruled の **型スタンプ** (2D の帯が cg-cross2d / mf-cross2d を名乗ること)。
+#   ⚠ 上の srava_tube2d は valid() しか見ないので **このバグが在っても緑だった**。
+add_test(NAME srava_tube2d_type
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> tube2d_type)
+set_tests_properties(srava_tube2d_type PROPERTIES
+  ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_CACHE_DIR=/tmp/srava-tube-2dt"
+  PASS_REGULAR_EXPRESSION "TUBE2DTYPE_OK"
+  FAIL_REGULAR_EXPRESSION "Segmentation|Aborted|core dumped|unknown op|ERROR|parse error"
+  TIMEOUT 25)
+
 # revolve(2D→3D 回転体・全周 360°)+ 閉多様体検証 + 部分角エラー。
 add_test(NAME srava_2d_revolve
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_parse.sh $<TARGET_FILE:srava> revolve)
@@ -3754,6 +3776,81 @@ if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_CGAL)
     FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
     TIMEOUT 180)
 endif()
+# ★★ #3595 (ひさ確定仕様 2026-09-24): `use` を強くする — use の行で候補列を検査し、
+#   `module(配列, opts)` で列をまとめてロードする。★ 不変式
+#   「use module(L,{}) の候補列は use L と完全に同一」まで検定する (test の ⑤)。
+if(SRAVA_MODULE_OCCT AND SRAVA_MODULE_CGAL)
+  add_test(NAME srava_use_list
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_use_list.sh $<TARGET_FILE:srava>)
+  # ⚠ 番犬の予算 — Linux(x86_64) 実測 1.63s (2026-09-24)。★ mac は **未実測**なので、
+  #   既知の機差の上限 (他の本で 9.5 倍) を当てて 15.5s とみなし、その x3 で 45s。
+  #   ⇒ mac 側で実測が取れたら、そちらの値 x3 へ差し替えること (両機を並べて遅い方から取る)。
+  set_tests_properties(srava_use_list PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/uselist-cache;SRAVA_HANG_SECS=45"
+    PASS_REGULAR_EXPRESSION "USE-LIST-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+    TIMEOUT 180)
+endif()
+# ★★ #3595 の応用 (ひさ 2026-09-24): **ライブラリ関数は自分の候補列を関数の頭で宣言する**。
+#   lib/std の幾何を使う関数に `use [サポート…, module([必須],{})]` を入れた。その 4 本が
+#   ①名前が実在 ②呼び手の列に引きずられない (陰性対照つき) ③必須は自動ロード
+#   ④1 本も無ければ use の行で落ちる、を満たすことを見る。
+#   ⚠ ①は宣言に出る **全モジュール**をロードするので、全部建っている構成でのみ意味を持つ。
+if(SRAVA_MODULE_CGAL AND SRAVA_MODULE_MANIFOLD AND SRAVA_MODULE_OCCT AND SRAVA_MODULE_GEOGRAM
+   AND SRAVA_MODULE_CHERCHI AND SRAVA_MODULE_OPENVDB AND SRAVA_MODULE_NEF_HYBRID
+   AND SRAVA_MODULE_PIPEPROX)
+  add_test(NAME srava_lib_use_decl
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_lib_use_decl.sh $<TARGET_FILE:srava>)
+  # ⚠ 番犬の予算 — Linux(x86_64) 実測 0.63s (2026-09-24 ・ 網羅検査 ①-b を足して 0.45→0.63)。
+  #   mac 未実測なので既知の機差の上限 (他の本で 9.5 倍) を当てて 6.0s とみなし、その x3 で 20s。
+  #   mac の実測が出たら差し替える。
+  set_tests_properties(srava_lib_use_decl PROPERTIES
+    ENVIRONMENT "SRAVA_AGENT=$<TARGET_FILE:srava_agent>;SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lib;SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/libusedecl-cache;SRAVA_HANG_SECS=20"
+    PASS_REGULAR_EXPRESSION "LIB-USE-DECL-OK"
+    FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+    TIMEOUT 120)
+endif()
+
+# ★★ #3595 段3: 同梱モジュールは **.so の幹 == 記述子名**。module(配列) の推測生成
+#   (<記述子名> + 拡張子) が立っている前提そのものなので機械で留める。
+#   ★ 較正 (幹を変えた .so を足すと見つかる) をテスト側に同梱してある。
+add_test(NAME srava_module_name_matches_so
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_module_name_matches_so.sh $<TARGET_FILE:srava>)
+# ⚠ 番犬の予算 — Linux(x86_64) 実測 0.36s (2026-09-24)。mac 未実測 ⇒ 上と同じ当て方で 15s。
+set_tests_properties(srava_module_name_matches_so PROPERTIES
+  ENVIRONMENT "SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/namecheck-cache;SRAVA_HANG_SECS=15"
+  PASS_REGULAR_EXPRESSION "MODULE-NAME-MATCHES-SO-OK"
+  FAIL_REGULAR_EXPRESSION "FAIL\\(|Segmentation|Aborted|core dumped|parse error"
+  TIMEOUT 120)
+
+# ★★ すべてのモジュールについて、agent が **C_ARG_END の前に stdin が切れたら終了する**こと。
+#   planner の撤収 (piggyback / in-flight dedup / a4877e7 のキャッシュ HIT) は **wfd を閉じて
+#   EOF で畳む** 一本道なので、ここが塞がると「撤収したつもりの agent が残る」。
+#   ★ 較正をモジュールごとに同梱 — EOF を与えなければ切られるまで生きていること (rc=124) を
+#     先に確かめ、通ったものだけ判定する。ロードに失敗した agent は EOF と無関係に即死するため、
+#     較正が無いと **壊れているモジュールほど緑になる**。
+#   ⚠ 予算 — 実測 71s (22 モジュール ・ Linux x86_64 と macOS arm64 で **同値** ・ 2026-09-25)。
+#     ★ 所要は **固定の待ち (較正 + EOF 後の猶予) が支配的**で、機械の速さにほぼ依らない。
+#       ⇒ 「速い機だから短い」ではないので、**短く返ったら走っていない**と疑ってよい
+#         (飛ばした場合はほぼ即時)。モジュール数には線形に伸びる。
+#   ★ 走れない機では **77 = Skipped** にする (緑でも赤でもない)。2 通りある:
+#       ・Windows (MinGW/MSYS) — shell のパイプ経由の stdin が未対応 (#3600)
+#       ・timeout / gtimeout が無い機 — 較正に打ち切りが要る ⇒ coreutils を入れる
+#     ⚠⚠ PASS_REGULAR_EXPRESSION に skip の印を足してはいけない (**飛ばした検定が緑になる**)。
+#     ★ **SKIP_RETURN_CODE と SKIP_REGULAR_EXPRESSION を両方付ける** — 既存 3 本 (2926/2940/2956)
+#       と同じ形。終了コードと出力のどちらが先に壊れても Skipped に倒れる。⇒ 「2 ファイルに
+#       分かれた commit の中間状態で偽の赤になる」を**運用の注意ではなく機械の性質で消す**
+#       (macMINI 指摘 2026-09-25 ・ 実測: SKIP_REGULAR_EXPRESSION 単独でも PASS に勝つ)。
+add_test(NAME srava_agent_eof_before_end
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_agent_eof_before_end.sh $<TARGET_FILE:srava> $<TARGET_FILE:srava_agent>)
+set_tests_properties(srava_agent_eof_before_end PROPERTIES
+  ENVIRONMENT "SRAVA_MODULE_PATH=${CMAKE_CURRENT_BINARY_DIR};SRAVA_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/agenteof-cache;SRAVA_HANG_SECS=240"
+  PASS_REGULAR_EXPRESSION "AGENT_EOF_OK"
+  SKIP_REGULAR_EXPRESSION "EOF_SKIP"
+  SKIP_RETURN_CODE 77
+  FAIL_REGULAR_EXPRESSION "EOF_FAIL|Segmentation|Aborted|core dumped"
+  TIMEOUT 600)
+
 # ★ 2026-08-28 (ひさ設計): module(so,"off") を実アンロード (dlclose) にした。
 #   未ロードへの off は明示エラー・module_loaded で判定・再ロード可・使用済みは落とせない。
 add_test(NAME srava_module_unload_reload
@@ -5570,7 +5667,11 @@ if(SRAVA_MODULE_CHERCHI)
   # ⚠ Windows (PE) では付けてはいけない: x64 ABI のスタック整列が 16B なのに AVX2 は 32B を
   #   要求するため、cherchi が**実行時に落ちる** (2026-08-28 に MinGW 実機で確認。
   #   volume(box(2,2,2)) すら "agent closed unexpectedly" になり、外すと正しく 8 を返す)。
-  if(SRAVA_CH_HAS_AVX2 AND NOT WIN32
+  #   ⚠⚠ 2026-09-25: 条件が `NOT WIN32` だけだと **Cygwin が漏れる** (CMake は Cygwin で
+  #     WIN32=0)。⇒ Cygwin も **PE を吐く**ので同じ ABI 不整合 (16B 対 32B) に当たる。
+  #     上のコメントが「出力形式で絞る」と言っているのに、判定が OS 側になっていた。
+  #     (いまは SRAVA_MODULE_CHERCHI が Cygwin で OFF なので不発だが、有効化した日に効く)
+  if(SRAVA_CH_HAS_AVX2 AND NOT WIN32 AND NOT CYGWIN
      AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     list(APPEND IRMB_FLAGS -mavx2)
   endif()
@@ -5849,7 +5950,9 @@ if(SRAVA_MODULE_OPENVDB)
     #     へ出すので、build/ のモジュールからは見えず **dlopen が 0xC0000135
     #     (STATUS_DLL_NOT_FOUND) で落ちる** — 2026-09-16 に box で openvdb 系 19 本が道連れになった。
     #   ⇒ ビルドツリーでは srava.exe / モジュールと**同じ dir** へ出す。
-    if(WIN32)
+    #   ⚠ 2026-09-25: `if(WIN32)` だけだと **Cygwin が漏れる**。Cygwin も PE (cygopenvdb.dll) を
+    #     吐くので、同じ dir に置かないと dlopen が落ちる。(いまは OPENVDB が Cygwin で OFF)
+    if(WIN32 OR CYGWIN)
       set_target_properties(openvdb_shared PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     endif()
@@ -6217,6 +6320,7 @@ if(SRAVA_MODULE_OCCT)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaCylinder.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaTorus.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaTube.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaTubeRuled.cpp
     ${OC_TEXT_SRC}   # ★ SRAVA_OCCT_TEXT=OFF なら空 (ocaText.h も生成されない)
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaExtrude.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/occt/c++/ocaRevolve.cpp
@@ -6316,6 +6420,7 @@ if(SRAVA_MODULE_OCCT)
              modules/occt/c++/ocaCylinder.cpp
              modules/occt/c++/ocaTorus.cpp
              modules/occt/c++/ocaTube.cpp
+             modules/occt/c++/ocaTubeRuled.cpp
              ${OC_TEXT_SRC_REL}
              modules/occt/c++/ocaExtrude.cpp
              modules/occt/c++/ocaRevolve.cpp
@@ -7150,7 +7255,10 @@ endif()
 if(SRAVA_MODULE_OCCT)
   # ★★ #3570 段3: occt は segs を **そもそも取らない** (記述子から撤去した) ので none。
   #   以前は 0 (受けるが無視し、検査はする = #3530) だった。
-  srava_add_segs(occt     occt.so     "circle,sphere,cylinder,cone,torus,tube,revolve" "ngon,prism,pyramid" none "")
+  #   ★ #3593: **tube_ruled も並べる** — occt も持つようになったので、「渡すとエラー・省略すると値」
+  #     をここで実地に見る。これが下の segs_coverage の除外の**根拠**になる (除外を申告だけで
+  #     済ませない = 「取らないはず」を実際に確かめる本が在る状態にする)。
+  srava_add_segs(occt     occt.so     "circle,sphere,cylinder,cone,torus,tube,tube_ruled,revolve" "ngon,prism,pyramid" none "")
 endif()
 if(SRAVA_MODULE_CHERCHI)
   srava_add_segs(cherchi  cherchi.so  "sphere,cylinder,cone,torus,tube_ruled" "prism,pyramid" 1 "")
@@ -7173,10 +7281,17 @@ endif()
 add_test(NAME srava_segs_coverage
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/test/srava_segs_coverage.sh
           ${CMAKE_CURRENT_SOURCE_DIR})
+# ⚠ この本は **一括倍率 x10 では届かない** (2026-09-25 実測)。プロセス起動が支配的な本 (木を走査して
+#   1 件ずつ srava を起こす) なので、Windows のプロセス生成の高さと並列の競合が両方乗る:
+#       Linux 単独 0.54s ・ MinGW 単独 25.23s (機差 47 倍) ・ **MinGW -j4 走行 154.38s** (さらに 6.1 倍)
+#   ⇒ 既定 10 秒 x10 = 100 秒では **走行中に鳴く**。予算は負荷込みの値で決める。
+#   ⇒ 番犬 60 (Windows では x10 = 600 ・ box 実測 154.38 の 3 倍を満たす)
+#   ⚠ TIMEOUT は **番犬より大きく**する (同値だと ctest が先に殺して捕獲が 0 枚になる) ⇒ 60 → 120
 set_tests_properties(srava_segs_coverage PROPERTIES
+  ENVIRONMENT "SRAVA_HANG_SECS=60"
   PASS_REGULAR_EXPRESSION "SEGSCOV-OK"
   FAIL_REGULAR_EXPRESSION "FAIL:"
-  TIMEOUT 60)
+  TIMEOUT 120)
 
 if(SRAVA_MODULE_CGAL)
   srava_add_affine2d(cgal cgal.so 1e-9 "space")   # ★ #3526: cgal も 2D を空間に置ける
@@ -7594,14 +7709,48 @@ endforeach()
 #   ⚠ 個々の TIMEOUT には触らない (278 箇所を書き換えると、次に値を決め直すときの
 #     根拠が散る)。**最後に一括で掛ける**。
 #   ★ 倍率は変えられるようにしておく: -DSRAVA_TIMEOUT_SCALE=4 のように指定できる。
+#
+#   ⚠⚠ 【2026-09-25 訂正 2 件】
+#     ① **`if(WIN32)` は Cygwin では偽**。CMake は Cygwin で CYGWIN=1 / WIN32=0 にするので、
+#        Cygwin だけ倍率 1 のまま = **Linux の TIMEOUT で Windows 速度の機械を測っていた**。
+#        MinGW 側の木には倍率が通り、Cygwin の木には通っていなかった。
+#        ⇒ Cygwin では 4 本が TIMEOUT で赤 (commsort / nef_variant_guard /
+#          hangwatch_coverage / segs_coverage)。いずれも **伸ばせば落ちない本**で、
+#          倍率を通したあとは緑になる。
+#        ⇒ Cygwin も **PE を吐く Windows 速度の機械**なので同じ扱いにする。
+#        (機種ごとの所要は社内に置く — このコミットのメッセージと #3587)
+#     ② **番犬の予算 (SRAVA_HANG_SECS) に倍率が通っていなかった。** TIMEOUT だけ 10 倍にしたので、
+#        Windows では「ctest は殺さないが番犬は鳴く」帯ができ、**緑のまま捕獲が溜まる**。
+#        box の実測で数えた (番犬つき 533 本 ・ 予算を書いた本 125 本):
+#            倍率 x1  → 予算不足 **82 本** (既定 10s の 37 + 書いた本の 45)
+#            倍率 x3  → 20 本 ・ x5 → 5 本 ・ **x10 → 1 本**
+#        ⇒ 予算表の個別ミスではなく **倍率が片方だけ通っていなかった**。個々の値は触らず、
+#          TIMEOUT と同じ倍率を **SRAVA_HANG_SCALE で渡し、番犬の側で掛ける**
+#          (こうすると **予算を書いていない 467 本 = 既定 10 秒にも同時に効く**)。
+#        ★ x10 でも残る 1 本 = srava_segs_coverage。個別に予算を書く (下の add_test 側で対応済み)。
+#
+#   ⚠⚠ **既存の build tree は古い倍率を持ち続ける。** `set(... CACHE ...)` は既存のキャッシュ値を
+#     上書きしないので、この変更より前に configure した木では `SRAVA_TIMEOUT_SCALE` が 1 のまま。
+#     ⇒ 上げるには **`cmake -U SRAVA_TIMEOUT_SCALE -U SRAVA_HANG_SCALE -S . -B <dir>`**
+#       (実測: box の build-cyg は素の再 configure では 1 のままで、-U して初めて 10 になった。
+#        新設の SRAVA_HANG_SCALE だけは キャッシュに無いので 10 になり、**片方だけ 10** という
+#        紛らわしい状態になっていた)
+#
+#   ★ 倍率の根拠 (2026-09-25 ・ **同じ条件で並べて**決めた)。
+#     ⚠ 「機械の速さの差」と「並列走行による膨らみ」は **別の要因**で、掛け算になる。
+#       ⇒ 片方だけ見て決めると足りない。実測値は社内に置く (#3587 ・ このコミットのメッセージ)。
+#     ★ 予算は **負荷込みの値**で決める — 番犬が鳴くのは実際の `ctest -j4` の最中だから。
+#       (単独の値で敷くと、本番の走行で鳴きはじめる)
 # ------------------------------------------------------------------
-if(WIN32)
+if(WIN32 OR CYGWIN)
   set(_srava_to_scale_default 10)
 else()
   set(_srava_to_scale_default 1)
 endif()
 set(SRAVA_TIMEOUT_SCALE "${_srava_to_scale_default}" CACHE STRING
-    "ctest の TIMEOUT に掛ける倍率 (Windows の既定 10 = 実測の Linux 比)")
+    "ctest の TIMEOUT に掛ける倍率 (Windows / Cygwin の既定 10)")
+set(SRAVA_HANG_SCALE "${_srava_to_scale_default}" CACHE STRING
+    "番犬の予算 (SRAVA_HANG_SECS) に掛ける倍率。TIMEOUT と揃える (Windows / Cygwin の既定 10)")
 
 if(NOT SRAVA_TIMEOUT_SCALE EQUAL 1)
   set(_srava_to_n 0)
@@ -7616,5 +7765,29 @@ if(NOT SRAVA_TIMEOUT_SCALE EQUAL 1)
   endforeach()
   message(STATUS
     "ctest TIMEOUT: ${_srava_to_n} 本を ${SRAVA_TIMEOUT_SCALE} 倍にした "
-    "(この機械は Linux 比で約 ${SRAVA_TIMEOUT_SCALE} 倍遅いという実測に合わせる)")
+    "(Windows / Cygwin は Linux 用の値では足りないので、この機械向けの既定に合わせる。"
+    "-DSRAVA_TIMEOUT_SCALE=<倍率> で変えられる)")
+endif()
+
+# ★★ 番犬の予算にも同じ倍率を通す (2026-09-25)。
+#   ⚠ 個々の SRAVA_HANG_SECS は **書き換えない** (60 箇所の根拠が散るため・TIMEOUT と同じ方針)。
+#     env を 1 本足して **番犬の側で掛ける** ⇒ 予算を書いていない本 (既定 10 秒) にも効く。
+#   ⚠ SRAVA_HANG_SECS=0 (無効化) は掛けても 0 のまま = 無効のままになる。
+if(NOT SRAVA_HANG_SCALE EQUAL 1)
+  set(_srava_hs_n 0)
+  get_property(_srava_hs_tests DIRECTORY PROPERTY TESTS)
+  foreach(_t IN LISTS _srava_hs_tests)
+    get_test_property(${_t} ENVIRONMENT _srava_hs_env)
+    if(_srava_hs_env)
+      set_tests_properties(${_t} PROPERTIES
+        ENVIRONMENT "${_srava_hs_env};SRAVA_HANG_SCALE=${SRAVA_HANG_SCALE}")
+    else()
+      set_tests_properties(${_t} PROPERTIES
+        ENVIRONMENT "SRAVA_HANG_SCALE=${SRAVA_HANG_SCALE}")
+    endif()
+    math(EXPR _srava_hs_n "${_srava_hs_n} + 1")
+  endforeach()
+  message(STATUS
+    "番犬の予算: ${_srava_hs_n} 本へ SRAVA_HANG_SCALE=${SRAVA_HANG_SCALE} を渡した "
+    "(TIMEOUT と同じ倍率。素の値は書き換えていない)")
 endif()

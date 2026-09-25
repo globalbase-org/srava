@@ -249,7 +249,12 @@ static const pigOpEntry OPS[] = {
 	/* ★★ #3534: **project_flatten** — world の (x,y) を取り z を捨てる = z=0 への直投影。
 	 *   説明は cgatsAgent.cpp の同じ行を参照 (同じ規約の 2 実装・⚠ 片方だけ直さないこと)。 */
 	{ "project_flatten", MEASURE_IN,1, AK_CACHE, OPWIRE(mfaProjectFlatten, mfGeom), 0, "(mf-face3d)->mf-cross2d;(mf-cross2d)->mf-cross2d" },
-	{ "tube_ruled",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaTube),        0, "->mf-mesh3d;->mf-cross2d", 0, 0, 1 },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (#3415・掃引は cgal と共通の common/tube.h) */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	/* ★★★ #3588 (2026-09-23): **出力型ごとに行を分ける** (cgal と同型・理由は cgatsAgent.cpp)。
+	 *   幾何入力を持たない op なので、1 行に 2 つ書くと **必ず先頭が勝ち** 2D が mf-mesh3d を名乗る。
+	 *   ⚠⚠ **2D を先に置く** (3D 側は catch-all)。掃引は cgal と共通の @common/tube.h@ で、
+	 *     次元の決め方 (先頭頂点の位置の長さ) も同じ ⇒ 同じ述語で振り分けられる。 */
+	{ "tube_ruled#mf-cross2d", SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaTube),        0, "->mf-cross2d", 0, 0, 1, &pig_match_path_is_2d },  /* tube_ruled(path, segs): 2D の帯 (#3415) */  /* ★ nreq=1: 以降は省略可 */
+	{ "tube_ruled#mf-mesh3d",  SHAPE2_IN, 2, AK_CACHE, OPWIRE(mfaTube),        0, "->mf-mesh3d",  0, 0, 1, &pig_match_path_is_3d },  /* tube_ruled(path, segs): 3D の掃引立体 (#3415) */  /* ★ nreq=1: 以降は省略可 */
 	{ "color",        MESH1ARG_IN,2, AK_CACHE,OPWIRE(mfaColor, mfGeom),       0, "(mf-mesh3d)->mf-mesh3d" },  /* color(m, c): 頂点プロパティ ch3..5 に RGB。3D 専用 (2D は cgal 同様エラー)。色つき export は 3MF/AMF */
 };
 static const int N_OPS = (int)(sizeof(OPS) / sizeof(OPS[0]));

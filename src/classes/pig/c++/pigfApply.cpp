@@ -122,6 +122,26 @@ TS_STATE(ACT_START)
 	 * レキシカル(定義地点の try)だとそこが効かないため(C++ の例外と同じ直感)。
 	 * ★ ここ(ACT_START)の env はまだ **caller env** なので、その場で引ける。 */
 	if ( env.is_notNull() ) ne->set_try( env->get_try() );
+	/* ★★ #3595 の続き (ひさ 2026-09-24): **USE_MODULES も動的**に引き継ぐ (try と同じ扱い)。
+	 *
+	 *   ⚠ クロージャは @snapshot_into@ で **値捕捉** する (#3450) ので、捕捉 env には
+	 *     *定義時点の* USE_MODULES の写しが入っている。⇒ 何もしないと、ヘルパ lambda は
+	 *     **定義された場所の候補列**で解き、呼び出し側が `use` で敷いた列が届かない。
+	 *     しかも「届くかどうか」は *利用者が include を use の前に書いたか後に書いたか* で
+	 *     変わってしまう (定義が use より後なら捕捉に入る) = 書き順で答えが動く。
+	 *   ★ 直感は try と同じ: ヘルパを外で定義して中で呼ぶのが普通の書き方なので、
+	 *     「いまどのカーネルで解いているか」は **呼び出し元**から引き継ぐのが正しい。
+	 *   ★ 引き継ぐのは **USE_MODULES ただ 1 つ**。他の変数はレキシカルのまま (動的スコープに
+	 *     するわけではない) — 候補列は「その計算をどのカーネルで解くか」という *文脈* であって、
+	 *     値ではないため。
+	 *   ★ 関数が **自分で `use` を書けばそれが勝つ** (body の DEF がこの束縛を覆う)
+	 *     ⇒ ライブラリ関数の宣言 (docs §lib-use-decl) はこの変更後も従来どおり効く。
+	 *   ⚠ @get_var@ は未定義のときエラー値を返すので、**@has_var@ で束縛の有無を見てから**引く
+	 *     (エラー値が入っている場合はそのまま引き継いで伝播させる)。 */
+	if ( env.is_notNull() ) {
+		sPtr<stdString> umn = thNEW(stdString,("USE_MODULES"));
+		if ( env->has_var(umn) ) ne->def_var(umn, env->get_var(umn));
+	}
 	for ( int i = 0 ; i < l->paramc() ; ++i ) {
 		sPtr<pigData> av = args[i+1];
 		if ( av->is_error() ) {            /* caller env で評価(副作用でメモ化)+ エラーなら伝播 */

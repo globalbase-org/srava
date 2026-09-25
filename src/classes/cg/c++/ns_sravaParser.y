@@ -164,6 +164,18 @@ static sPtr<pigData> mk_throw(sPtr<pigData>) { return thNULL; }
 static sPtr<pigData> mk_program(sPtr<pigData>) { return thNULL; }
 #endif
 
+/* ★★ #3595: `use 式;` の **検査つき恒等ノード**。値はそのまま流すが、走った時点で
+ *   「候補列のうち 1 本でもロード済みか」を見る (実装は pigfModuleAgent.cpp)。
+ *   ⚠ pigf に依存しない素の pigData 演算子なので SRAVA_VALUE_ONLY のスタブは要らない。 */
+static sPtr<pigData> mk_use(sPtr<pigData> val) {
+	sPtr<pigDataOperatorUse> n = thNEW(pigDataOperatorUse,());
+	if ( val.is_notNull() ) {
+		n->pushArg(val);
+		if ( val->get_info().is_notNull() ) n->set_info(val->get_info());
+	}
+	return n;
+}
+
 /* 添字/メンバ参照 a[ix] / a.key → pigDataOperatorIndex(base, key)。 */
 static sPtr<pigData> mk_index(sPtr<pigData> base, sPtr<pigData> key) {
 	sPtr<pigDataOperatorIndex> n = thNEW(pigDataOperatorIndex,());
@@ -604,6 +616,41 @@ static sPtr<pigData> mk_call(sPtr<pigData> name, sPtr<pigData> arglist) {
 		if ( na > 1 ) return planner_too_many(nm, 1, na, ci);
 		sPtr<pigDataOperatorModules> f = thNEW(pigDataOperatorModules,(ci));
 		if ( na >= 1 ) f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+		return f;
+	}
+	/* ★★ #3595 の続き: mod_only(a, b) — 候補列の **積** (a の順のまま b に在るものだけ残す)。
+	 *   `use [ mod_only(USE_MODULES, ["manifold","geogram"]), "cgal" ];` と書いて、
+	 *   呼び手の選択を「自分が対応しているカーネル」へ絞り込むのに使う。 */
+	/* ★ mod_only_names(…) — 積の取り方は mod_only と同じで、**擬似も落として名前だけ**返す形
+	 *   (ひさ 2026-09-25)。呼び手の粒度を *意図的に無視して* 自分で制御したいとき用。 */
+	if ( ::strcmp(nm, "mod_only_names") == 0 ) {
+		if ( na > 2 ) return planner_too_many(nm, 2, na, ci);
+		if ( na == 1 ) {
+			sPtr<pigDataOperatorModOnlyNamesUse> f1 = thNEW(pigDataOperatorModOnlyNamesUse,(ci));
+			f1->pushArg(mk_varref(thNEW(pigDataString,("USE_MODULES"))));
+			f1->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+			return f1;
+		}
+		sPtr<pigDataOperatorModOnlyNames> f = thNEW(pigDataOperatorModOnlyNames,(ci));
+		for ( int i = 0 ; i < na && i < 2 ; ++i )
+			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
+		return f;
+	}
+	if ( ::strcmp(nm, "mod_only") == 0 ) {
+		if ( na > 2 ) return planner_too_many(nm, 2, na, ci);
+		/* ★★ 1 引数形 `mod_only(sup)` = 「いま解こうとしている列」∩ sup (ひさ 2026-09-24)。
+		 *   左辺は **USE_MODULES**、それが空なら **modules()** (載っているもの) へ倒す。
+		 *   ⚠ op からは env を引けないので、ここで **USE_MODULES の変数参照**を第 1 引数に埋める。
+		 *     ⇒ 引き当ては呼び出し地点の env で起きる (apply の動的引き継ぎがそのまま効く)。 */
+		if ( na == 1 ) {
+			sPtr<pigDataOperatorModOnlyUse> f1 = thNEW(pigDataOperatorModOnlyUse,(ci));
+			f1->pushArg(mk_varref(thNEW(pigDataString,("USE_MODULES"))));
+			f1->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)0))));
+			return f1;
+		}
+		sPtr<pigDataOperatorModOnly> f = thNEW(pigDataOperatorModOnly,(ci));
+		for ( int i = 0 ; i < na && i < 2 ; ++i )
+			f->pushArg(a->get_ix(thNEW(pigDataInteger,((INTEGER64)i))));
 		return f;
 	}
 	if ( ::strcmp(nm, "type_of") == 0 ) {
@@ -1312,8 +1359,13 @@ stmt(A) ::= IDENT(N) ASSIGN arhs(E) SEMI.
  *     ★ CACHE_DIR / EXIT_CODE が「var を付けるな」なのと **逆**なのはここ: あちらは planner が
  *       *自分の* env を最後に読むので子スコープの定義が届かないが、USE_MODULES は
  *       *使用地点の* env から親へ辿って読まれる。 */
+/* ★★ #3595 (ひさ確定仕様 2026-09-24): 右辺を **検査つきノード**で包む。
+ *   use の行で「列のうち 1 本でもロード済みか」を見て、丸ごと空振りならエラーにする
+ *   (従来は最初の幾何 op の振り分けまで気づけなかった)。
+ *   ⚠ 包むのは **右辺だけ** — 代入そのものは従来の DEF のまま ⇒ ブロック / lambda を
+ *     抜けると外の値へ戻る、という use の肝は変わらない。 */
 stmt(A) ::= USE arhs(E) SEMI.
-		{ A = mk_assign(PIG_ASSIGN_DEF, thNEW(pigDataString,("USE_MODULES")), E); }
+		{ A = mk_assign(PIG_ASSIGN_DEF, thNEW(pigDataString,("USE_MODULES")), mk_use(E)); }
 
 /* 連鎖代入 a = b = c = expr(右結合)。内側 IDENT=... は SET 代入で、評価すると代入先 varref を
  * 返す(pigfAssign の set_result)ので、外側はその値を受け取る → a,b,c すべてに expr の値が入る。

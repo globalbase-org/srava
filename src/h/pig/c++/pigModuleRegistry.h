@@ -299,6 +299,10 @@ public:
 	 *   見つからなければ与えられた文字列をそのまま返す (dlopen 側の明示エラーに委ねる)。
 	 *   load_file が内部で通すので、通常は呼び手が意識する必要はない。 */
 	std::string resolve_module_file(const char *path) const;
+	/* ★★ #3595: **探索路だけ**を見る解決 (パス枝なし・不在は **空文字列**)。
+	 *   @module(配列, opts)@ が記述子名から実ファイルを推測するのに使う。呼び手が不在を
+	 *   *その場で* 言えるように、見つからない場合に入力を返さないのが resolve_module_file との差。 */
+	std::string resolve_module_in_search_path(const char *name) const;
 	/* ★ 既に**ロード済み**のモジュールを .so のファイル名で引き当てる (id・無ければ -1)。
 	 *   ロードは起動時の探索路走査で済んでいるので、module()/load() は普通これに当たる。
 	 *   ファイル名で引くのは、ローダが「1 ファイル名につき dlopen は 1 回」を不変条件に

@@ -27,6 +27,7 @@ build "$HERE/srava_function_reference.md" "srava 関数リファレンス"      
 build "$HERE/srava_module_reference.md"   "srava モジュールリファレンス" srava_module_reference.html
 build "$HERE/srava_pseudo_module_reference.md" "srava 擬似モジュールリファレンス" srava_pseudo_module_reference.html
 build "$HERE/srava_roll_reference.md"     "srava 螺旋巻きつけライブラリ" srava_roll_reference.html
+build "$HERE/srava_include_reference.md"  "srava インクルードライブラリ" srava_include_reference.html
 build "$HERE/srava_module_design.md"      "srava モジュール設計"        srava_module_design.html
 build "$HERE/srava_kwave.md"              "srava → k-Wave 音響シミュレーション" srava_kwave.html
 echo "done."

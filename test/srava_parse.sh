@@ -610,6 +610,22 @@ tube_dedup)
 tube2d)
 	# 2D 次元ディスパッチ: 位置が [x,y] なら可変半幅の帯(cgMesh2D)。valid な単一領域になることを確認。
 	SRAVA_SOURCE="$MCG"'var v = valid(tube_ruled([[[0,0],3],[[20,5],2],[[35,-8],4]])); if (v == 1) { print("TUBE2D_OK"); }' exec "$SRAVA" ;;
+tube2d_type)
+	# ★★★ #3588 の回帰: 2D の帯が **自分の型を正しく名乗る**こと (cgal / manifold の両方)。
+	#   旧: sig 1 行に "->cg-mesh3d;->cg-cross2d" と並べていた。この op は幾何入力を持たない
+	#       (path も segs も値) ので照合できる入力型が無く **必ず先頭の sigline が勝つ** ⇒
+	#       2D の帯まで cg-mesh3d を名乗り、extrude と 2D ブールに拒まれていた。
+	#   ⚠⚠ 上の tube2d は **バグが在っても緑だった** — valid() しか見ておらず、
+	#     幾何は正しく 2D だったため (キャッシュの D_META は 'PLY2')。
+	#     ⇒ *壊れていた所を名指しで見る* 本をここに足す。型 3 つ + extrude が通ること。
+	SRAVA_SOURCE="$MCG$MMF"'var p2 = [[[0,0],3],[[20,5],2],[[35,-8],4]];
+	  var p3 = [[[0,0,0],3],[[20,5,0],2],[[35,-8,0],4]];
+	  var t2 = "cgal"::tube_ruled(p2); var t3 = "cgal"::tube_ruled(p3);
+	  var m2 = "manifold"::tube_ruled(p2);
+	  var e = extrude(t2, 5);
+	  if (type_of(t2) == "cg-cross2d") { if (type_of(t3) == "cg-mesh3d") {
+	  if (type_of(m2) == "mf-cross2d") { if (type_of(e) == "cg-mesh3d") {
+	    print("TUBE2DTYPE_OK"); } } } }' exec "$SRAVA" ;;
 revolve)
 	# 2D→3D 回転体: rect[0,1]x[0,2] を Y 軸 360° → 円柱(半径1高2)。軸接辺は潰れる。66v128f。
 	SRAVA_SOURCE="$MCG"'var mNVF0 = export(revolve(rect(1,2), 360)); print("NVF", nverts(mNVF0), nfaces(mNVF0));' exec "$SRAVA" ;;
@@ -1577,6 +1593,16 @@ curvelib)
 	SRAVA_SOURCE="$MCG"'include "std/curve.sra";
 	var s = polygon(concat(arc(0,0,5,0,1.5707963,12), [[0,0]]));
 	print("CU", length(arc(0,0,5,0,PI,16)), length(bezier([[0,0],[0,10],[10,10],[10,0]],10)), area(s) > 0);' exec "$SRAVA" ;;
+tubefw)
+	# ★★ #3594: stdlib の対 tube_fw / tube_fw_ruled。
+	#   分かれ目は **背骨** — tube_fw は occt の B-spline (角が丸い) ・ tube_fw_ruled は折れ線。
+	#   ⇒ 同じ L 字パスで **体積が違う** ことを見る (同じなら対になっていない)。
+	#   ⚠ tube_fw は occt が要る。占有の確認も兼ねて両方ロードする。
+	SRAVA_SOURCE="$MCG$MOC"'include "std/curve.sra";
+	  var p3 = [[0,0,0],[10,0,0],[10,10,0]];
+	  var a = volume(tube_fw(p3, 2.0));
+	  var b = volume(tube_fw_ruled(p3, 2.0));
+	  if (a > b) { if (a - b > 1.0) { print("TUBEFW_OK"); } }' exec "$SRAVA" ;;
 arrayops)
 	# transpose / cumsum / sum(planner 側・curve の土台)。"AO [[0,10],[1,11],[2,12]] [1,3,6,10] 10"
 	SRAVA_SOURCE='print("AO", transpose([[0,1,2],[10,11,12]]), cumsum([1,2,3,4]), sum([1,2,3,4]));' exec "$SRAVA" ;;

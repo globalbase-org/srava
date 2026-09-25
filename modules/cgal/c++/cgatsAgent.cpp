@@ -301,7 +301,18 @@ static const cgaOpEntry OPS[] = {
 	 *       別物 (断面の列は分解できない) なので、木に分解してはいけない。
 	 *   ★ なめらかな @loft@ は置かない (解析曲面が要る = occt だけ)。 */
 	{ "loft_ruled",   0,          0, AK_CACHE, OPWIRE(cgaLoftRuled, cgMesh), 1, "{cg-cross2d,cg-face3d}...[]->cg-mesh3d" }   /* ★ #3533: 断面は 2 型が混ざる (1 枚目だけ transform 前、等) ので **1 つの集合**で受ける */,
-	{ "tube_ruled",         SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaTube), 0, "->cg-mesh3d;->cg-cross2d", 0, 0, 1 },  /* tube(path, segs): 折れ線まわりの掃引管。次元は path 頂点の長さで決まる (3D=掃引立体 / 2D=帯)。import と同じ多出力注釈 */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
+	/* ★★★ #3588 (2026-09-23): **出力型ごとに行を分ける**。
+	 *   旧: 1 行に "->cg-mesh3d;->cg-cross2d" と並べていた (「import と同じ多出力注釈」のつもり)。
+	 *   ⚠ import と違うのは **行を選ぶマッチ関数が無かった**こと。この op は幾何入力を持たない
+	 *     (path も segs も値) ので、@sig_dispatch@ が照合できる入力型が 1 つも無く
+	 *     **必ず先頭の sigline が勝つ** ⇒ 2D の帯まで cg-mesh3d を名乗り、@extrude@ と
+	 *     2D ブールに拒まれていた (キャッシュの D_META は 'PLY2' = **op は正しく 2D を作っていた**)。
+	 *   ⇒ import と同じ形 (1 行 1 出力型 + マッチ関数) にする。振り分けは **path の次元**。
+	 *   ⚠⚠ **2D を先に置く** — 3D 側は「2D でないもの」を受ける catch-all (壊れた path を
+	 *     op の具体的な診断へ届けるため) なので、逆順だと 2D の行が永久に選ばれない。
+	 *   ★ 計算本体は 2 行とも同じ @cgaTube@。分けているのは *申告* だけ (cast と同じ立て付け)。 */
+	{ "tube_ruled#cg-cross2d", SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaTube), 0, "->cg-cross2d", 0, 0, 1, &pig_match_path_is_2d },  /* tube_ruled(path, segs): 2D 折れ線を半幅 r で太らせた帯 */  /* ★ nreq=1: 以降は省略可 */
+	{ "tube_ruled#cg-mesh3d",  SHAPE2_IN, 2, AK_CACHE, OPWIRE(cgaTube), 0, "->cg-mesh3d",  0, 0, 1, &pig_match_path_is_3d },  /* tube_ruled(path, segs): 3D 折れ線まわりの掃引立体 */  /* ★ nreq=1: 以降は省略可 */
 	{ "revolve",      ROTATE_IN, 3, AK_CACHE, OPWIRE(cgaRevolve, cgMesh), 0, "(cg-cross2d)->cg-mesh3d;(cg-face3d)->cg-mesh3d", 0, 0, 1 },  /* revolve(m,angle,segs): 2D→3D 回転体 */  /* ★ nreq=1: 以降は省略可 (既定は op が入れる) */
 	/* ★2D のみ (#3440 の 2): **3D offset は nef へ移設**した。3D の中身は Minkowski 和
 	 * (Nef + 凸分解) で、他の幾何カーネルの機能を借りて cgal の顔で出していた = モジュール境界の

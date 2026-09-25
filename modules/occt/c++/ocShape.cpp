@@ -54,6 +54,14 @@
 #include	<BRepPrimAPI_MakeCylinder.hxx>
 #include	<BRepPrimAPI_MakeTorus.hxx>
 #include	<Geom_Circle.hxx>
+/* ★ #3593: tube / tube_ruled の共有実体で使う (背骨の補間と掃引)。 */
+#include	<BRepOffsetAPI_MakePipeShell.hxx>
+#include	<GeomAPI_Interpolate.hxx>
+#include	<GeomAPI_ProjectPointOnCurve.hxx>
+#include	<Geom_BSplineCurve.hxx>
+#include	<TColgp_HArray1OfPnt.hxx>
+#include	<BRepBuilderAPI_TransitionMode.hxx>   /* ★ #3593: 折れ線の角の留め継ぎ */
+#include	<gp_Vec.hxx>
 #include	<BRepBuilderAPI_MakeEdge.hxx>
 #include	<BRepBuilderAPI_MakeWire.hxx>
 #include	<gp_Ax2.hxx>
@@ -858,6 +866,268 @@ ocShape::loft_from_args(sArray<sPtr<pigData> > *args, bool ruled,
 		}
 	}
 	return oc_wrap(r);
+}
+
+/* ================================================================================
+ * ★★★ #3593 (2026-09-23): tube / tube_ruled の **共有実体**。
+ *
+ *   もとは ocaTube.cpp の compute() に直書きだったものを、@loft@ / @loft_ruled@ と同じ形
+ *   (ocShape の静的関数 1 本 + @ruled@ フラグ) に括り出した。
+ *   ⇒ 背骨の作り方以外は **1 行も分岐しない** = 2 つの op で判定が割れない。
+ * ================================================================================ */
+
+/* 背骨の自己交差判定。
+ *
+ * ★★ 判定は 2 条件の **積**: 「空間で近い」かつ「**経路上で離れている**」。
+ *   空間距離だけで見ると **曲がった管を誤検知する** (実測: 半径 5 の輪を 32 点で書くと、
+ *   隣の隣の区間が 1 弦 = 0.98 しか離れていないので、管半径 0.5 の和 1.0 を下回って落ちた)。
+ *   管が自分に触れて戻ってくるには最低でも半円 = 経路長 pi*r が要るので、
+ *   **最接近点どうしの経路上の隔たりが pi*r 未満なら「ただの曲がり」**として除外する。
+ *
+ *   U 字 (0,0,0)->(10,0,0)->(10,0.2,0)->(0,0.2,0) は、平行な 2 区間の最接近が
+ *   端どうし (経路上 20.2 隔たり) に出るので正しく捕まる。
+ *
+ * ⚠ 保守的な近似であって厳密判定ではない。B-spline は制御点の折れ線に沿うので、折れ線で
+ *   重なっていればスプラインも重なる (逆は必ずしも成り立たない)。取りこぼしは OCCT 側の
+ *   失敗として現れ、そちらも明示エラーになる。
+ * ★ #3593: **ruled (折れ線の背骨) でもそのまま正しい** — 折れ線そのものを見ているので、
+ *   スプラインのときの「制御点の折れ線に沿う」という近似すら要らなくなる (より厳密な側)。 */
+static bool
+oc_spine_self_intersects(const std::vector<gp_Pnt>& P, const std::vector<double>& R, bool closed)
+{
+	int n = (int)P.size();
+	std::vector<double> arc((size_t)n, 0.0);
+	for ( int i = 1 ; i < n ; ++i ) arc[(size_t)i] = arc[(size_t)i-1] + P[i-1].Distance(P[i]);
+	double total = arc[(size_t)n-1];
+
+	for ( int i = 0 ; i + 1 < n ; ++i )
+	for ( int j = i + 2 ; j + 1 < n ; ++j ) {
+		gp_Vec u(P[i], P[i+1]), v(P[j], P[j+1]), w(P[j], P[i]);
+		double a = u.Dot(u), b = u.Dot(v), c = v.Dot(v), d = u.Dot(w), e = v.Dot(w);
+		double den = a*c - b*b, sp = 0, tp = 0;
+		if ( std::fabs(den) > 1e-14 ) { sp = (b*e - c*d)/den; tp = (a*e - b*d)/den; }
+		else                          { sp = 0; tp = ( c > 1e-14 ) ? e/c : 0; }
+		if ( sp < 0 ) sp = 0; if ( sp > 1 ) sp = 1;
+		if ( tp < 0 ) tp = 0; if ( tp > 1 ) tp = 1;
+		gp_Pnt ps = P[i].Translated(u * sp), pt = P[j].Translated(v * tp);
+		double rr = ( 1.0 - sp )*R[i] + sp*R[i+1] + ( 1.0 - tp )*R[j] + tp*R[j+1];
+		if ( ps.Distance(pt) >= rr ) continue;                 /* 空間で離れている */
+		double si = arc[(size_t)i] + sp*P[i].Distance(P[i+1]);
+		double sj = arc[(size_t)j] + tp*P[j].Distance(P[j+1]);
+		double gap = std::fabs(sj - si);
+		if ( closed && total > 0 && gap > total*0.5 ) gap = total - gap;
+		double rmax = 0.5*rr;                                  /* = 平均半径 */
+		if ( gap < 3.14159265358979323846 * rmax ) continue;   /* ただの曲がり */
+		return true;
+	}
+	return false;
+}
+
+sPtr<ocShape>
+ocShape::tube_from_args(sArray<sPtr<pigData> > *args, bool ruled,
+                        const char **errmsg, char *errbuf, int errbufsz)
+{
+	const char *opn = ruled ? "tube_ruled" : "tube";
+	int na = ( args != 0 ) ? args->length() : 0;
+	sPtr<pigDataArray> path = ( na > 0 ) ? (*args)[0]->obt_array() : sPtr<pigDataArray>();
+	int nraw = path.is_notNull() ? path->length() : 0;
+	if ( nraw < 2 ) { *errmsg = "needs >= 2 path vertices ([[[x,y,z],r],...])"; return sPtr<ocShape>(); }
+
+	/* opts: {closed:1} は閉じた背骨 (srava に真偽値リテラルは無いので 0/1)。
+	 *   ★ #3570 段3: 第 2 引数が **ハッシュのときだけ** occt の行が成立する
+	 *     (記述子のマッチ関数 @oc_match_tube_opts@)。 */
+	bool closed = false;
+	if ( na > 1 && (*args)[1] != thNULL ) {
+		sPtr<pigData> vc = (*args)[1]->get_ix(thNEW(pigDataString,("closed")));
+		if ( vc != thNULL && ! vc->is_error() ) { closed = ( vc->get_int() != 0 ); }
+	}
+
+	/* ---- パス読み取り: 各要素 [位置, r]。★ 2D ([x,y]) は z=0 として受ける (メッシュ系と同じ) ---- */
+	std::vector<gp_Pnt> P; P.reserve((size_t)nraw);
+	std::vector<double> R; R.reserve((size_t)nraw);
+	for ( int i = 0 ; i < nraw ; ++i ) {
+		sPtr<pigDataArray> pr = path->get_ix(thNEW(pigDataInteger,((INTEGER64)i)))->obt_array();
+		if ( ! pr.is_notNull() || pr->length() < 2 ) {
+			*errmsg = "each vertex must be [pos, r] (pos=[x,y,z] or [x,y])"; return sPtr<ocShape>();
+		}
+		sPtr<pigDataArray> pos = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->obt_array();
+		int pl = pos.is_notNull() ? pos->length() : 0;
+		if ( pl < 2 ) { *errmsg = "vertex position must be [x,y,z] or [x,y]"; return sPtr<ocShape>(); }
+		/* ★★★ #3594: **@tube_ruled@ で 2D のパスを受けてはいけない**。
+		 *   @tube_ruled(path)@ の意味は 8 カーネルで確定していて、**位置が [x,y] なら結果は
+		 *   2D の領域 (帯)** である (cg / mf / gg / ch / nf* / vd — 位置の次元で振り分ける)。
+		 *   occt の @tube_ruled@ は常に @oc-brep3d@ を名乗るので、ここで [x,y] を z=0 と
+		 *   読んで掃くと **同じ式がカーネルによって「帯」と「平たい立体」に化ける** —
+		 *   #3588 で直したのとまったく同じ「黙って別のものが返る」形になる。
+		 *   ⇒ **明示エラー**にする。新しい意味を作らない。
+		 *   ⚠ @tube@ (occt 単独の op) は従来どおり [x,y] を z=0 として受ける — あちらは
+		 *     他カーネルに相手が居ないので、突き合わせる規約が無い。
+		 *   ★ 判定は **先頭頂点**で (op の次元振り分けと同じ規則。pig_val_path_dim と揃える)。
+		 *
+		 *   ⚠⚠ **「occt には 2D の帯が作れない」わけではない** — occt は 2D の領域を持てる
+		 *     (@oc-cross2d@ / @oc-face3d@ 型があり rect / circle / polygon / text / 2D の offset を
+		 *      実装済み)。帯そのものも、開いた折れ線ワイヤを @BRepOffsetAPI_MakeOffset@ で
+		 *      両側へオフセットして閉じたワイヤ → 面にすれば作れるはずである。
+		 *     ⇒ ここで断っているのは **能力の限界ではなく、この op がまだ 3D 専用だから**。
+		 *       文言もそう書く (できないと言うと、後で実装する人に「無理だ」と読ませてしまう)。 */
+		if ( ruled && P.empty() && pl < 3 ) {
+			*errmsg = "a 2D path ([[x,y], r], ...) means a 2D band, but occt's tube_ruled is "
+			          "3D-only (it always builds a 3D solid). Use \"cgal\"::tube_ruled or "
+			          "\"manifold\"::tube_ruled for the band, or pass 3D positions ([x,y,z])";
+			return sPtr<ocShape>();
+		}
+		double x = pos->get_ix(thNEW(pigDataInteger,((INTEGER64)0)))->get_flt();
+		double y = pos->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
+		double z = ( pl >= 3 ) ? pos->get_ix(thNEW(pigDataInteger,((INTEGER64)2)))->get_flt() : 0.0;
+		double r = pr->get_ix(thNEW(pigDataInteger,((INTEGER64)1)))->get_flt();
+		if ( !(r > 0) ) {
+			/* ⚠ メッシュ系は r=0 の尖り端を許すが、B-rep の円断面は半径 0 を作れない
+			 *   (退化した Geom_Circle になる)。黙って潰さず明示エラーにする。 */
+			*errmsg = "occt requires every radius > 0 "
+			          "(a zero-radius endpoint degenerates the circular section; "
+			          "use \"cgal\"::tube_ruled / \"manifold\"::tube_ruled for tapered-to-a-point tubes)";
+			return sPtr<ocShape>();
+		}
+		gp_Pnt p(x, y, z);
+		/* 直前と同一点は落とす (スプライン補間が解けない / 折れ線では零長の辺になる)。 */
+		if ( ! P.empty() && p.Distance(P.back()) < 1e-12 ) continue;
+		P.push_back(p); R.push_back(r);
+	}
+	if ( P.size() < 2 ) { *errmsg = "needs >= 2 distinct path vertices"; return sPtr<ocShape>(); }
+
+	if ( oc_spine_self_intersects(P, R, closed) ) {
+		*errmsg = "occt cannot sweep a self-intersecting spine (the pipe would overlap itself). "
+		          "Note this differs from \"cgal\" / \"manifold\", which allow self-intersection "
+		          "and leave it to valid()/repair()";
+		return sPtr<ocShape>();
+	}
+	/* ⚠ **スプライン側だけ**の制限: 閉じた背骨に半径を変えたものは掃けない (下の nsec=1 を参照)。
+	 *   黙って一定にしない。
+	 *   ★ #3593: @tube_ruled@ は MakePipeShell ではなく **ThruSections** で組むので
+	 *     この制限が無い (断面を順に並べるだけなので閉じた輪でも半径を変えられる)。
+	 *     ⇒ 条件を @ruled@ で外す。**能力が違うなら文言も違ってよい**。 */
+	if ( closed && ! ruled ) {
+		for ( size_t i = 1 ; i < R.size() ; ++i )
+			if ( std::fabs(R[i] - R[0]) > 1e-12 ) {
+				*errmsg = "occt cannot vary the radius along a closed spine "
+				          "(closed:1 requires one radius for every vertex); use an open path, "
+				          "or \"cgal\" / \"manifold\"";
+				return sPtr<ocShape>();
+			}
+	}
+
+	/* ---- 各頂点の断面の軸 (接線) ----
+	 * ★★ ruled 側は **cgal / manifold と同じ規則** (src/h/common/tube.h の @tube_frames@):
+	 *   内側の頂点は「入る向き + 出る向き」を正規化した **二等分方向**、端点は片側だけ。
+	 *   ⇒ 角では断面を 1 枚だけ共有する (向きを平均するのであって *位置* は動かさない)。
+	 * ⚠ spline 側は従来どおり曲線の D1 から採る (形を 1 ミリも変えない)。 */
+	TopoDS_Shape out;
+	int stage = 0;          /* 0=spine 1=sections 2=build 3=solid */
+	if ( ! oc_guard([&]{
+		/* 各頂点に置く「半径 R[i] の円」のワイヤ。両方の経路で共通。 */
+		std::vector<TopoDS_Wire> sec;
+		Handle(Geom_BSplineCurve) spine;        /* ruled のときは null のまま */
+		TopoDS_Wire spineW;
+
+		if ( ! ruled ) {
+			/* ---- 背骨: 点を通る C2 の B-spline ---- */
+			Handle(TColgp_HArray1OfPnt) pts = new TColgp_HArray1OfPnt(1, (Standard_Integer)P.size());
+			for ( size_t i = 0 ; i < P.size() ; ++i ) pts->SetValue((Standard_Integer)(i+1), P[i]);
+			GeomAPI_Interpolate interp(pts, closed ? Standard_True : Standard_False, 1e-7);
+			interp.Perform();
+			if ( ! interp.IsDone() ) { stage = -1; return; }
+			spine = interp.Curve();
+			BRepBuilderAPI_MakeEdge me(spine);
+			if ( ! me.IsDone() ) { stage = -1; return; }
+			BRepBuilderAPI_MakeWire mw(me.Edge());
+			if ( ! mw.IsDone() ) { stage = -1; return; }
+			spineW = mw.Wire();
+		}
+
+		stage = 1;
+		/* ★ 閉じた背骨 (closed:1) をスプラインで掃くときは **断面 1 枚**。OCCT の
+		 *   MakePipeShell は閉じた背骨に複数断面を Add すると Build() で
+		 *   Standard_OutOfRange を投げる (実測)。 */
+		size_t nsec = ( !ruled && closed ) ? 1 : P.size();
+		for ( size_t i = 0 ; i < nsec ; ++i ) {
+			gp_Vec tan;
+			if ( ruled ) {
+				gp_Vec in, ou;
+				bool hasIn = ( i > 0 )        || closed;
+				bool hasOu = ( i + 1 < P.size() ) || closed;
+				size_t ip = ( i == 0 ) ? P.size() - 1 : i - 1;
+				size_t io = ( i + 1 ) % P.size();
+				if ( hasIn ) { in = gp_Vec(P[ip], P[i]); if ( in.Magnitude() > 1e-12 ) in.Normalize(); }
+				if ( hasOu ) { ou = gp_Vec(P[i], P[io]); if ( ou.Magnitude() > 1e-12 ) ou.Normalize(); }
+				if      ( hasIn && hasOu ) tan = in + ou;       /* 二等分方向 */
+				else if ( hasOu )          tan = ou;
+				else                       tan = in;
+				/* ⚠ 180 度の折り返し (in ≈ -ou) では和が消える。tube.h と同じく片側を採る。 */
+				if ( tan.Magnitude() < 1e-12 ) tan = hasOu ? ou : in;
+			} else {
+				Standard_Real u = 0;
+				GeomAPI_ProjectPointOnCurve pj(P[i], spine);
+				u = ( pj.NbPoints() > 0 ) ? pj.LowerDistanceParameter() : spine->FirstParameter();
+				gp_Pnt pos;
+				spine->D1(u, pos, tan);
+			}
+			if ( tan.Magnitude() < 1e-12 ) tan = gp_Vec(0,0,1);
+			gp_Ax2 ax(P[i], gp_Dir(tan));
+			Handle(Geom_Circle) c = new Geom_Circle(ax, R[i]);
+			BRepBuilderAPI_MakeEdge ce(c);
+			BRepBuilderAPI_MakeWire cw(ce.Edge());
+			sec.push_back(cw.Wire());
+		}
+
+		stage = 2;
+		if ( ruled ) {
+			/* ★★★ #3593: 折れ線の管は **断面間を線織面でつなぐ** = @loft_ruled@ そのもの。
+			 *   ⇒ @BRepOffsetAPI_ThruSections(solid, ruled=true)@ を使う。
+			 *   ⚠⚠ MakePipeShell では **cgal / manifold と同じ形にならない**。角の処理を
+			 *     OCCT 自身が持っていて、こちらが置いた断面と二重に効くため — 遷移モードを
+			 *     どれに変えても cgal の segs→∞ の極限からは外れる (3 通りとも実測した)。
+			 *     ThruSections はリング間をそのまま線織面で結ぶので、**断面が円か n 角形か
+			 *     だけ**の違いに落ちる。
+			 *   ★ つまり @tube_ruled@ = 「折れ線に沿って置いた円の @loft_ruled@」。
+			 *     occt の中でも 2 つの op が同じ機構を共有することになり、説明が 1 つで済む。 */
+			BRepOffsetAPI_ThruSections mk(Standard_True /* 立体にする */,
+			                              Standard_True /* 線織面 */,
+			                              Precision::Confusion());
+			for ( size_t i = 0 ; i < sec.size() ; ++i ) mk.AddWire(sec[i]);
+			/* ★ closed:1 は **先頭の断面をもう一度足して**輪を閉じる。 */
+			if ( closed && sec.size() >= 2 ) mk.AddWire(sec[0]);
+			mk.Build();
+			if ( ! mk.IsDone() ) { stage = -3; return; }
+			out = mk.Shape();
+		} else {
+			BRepOffsetAPI_MakePipeShell shell(spineW);
+			/* ★ ねじれ最小のフレーム。common/tube.h の rotation-minimizing frame と同じ思想。
+			 *   ⚠ SetMode(IsFrenet) は **false で corrected Frenet** (ねじれ補正あり)。true にすると
+			 *     素の Frenet になり、曲率が消える点で法線が飛んで断面が回ってしまう。 */
+			shell.SetMode(Standard_False);
+			for ( size_t i = 0 ; i < sec.size() ; ++i )
+				shell.Add(sec[i], Standard_False, Standard_False);
+			shell.Build();
+			if ( ! shell.IsDone() )   { stage = -3; return; }
+			stage = 3;
+			if ( ! shell.MakeSolid() ) { stage = -4; return; }
+			out = shell.Shape();
+		}
+	}, errbuf, errbufsz) ) {
+		/* OCCT が例外で落ちた。errbuf に型名とメッセージが入っている。 */
+		*errmsg = "OCCT failed while sweeping the section along the spine";
+		return sPtr<ocShape>();
+	}
+	(void)opn;
+	if      ( stage == -1 ) { *errmsg = "could not interpolate a spline through the path";
+	                          return sPtr<ocShape>(); }
+	else if ( stage == -3 ) { *errmsg = ruled ? "OCCT could not loft the sections along the polyline"
+	                                          : "OCCT could not sweep the section along the spine";
+	                          return sPtr<ocShape>(); }
+	else if ( stage == -4 ) { *errmsg = "swept surface could not be closed into a solid";
+	                          return sPtr<ocShape>(); }
+	if ( out.IsNull() ) { *errmsg = "OCCT produced a null shape"; return sPtr<ocShape>(); }
+	return oc_wrap(out);
 }
 
 sPtr<ocShape>

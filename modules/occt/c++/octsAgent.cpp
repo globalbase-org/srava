@@ -30,6 +30,7 @@
 #include	"oc/c++/ocaCylinder.h"
 #include	"oc/c++/ocaTorus.h"
 #include	"oc/c++/ocaTube.h"
+#include	"oc/c++/ocaTubeRuled.h"   /* ★ #3593 */
 #ifdef SRAVA_OCCT_TEXT
 #include	"oc/c++/ocaText.h"
 #endif
@@ -203,6 +204,14 @@ static const pigOpEntry OPS[] = {
 	 *   厳密な円の断面。**厳密に一致させることはできない** (カーネル一致の表には入れない)。
 	 *   折れ線の管が欲しければ "cgal"::tube(…) と指名する (#3467)。 */
 	{ "tube",         TUBE_IN,   2, AK_CACHE,  OPWIRE(ocaTube),         0, "->" OC_TYPE, 0, 0, 1, &oc_match_tube_opts },  /* ★ #3570 段3: 第 2 引数は **ハッシュのときだけ** (nreq=1 で省略可) */
+	/* ★★★ #3593: **tube_ruled** — 折れ線の背骨 + 厳密な円の断面 (角が尖る)。
+	 *   掃引系は「なめらか / 線織」の対で揃える方針で、loft / loft_ruled は対になっていたのに
+	 *   tube だけ occt が線織版を持たず、@"occt"::tube@ で代用すると *別の形*になっていた
+	 *   (スプラインの背骨が角を丸めるので、角のあるパスでは体積がはっきり膨らむ)。
+	 *   ⚠ 断面は厳密な円のままなので **cgal / manifold の tube_ruled とも一致しない**
+	 *     (背骨は同じ折れ線・断面の近似度が違う) ⇒ カーネル一致の表には入れない。
+	 *   ★ 第 2 引数の扱いは tube と同じ (ハッシュのときだけ = @{closed:1}@)。segs は持たない。 */
+	{ "tube_ruled",   TUBE_IN,   2, AK_CACHE,  OPWIRE(ocaTubeRuled),    0, "->" OC_TYPE, 0, 0, 1, &oc_match_tube_opts },
 	/* ★ #3471: TrueType の字形を **2D の曲線のまま** 取り込む。text(fontPath, str[, size])。
 	 *   fontPath は pigDataFileRef で包まれ、キャッシュキーに **内容ハッシュ**が入る (import と同じ)。 */
 #ifdef SRAVA_OCCT_TEXT

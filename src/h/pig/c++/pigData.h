@@ -21,6 +21,7 @@
  */
 #include <stdint.h>
 #include <vector>                /* P4: pigDataCache の型別 conv body-list */
+#include <string>                /* #3595: pigCandItem.name (候補列の表示名) */
 #include "ts2/c++/ts_types.h"    /* INTEGER64 (tinyState v2: ts2/c/ 廃止→c++/ に inline) */
 #include "ts2/c++/stdObject.h"
 #include "ts2/c++/sPtr.h"
@@ -1152,10 +1153,52 @@ protected:
  *   exec_default: "thread" / "process" (このモジュールの起動方式)
  *   priority:     既定カーネル選択順 (大=優先・**同点の勝敗は不定**)
  * 結果 = モジュール名。DEFAULT_OUTPUT 変数 / SRAVA_INPROC env の置換 (.so 化 Phase 4)。 */
+/* ★★ #3595 (ひさ確定仕様 2026-09-24): **候補列の読み方は 1 本**。
+ *   `use` / モジュール指名 / `module(配列)` は *同じ* 規則で列を読まなければならない —
+ *   確定仕様の不変式 **「use module(L,{}) の候補列は use L と完全に同一 (違いはロードの副作用だけ)」**
+ *   は、読み方が 2 つ在った時点で成立しないため。
+ *   ⇒ 平坦化 (入れ子) ・ 穴の判定 (null / "" / 0) ・ 擬似モジュール (ハッシュ) の判定 ・
+ *     要素のエラー伝播 ・ 深さの上限 は @pig_flatten_cand_array@ (pigfModuleAgent.cpp) に集約し、
+ *     呼び手が違うのは **出てきた列をどう使うか** だけにする:
+ *         use / 振り分け   穴は **落とす** (= 書かなかったのと同じ)
+ *         module(配列)     穴は **その位置に残す** (出力が入力と 1:1 になる)
+ * ⚠ ここで返すのは *読んだ形* だけ。名前をモジュール id へ引くのは呼び手の仕事 (registry が要る)。 */
+struct pigCandItem {
+  sPtr<pigData> val;      /* 要素の値 (compact 済み) */
+  std::string   name;     /* 表示名 (擬似モジュールは "{pseudo}")・穴は空 */
+  int           hole;     /* 1 = 穴 (null / "" / 0)。★ 空配列 [] は **穴ではない** (要素 0 個) */
+  int           pseudo;   /* 1 = 擬似モジュール (ハッシュ) */
+  pigCandItem() : hole(0), pseudo(0) {}
+};
+/* 平坦化した列を out へ積む。0 = 途中でエラー (*errv に値)・1 = 成功。 */
+int pig_flatten_cand_array(sPtr<pigDataArray> ar, std::vector<pigCandItem> *out, sPtr<pigData> *errv);
+
 class pigDataOperatorModule : public pigDataOperator {
 public:
   pigDataOperatorModule(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModule,())); }
+protected:
+  virtual void _start();
+};
+
+/* ★★ #3595: `use 式;` の **検査つきノード**。値はそのまま返す (恒等) が、走った時点で
+ *   候補列を読み、**1 本もロード済みが無ければエラー**にする。
+ *
+ *   ★ なぜ use の行で見るか: 従来この検査は「候補列を実際に引くとき」= 最初の幾何 op の
+ *     振り分けでしか走らなかったので、*その回に幾何 op が 1 つも無い*と列が丸ごと空振りして
+ *     いても黙って通っていた (`use ["nosush"]; print("hello");`)。
+ *   ★ op 実行時点の検査は **そのまま残す** (二重・確定仕様)。あちらは op 名まで知っているので
+ *     「どれもその op を持たない」まで言える。
+ *   ⚠⚠ 捕まえるのは「**丸ごと空振り**」だけ。`use ["cgal","nosush"]` は cgal が居れば **通る**
+ *     (「未ロード名は飛ばす」は既存規則で変えない) ⇒ これは *綴り間違いの検出器ではない*。
+ *   ★ 恒等なので `use` が DEF (var 相当・ブロックを抜けると外の値へ戻る) である性質は変わらない
+ *     — 検査を代入の **右辺**に挟んであるだけで、束縛そのものは従来の pigfAssign が行う。
+ *   ★ 実装は pigfModuleAgent.cpp — 列の読み方 (@read_cand_list@) と解決の規則が
+ *     そこにあり、**振り分けと同じ判定**を使わないと二重帳簿になるため。 */
+class pigDataOperatorUse : public pigDataOperator {
+public:
+  pigDataOperatorUse(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorUse,())); }
 protected:
   virtual void _start();
 };
@@ -1191,6 +1234,76 @@ public:
   virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModules,())); }
 protected:
   virtual void _start();
+};
+
+/* ★★ #3595 の続き (ひさ 2026-09-24): `mod_only(a, b)` — **候補列の積**。
+ *   a のうち **b に在る名前だけ**を、**a の順のまま**返す (= 優先順位を変えずに絞る)。
+ *
+ *   用途は「呼び手が敷いた列を、自分が対応しているカーネルへ絞り込む」:
+ *       use [ mod_only(USE_MODULES, ["manifold","geogram"]), "cgal" ];
+ *         … 呼び手が manifold/geogram を選んでいればそれに従い、そうでなければ cgal で解く
+ *
+ *   ★ 両辺とも候補列と **同じ規則**で読む (入れ子は平坦化 / スカラは 1 要素)。
+ *   ⚠ **擬似モジュール (ハッシュ) と穴 (null / 0 / "") は落とす** — 名前で比較できないため。
+ *     ⇒ 返るのは **文字列だけ**の配列。a の重複はそのまま残す (列は優先順位表であって集合ではない)。
+ *   ★ 実装は pigfModuleAgent.cpp — 列の読み方 (@pig_flatten_cand_array@) を共有するため。 */
+/* ★★ #3595 の続き: `mod_only(sup)` — **1 引数形** (ひさ 2026-09-24)。
+ *   「いま解こうとしている列」∩ sup を返す。左辺の決め方が 1 引数形の肝:
+ *
+ *       呼び手が `use` で **宣言している**   → その列 (= USE_MODULES) ∩ sup
+ *       呼び手が **何も宣言していない**      → **modules()** ∩ sup (= 載っているもの・dispatch 順)
+ *
+ *   ⇒ ライブラリ関数は `use mod_only(sup);` の **1 行**で宣言できる:
+ *       ・呼び手の選択は **尊重**する
+ *       ・選択が自分の対応範囲と **交差しなければエラー** (黙って独断で解かない)
+ *       ・呼び手が何も言っていなければ **載っているもの**から選ぶ (既存のスクリプトはそのまま動く)
+ *
+ *   ★ 実装は 2 引数形と同じ (@pigDataOperatorModOnly@ と本体を共有)。違いは **左辺の補い方**だけ。
+ *   ⚠ パーサが第 1 引数に **`USE_MODULES` の変数参照**を埋める (op からは env を引けないため)。
+ *     その値に比較できる名前が 1 つも無ければ「宣言なし」とみなして modules() へ倒す
+ *     (`""` / `null` / `0` / `[]` / 全部穴 が全部そこへ落ちる = 「未定義」を別扱いしない)。 */
+class pigDataOperatorModOnlyUse : public pigDataOperator {
+public:
+  pigDataOperatorModOnlyUse(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModOnlyUse,())); }
+protected:
+  virtual int   keep_pseudo() const { return 1; }   /* ★ 上の 2 引数形と同じ軸 */
+  virtual void _start();
+};
+
+/* `mod_only_names(sup)` — 1 引数形。**左辺の補い方は @mod_only@ と同一**で、
+ *   違うのは擬似を落とすことだけ (対称にする・ひさ 2026-09-25)。 */
+class pigDataOperatorModOnlyNamesUse : public pigDataOperatorModOnlyUse {
+public:
+  pigDataOperatorModOnlyNamesUse(sPtr<pigInfo> i = thNULL) : pigDataOperatorModOnlyUse(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModOnlyNamesUse,())); }
+protected:
+  virtual int keep_pseudo() const { return 0; }
+};
+
+class pigDataOperatorModOnly : public pigDataOperator {
+public:
+  pigDataOperatorModOnly(sPtr<pigInfo> i = thNULL) : pigDataOperator(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModOnly,())); }
+protected:
+  /* ★ 擬似モジュールを **通すか**。`mod_only` は通す / `mod_only_names` は落とす。
+   *   ⚠ 引数で渡す形は取れない (2 引数形の arity 検査とぶつかる)。メンバに持つ形も取れない
+   *     (@clone()@ の @copy_to@ が運ばない) ⇒ **型で持つ** (ひさ 2026-09-25 ・ 派生で覆う)。 */
+  virtual int   keep_pseudo() const { return 1; }
+  virtual void _start();
+};
+
+/* ★★ #3595 の続き (ひさ 2026-09-25): `mod_only_names(a, b)` — **名前だけ**を返す形。
+ *   @mod_only@ と積の取り方は同じで、違うのは **a 側の擬似モジュールも落とす**ことだけ。
+ *   用途は「ライブラリ関数が呼び手の粒度を *意図的に無視して* 自分で制御したい」場合。
+ *   ⇒ 既定は @mod_only@ (= 呼び手が選んだ粒度を尊重する) で、こちらは**明示的に降りる**口。
+ *   ★ 名前は関数リファレンスの規約「同じ族だが約束が違うなら *元の op 名* + *_修飾*」に沿う。 */
+class pigDataOperatorModOnlyNames : public pigDataOperatorModOnly {
+public:
+  pigDataOperatorModOnlyNames(sPtr<pigInfo> i = thNULL) : pigDataOperatorModOnly(i) {}
+  virtual sPtr<pigData> clone() { return copy_to(thNEW(pigDataOperatorModOnlyNames,())); }
+protected:
+  virtual int keep_pseudo() const { return 0; }
 };
 
 /* type_of(x) — x の **幾何型名**を文字列で返す ("cg-mesh3d" / "mf-mesh3d" / "oc-brep3d" …)。

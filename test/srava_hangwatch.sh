@@ -66,11 +66,48 @@
 #   ⚠ gdb は **設定では解けない** (arm64 の制約)。⇒ 3 段のうち 2 つが使える状態。
 #   ⚠ 番犬が「撮れない」と言い出したら、まず `DevToolsSecurity -status` を見ること。
 _hw_secs="${SRAVA_HANG_SECS:-10}"
+# ★★ 機種倍率 (2026-09-25)。CMake が Windows / Cygwin で SRAVA_HANG_SCALE=10 を渡す。
+#   ⚠⚠ なぜ要るか: 同じ 2026-09-20 の決定で **ctest の TIMEOUT だけ 10 倍**になり、番犬の予算は
+#     素のまま残っていた。⇒ Windows では「ctest は殺さないが番犬は鳴く」帯ができ、
+#     **緑のまま捕獲だけが溜まる** (box の実測: 予算不足 82 本 → 倍率 x10 で 1 本)。
+#   ⚠ 素で走らせたとき (ctest 経由でない手打ち) は 1 = 従来どおり。
+#   ⚠ SRAVA_HANG_SECS=0 (無効化) は掛けても 0 = 無効のまま。
+#   ⚠ 数字でない値が入っていたら **掛けない** (素の値を使う) — 算術で落ちないようにする。
+_hw_scale="${SRAVA_HANG_SCALE:-1}"
+case "${_hw_secs}${_hw_scale}" in
+	*[!0-9]*) ;;                                     # どちらかが数字でない ⇒ 掛けない
+	*)        _hw_secs=$(( _hw_secs * _hw_scale )) ;;
+esac
 if [ "$_hw_secs" != "0" ]; then
   _hw_dir="${SRAVA_HANG_DIR:-/tmp/srava-hang}"
   _hw_pid=$$
   (
-    sleep "$_hw_secs"
+    # ★★ 予算を **丸ごと寝ない** — 親 (テスト本体) の生存を見ながら刻んで待つ (2026-09-25)。
+    #
+    #   ⚠⚠ 以前は `sleep "$_hw_secs"` 一発だった。テストが先に終わると、この子シェルは
+    #     **孤児 (PPID=1) になって予算ぶん残る**。しかも子シェルは **親の cmdline を継ぐ**ので、
+    #     `ps` には `/usr/bin/sh …/test/srava_parse.sh …` **そのものに見える**
+    #     (計算は何もしていないのに)。⇒ 「いまテストが走っているか」を `ps | grep srava` で
+    #     見る側を必ず誤らせる。実際 2026-09-25 に、共有機への install 直前の確認が
+    #     **死骸を走行と数え**、逆に別の者は **走行を死骸と読んで** install を通した
+    #     (SRAVA_HANG_SECS=600 の本なら 10 分残る)。
+    #   ★ trap で後始末する案は採らない — `trap … EXIT` を **自分で張っているテストが 8 本**あり、
+    #     どれも *この source より後*に張るので **黙って上書きされる** (漏れが残るのに気づけない)。
+    #     ⇒ 後始末は **番犬の側**で完結させる。
+    #   ★ 刻みを 5 秒にしているのは、番犬自身の CPU を増やさないため — 判定は
+    #     「一族の CPU が進んでいないか」で行うので、**番犬自身の起床が多いと止まっている本が
+    #     動いているように見える** (MSYS では実測で +31 jiffies)。
+    #   ⚠ 予算が整数でない書き方をされたら、従来どおり丸ごと寝る (刻めないため)。
+    case "$_hw_secs" in
+      ''|*[!0-9]*) sleep "$_hw_secs" ;;
+      *)
+        _hw_left="$_hw_secs"
+        while [ "$_hw_left" -gt 0 ]; do
+          kill -0 "$_hw_pid" 2>/dev/null || exit 0     # 親が終わった = 番犬の役目も終わり
+          if [ "$_hw_left" -gt 5 ]; then sleep 5; _hw_left=$(( _hw_left - 5 ));
+          else                          sleep "$_hw_left"; _hw_left=0; fi
+        done ;;
+    esac
     kill -0 "$_hw_pid" 2>/dev/null || exit 0
     # ⚠ PID 使い回しの誤爆よけ: 中身が本当にこのテストか確かめる
     # ⚠ PID 使い回しの誤爆よけ。/proc が無い環境 (macOS) では ps で代用する。
